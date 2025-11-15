@@ -5,6 +5,9 @@ const fs = require('fs');
 
 const isDev = !app.isPackaged;
 
+const LOCK_DURATION_MS = 20000; // 20 seconds
+
+
 // ---- data paths ----
 const DATA_FILE_DEFAULT = path.join(app.getPath('userData'), 'outstanding_items.json');
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
@@ -60,6 +63,24 @@ function startWatching(win) {
     }
   });
 }
+
+function cleanExpiredLocks(items) {
+  const now = Date.now();
+  let changed = false;
+  const cleaned = items.map((it) => {
+    if (it.lock_expires_at && it.lock_expires_at < now) {
+      const { lock_expires_at, ...rest } = it;
+      changed = true;
+      return rest;
+    }
+    return it;
+  });
+  return { items: cleaned, changed };
+}
+
+
+
+
 
 // ---- window ----
 let win = null;
@@ -156,3 +177,82 @@ ipcMain.handle('items:use-default', () => {
   if (win && !win.isDestroyed()) win.webContents.send('items:updated', readItems());
   return { ok: true, path: getDataFile() };
 });
+
+
+// Acquire a 20s lock on a specific item
+ipcMain.handle('items:lock-item', (_evt, uid) => {
+  let items = readItems();
+  const { items: cleaned, changed } = cleanExpiredLocks(items);
+  if (changed) {
+    items = cleaned;
+    writeItems(items);
+  }
+
+  const idx = items.findIndex((it) => it.uid === uid);
+  if (idx === -1) {
+    return { ok: false, reason: 'not-found' };
+  }
+
+  const it = items[idx];
+  const now = Date.now();
+
+  if (it.lock_expires_at && it.lock_expires_at > now) {
+    // Someone else holds a valid lock
+    return { ok: false, reason: 'locked' };
+  }
+
+  const lock_expires_at = now + LOCK_DURATION_MS;
+  items[idx] = { ...it, lock_expires_at };
+  writeItems(items);
+
+  return { ok: true, item: items[idx], lock_expires_at };
+});
+
+// Apply an edit to a locked item and remove the lock
+ipcMain.handle('items:apply-edit', (_evt, uid, patch) => {
+  let items = readItems();
+  const { items: cleaned, changed } = cleanExpiredLocks(items);
+  if (changed) {
+    items = cleaned;
+    writeItems(items);
+  }
+
+  const idx = items.findIndex((it) => it.uid === uid);
+  if (idx === -1) {
+    return { ok: false, reason: 'not-found' };
+  }
+
+  const it = items[idx];
+  const now = Date.now();
+
+  if (!it.lock_expires_at || it.lock_expires_at < now) {
+    // Lock expired or never existed
+    return { ok: false, reason: 'lock-expired' };
+  }
+
+  // Don’t keep the lock field in the final saved item
+  const { lock_expires_at, ...rest } = it;
+  const updated = { ...rest, ...(patch || {}) };
+  items[idx] = updated;
+
+  writeItems(items);
+  return { ok: true, item: updated };
+});
+
+// Optional: manual lock release (e.g., user cancels)
+ipcMain.handle('items:release-lock', (_evt, uid) => {
+  let items = readItems();
+  const idx = items.findIndex((it) => it.uid === uid);
+  if (idx === -1) return { ok: false, reason: 'not-found' };
+
+  const it = items[idx];
+  if (!it.lock_expires_at) {
+    return { ok: true, released: false }; // nothing to do
+  }
+
+  const { lock_expires_at, ...rest } = it;
+  items[idx] = rest;
+  writeItems(items);
+  return { ok: true, released: true };
+});
+

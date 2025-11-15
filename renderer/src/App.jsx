@@ -14,11 +14,22 @@ import {
   makeUid,
 } from "./utils/inventory";
 
+
+
+
 export default function App() {
   const [bubbles, setBubbles] = useState(DEFAULT_BUBBLES);
   const [items, setItems] = useState([]);
   const [expanded, setExpanded] = useState({});
   const [newBubbleName, setNewBubbleName] = useState("");
+
+  const [editingItemUid, setEditingItemUid] = useState(null);
+  const [editingDraft, setEditingDraft] = useState(null);
+
+  const editingItemUidRef = useRef(null);
+  useEffect(() => {
+    editingItemUidRef.current = editingItemUid;
+  }, [editingItemUid]);
 
   // local edit buffer for allocated_for
   const [editingAllocatedFor, setEditingAllocatedFor] = useState({});
@@ -44,7 +55,33 @@ export default function App() {
       ensureBubblesForItems(norm, setBubbles);
     });
 
+    // const off = api.onItemsUpdated((arr) => {
+    //   if (isEditingAnythingRef.current) {
+    //     console.log("[ipc] items:updated ignored (user is editing)");
+    //     return;
+    //   }
+
+    //   const norm = normalizeItems(arr || []);
+    //   setItems((prev) => {
+    //     const merged = mergeItems(prev, norm);
+    //     const prevStr = JSON.stringify(prev);
+    //     const mergedStr = JSON.stringify(merged);
+    //     if (mergedStr === prevStr) {
+    //       lastSavedRef.current = mergedStr;
+    //       return prev;
+    //     }
+    //     lastSavedRef.current = mergedStr;
+    //     ensureBubblesForItems(merged, setBubbles);
+    //     return merged;
+    //   });
+    // });
     const off = api.onItemsUpdated((arr) => {
+      // If a modal edit is open, ignore external changes
+      if (editingItemUidRef.current) {
+        console.log("[ipc] items:updated ignored (modal editing)");
+        return;
+      }
+
       if (isEditingAnythingRef.current) {
         console.log("[ipc] items:updated ignored (user is editing)");
         return;
@@ -64,6 +101,7 @@ export default function App() {
         return merged;
       });
     });
+
 
     return () => off && off();
   }, []);
@@ -85,6 +123,16 @@ export default function App() {
 
     return () => clearTimeout(id);
   }, [items]);
+
+
+  useEffect(() => {
+    if (!editingItemUid) return;
+    const timer = setTimeout(() => {
+      alert("Edit timed out after 20 seconds. Changes were not saved.");
+      handleCancelEdit();
+    }, 20000);
+    return () => clearTimeout(timer);
+  }, [editingItemUid]);
 
   // === Helpers ===
   function updateItemByKey(uid, patch) {
@@ -186,6 +234,73 @@ export default function App() {
   function handleFieldBlur() {
     isEditingAnythingRef.current = false;
   }
+
+  async function handleStartEdit(item) {
+    try {
+      const res = await api.lockItem(item.uid);
+      if (!res?.ok) {
+        if (res?.reason === "locked") {
+          alert("This item is currently being edited by another user.");
+        } else {
+          alert("Could not start editing this item.");
+        }
+        return;
+      }
+
+      // Lock acquired; open modal with a local draft
+      setEditingItemUid(item.uid);
+      setEditingDraft({ ...item }); // or pick only fields you want editable
+    } catch (e) {
+      console.error("lockItem error", e);
+      alert("Error starting edit.");
+    }
+  }
+
+  async function handleSaveEdit() {
+    if (!editingItemUid || !editingDraft) return;
+    try {
+      const res = await api.applyEdit(editingItemUid, editingDraft);
+      if (!res?.ok) {
+        if (res?.reason === "lock-expired") {
+          alert("Your edit timed out (>20s). Please reopen the editor.");
+        } else {
+          alert("Could not save changes.");
+        }
+        // Close modal and let next fs.watch refresh bring us up-to-date
+        setEditingItemUid(null);
+        setEditingDraft(null);
+        return;
+      }
+
+      // Update local items so UI reflects immediately
+      setItems((prev) => {
+        const next = prev.map((it) =>
+          it.uid === editingItemUid ? res.item : it
+        );
+        lastSavedRef.current = JSON.stringify(next);
+        return next;
+      });
+
+      setEditingItemUid(null);
+      setEditingDraft(null);
+    } catch (e) {
+      console.error("applyEdit error", e);
+      alert("Error saving changes.");
+    }
+  }
+
+  async function handleCancelEdit() {
+    if (editingItemUid) {
+      try {
+        await api.releaseLock(editingItemUid);
+      } catch (e) {
+        console.error("releaseLock error", e);
+      }
+    }
+    setEditingItemUid(null);
+    setEditingDraft(null);
+  }
+
 
   return (
     <div className="min-h-screen w-full bg-gradient-to-br from-fuchsia-100 via-sky-100 to-emerald-100">
@@ -301,10 +416,87 @@ export default function App() {
               onAllocatedForBlur={handleAllocatedForBlur}
               onFieldFocus={handleFieldFocus}
               onFieldBlur={handleFieldBlur}
+              onEditItem={handleStartEdit}  
             />
           ))}
         </section>
       </div>
+            {editingDraft && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-xl">
+            <h2 className="text-xl font-semibold text-slate-800 mb-4">
+              Edit Item
+            </h2>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm text-slate-600 mb-1">
+                  Allocated For
+                </label>
+                <input
+                  className="w-full border rounded-xl px-3 py-2"
+                  value={editingDraft.allocated_for || ""}
+                  onChange={(e) =>
+                    setEditingDraft((d) => ({
+                      ...d,
+                      allocated_for: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-slate-600 mb-1">
+                  Allocated To (bubble)
+                </label>
+                <input
+                  className="w-full border rounded-xl px-3 py-2"
+                  value={editingDraft.allocated_to || ""}
+                  onChange={(e) =>
+                    setEditingDraft((d) => ({
+                      ...d,
+                      allocated_to: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm text-slate-600 mb-1">
+                  Notes
+                </label>
+                <textarea
+                  className="w-full border rounded-xl px-3 py-2"
+                  rows={3}
+                  value={editingDraft.notes1 || ""}
+                  onChange={(e) =>
+                    setEditingDraft((d) => ({
+                      ...d,
+                      notes1: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+            </div>
+
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                onClick={handleCancelEdit}
+                className="px-4 py-2 rounded-xl border text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveEdit}
+                className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

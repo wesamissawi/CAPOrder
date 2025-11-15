@@ -21,4 +21,9 @@ contextBridge.exposeInMainWorld('api', {
   revealDataFile: () => ipcRenderer.invoke('items:reveal'),
   chooseItemsFile: () => ipcRenderer.invoke('items:choose-file'),
   useDefaultFile: () => ipcRenderer.invoke('items:use-default'),
+
+    // locking
+  lockItem: (uid) => ipcRenderer.invoke('items:lock-item', uid),
+  applyEdit: (uid, patch) => ipcRenderer.invoke('items:apply-edit', uid, patch),
+  releaseLock: (uid) => ipcRenderer.invoke('items:release-lock', uid),
 });

@@ -19,6 +19,7 @@ export default function BubbleColumn({
   onAllocatedForBlur,
   onFieldFocus,
   onFieldBlur,
+  onEditItem,
 }) {
   const { id, name, notes } = bubble;
   const list = items || [];
@@ -88,6 +89,17 @@ export default function BubbleColumn({
               >
                 {expanded[itemKey(it)] ? "Collapse" : "Expand"}
               </button>
+                
+              <button
+                onClick={() => onEditItem(it)}
+                disabled={it.lock_expires_at && it.lock_expires_at > Date.now()}
+                className="text-xs px-2 py-1 rounded-lg bg-sky-600 text-white disabled:bg-gray-300"
+                >
+                {it.lock_expires_at && it.lock_expires_at > Date.now()
+                    ? "Being edited..."
+                    : "Edit"}
+              </button>
+              
             </div>
 
             {expanded[itemKey(it)] && (

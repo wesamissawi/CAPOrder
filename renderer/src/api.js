@@ -8,6 +8,15 @@ const fallbackApi = {
   revealDataFile: async () => ({ ok: false }),
   chooseItemsFile: async () => ({ ok: false }),
   useDefaultFile: async () => ({ ok: false }),
+
+
+
+  // NEW ---- locking fallbacks
+  lockItem: async () => ({ ok: false, reason: "not-electron" }),
+  applyEdit: async () => ({ ok: false, reason: "not-electron" }),
+  releaseLock: async () => ({ ok: false }),
+
+
 };
 
 const api = window.api ?? fallbackApi;
