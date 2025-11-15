@@ -1,118 +1,100 @@
 // main.js
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const isDev = !app.isPackaged;
-const DATA_FILE = path.join(app.getPath('userData'), 'outstanding_items.json');
 
-function ensureDataFile() {
-  if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, '[]', 'utf-8');
-  }
-}
-
-function readItems() {
-  ensureDataFile();
-  try {
-    const raw = fs.readFileSync(DATA_FILE, 'utf-8');
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeItems(items) {
-  ensureDataFile();
-  fs.writeFileSync(DATA_FILE, JSON.stringify(items ?? [], null, 2), 'utf-8');
-}
-
-let win;
-
+// ---- data paths ----
+const DATA_FILE_DEFAULT = path.join(app.getPath('userData'), 'outstanding_items.json');
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
+const PRELOAD = path.resolve(__dirname, 'preload.js');
+
+// ---- log preload path exists ----
+console.log('[main] preload path =', PRELOAD, 'exists?', fs.existsSync(PRELOAD));
+
+// ---- data helpers ----
 let dataFileOverride = null;
 let watcher = null;
 
 function readConfig() {
-  try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
-    }
-  } catch {}
+  try { if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')); } catch {}
   return {};
 }
-
 function writeConfig(cfg) {
+  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8'); } catch (e) { console.error('[config write]', e); }
+}
+function getDataFile() {
+  return dataFileOverride || DATA_FILE_DEFAULT;
+}
+function ensureDataFileAt(file) {
+  if (!fs.existsSync(file)) fs.writeFileSync(file, '[]', 'utf-8');
+}
+function readItemsAt(file) {
+  ensureDataFileAt(file);
   try {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8');
+    const raw = fs.readFileSync(file, 'utf-8');
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
   } catch (e) {
-    console.error('[config write error]', e);
+    console.error('[readItemsAt]', e);
+    return [];
   }
 }
-
-function getDataFile() {
-  return dataFileOverride || DATA_FILE;
+function writeItemsAt(file, items) {
+  ensureDataFileAt(file);
+  fs.writeFileSync(file, JSON.stringify(items ?? [], null, 2), 'utf-8');
 }
+function readItems() { return readItemsAt(getDataFile()); }
+function writeItems(items) { return writeItemsAt(getDataFile(), items); }
 
 function startWatching(win) {
   const file = getDataFile();
-  try {
-    if (watcher) watcher.close();
-  } catch {}
+  try { if (watcher) watcher.close(); } catch {}
   ensureDataFileAt(file);
   watcher = fs.watch(file, { persistent: false }, () => {
-    try {
-      const arr = readItemsAt(file);
-      win?.webContents.send('items:updated', arr);
-    } catch (e) {
-      console.error('[watch read error]', e);
+    const arr = readItems();
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('items:updated', arr);
+      console.log('[main] watch -> items:updated', arr.length);
     }
   });
 }
 
-function ensureDataFileAt(filePath) {
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, '[]', 'utf-8');
-  }
-}
-
-function readItemsAt(filePath) {
-  ensureDataFileAt(filePath);
-  try {
-    const raw = fs.readFileSync(filePath, 'utf-8');
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeItemsAt(filePath, items) {
-  ensureDataFileAt(filePath);
-  fs.writeFileSync(filePath, JSON.stringify(items ?? [], null, 2), 'utf-8');
-}
-
-// keep your originals but make them use the helpers
-function ensureDataFile() { ensureDataFileAt(getDataFile()); }
-function readItems()      { return readItemsAt(getDataFile()); }
-function writeItems(items){ return writeItemsAt(getDataFile(), items); }
-
-
-
-
-
+// ---- window ----
+let win = null;
 
 async function createWindow() {
+  // restore any saved custom data file path
+  const cfg = readConfig();
+  if (cfg.dataFile && typeof cfg.dataFile === 'string') {
+    dataFileOverride = cfg.dataFile;
+  }
+
   win = new BrowserWindow({
     width: 1280,
     height: 900,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: PRELOAD,            // must exist beside main.js
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: false,              // TEMP for easier debugging; set true later
+    },
+  });
+
+  // lifecycle logs
+  win.webContents.on('did-finish-load', () => {
+    console.log('[main] did-finish-load');
+    // initial push (never before this)
+    const arr = readItems();
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('items:updated', arr);
+      console.log('[main] initial items sent:', Array.isArray(arr) ? arr.length : arr);
     }
+  });
+
+  win.webContents.on('preload-error', (_e, preloadPath, error) => {
+    console.error('[main] preload-error at', preloadPath, error);
   });
 
   if (isDev) {
@@ -122,101 +104,30 @@ async function createWindow() {
     await win.loadFile(path.join(__dirname, 'renderer', 'dist', 'index.html'));
   }
 
-
-
-  // Load persisted dataFile override if present
-  const cfg = readConfig();
-  if (cfg.dataFile && typeof cfg.dataFile === 'string') {
-    dataFileOverride = cfg.dataFile;
-  }
-  console.log('[data file]', getDataFile());
-
-  // start watcher for live updates
+  console.log('[main] data file =', getDataFile());
   startWatching(win);
-
-
-
-  // Optional: watch for external edits and notify the renderer
-  // console.log("not sure if I need this line below")
-  // ensureDataFile();
-  // fs.watch(DATA_FILE, { persistent: false }, () => {
-  //   if (win && !win.isDestroyed()) {
-  //     const arr = readItems();
-  //     win.webContents.send('items:updated', arr);
-  //   }
-  // });
-
-  
-
-
 }
 
 app.whenReady().then(createWindow);
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
-
-const { shell } = require('electron');
-
-// Report the current path
-ipcMain.handle('items:get-path', () => {
-  return { path: getDataFile() };
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
-// Reveal in Finder
-ipcMain.handle('items:reveal', () => {
-  const file = getDataFile();
-  if (fs.existsSync(file)) shell.showItemInFolder(file);
-  return { ok: true };
-});
-
-// Choose a new JSON file
-ipcMain.handle('items:choose-file', async () => {
-  const res = await dialog.showOpenDialog({
-    title: 'Choose items JSON',
-    properties: ['openFile'],
-    filters: [{ name: 'JSON', extensions: ['json'] }]
-  });
-  if (res.canceled || !res.filePaths?.[0]) return { ok: false, canceled: true };
-
-  dataFileOverride = res.filePaths[0];
-
-  // persist selection
-  const cfg = readConfig();
-  cfg.dataFile = dataFileOverride;
-  writeConfig(cfg);
-
-  // restart watcher and push fresh data
-  startWatching(win);
-  const arr = readItems();
-  win?.webContents.send('items:updated', arr);
-  return { ok: true, path: dataFileOverride };
-});
-
-ipcMain.handle('items:use-default', () => {
-  dataFileOverride = null;
-  const cfg = readConfig();
-  delete cfg.dataFile;
-  writeConfig(cfg);
-  startWatching(win);
-  const arr = readItems();
-  win?.webContents.send('items:updated', arr);
-  return { ok: true, path: getDataFile() };
-});
-
-
-// IPC: read
-ipcMain.handle('items:read', () => {
-  return readItems();
-});
-
-// IPC: write
+// ---- IPC ----
+ipcMain.handle('items:read', () => readItems());
+// ipcMain.handle('items:write', (_evt, items) => { writeItems(items); return { ok: true }; });
 ipcMain.handle('items:write', (_evt, items) => {
-  writeItems(items);
+  const file = getDataFile();
+  const current = readItems();                // existing array
+  const a = JSON.stringify(current);
+  const b = JSON.stringify(items ?? []);
+  if (a !== b) writeItems(items);             // only write if actually different
   return { ok: true };
 });
-
-// IPC: export via Save Dialog
 ipcMain.handle('items:export', async (_evt, items) => {
   const { canceled, filePath } = await dialog.showSaveDialog({
     title: 'Export updated items',
@@ -226,4 +137,22 @@ ipcMain.handle('items:export', async (_evt, items) => {
   if (canceled || !filePath) return { ok: false, canceled: true };
   fs.writeFileSync(filePath, JSON.stringify(items ?? [], null, 2), 'utf-8');
   return { ok: true, filePath };
+});
+ipcMain.handle('items:get-path', () => ({ path: getDataFile() }));
+ipcMain.handle('items:reveal', () => { const f = getDataFile(); if (fs.existsSync(f)) shell.showItemInFolder(f); return { ok: true }; });
+ipcMain.handle('items:choose-file', async () => {
+  const res = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'JSON', extensions: ['json'] }] });
+  if (res.canceled || !res.filePaths?.[0]) return { ok: false, canceled: true };
+  dataFileOverride = res.filePaths[0];
+  const cfg = readConfig(); cfg.dataFile = dataFileOverride; writeConfig(cfg);
+  startWatching(win);
+  if (win && !win.isDestroyed()) win.webContents.send('items:updated', readItems());
+  return { ok: true, path: dataFileOverride };
+});
+ipcMain.handle('items:use-default', () => {
+  dataFileOverride = null;
+  const cfg = readConfig(); delete cfg.dataFile; writeConfig(cfg);
+  startWatching(win);
+  if (win && !win.isDestroyed()) win.webContents.send('items:updated', readItems());
+  return { ok: true, path: getDataFile() };
 });
