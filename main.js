@@ -119,7 +119,9 @@ async function createWindow() {
   });
 
   if (isDev) {
-    await win.loadURL('http://localhost:5173/');
+    await win.loadURL('http://localhost:5173/').catch((err) => {
+      console.error('Failed to load URL', err);
+    });
     win.webContents.openDevTools({ mode: 'detach' });
   } else {
     await win.loadFile(path.join(__dirname, 'renderer', 'dist', 'index.html'));
