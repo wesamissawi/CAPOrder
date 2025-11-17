@@ -1,6 +1,11 @@
 // src/components/BubbleColumn.jsx
 import React from "react";
 import Card from "./Card";
+import LabeledField from "./LabeledField"; 
+import LabeledInput from "./LabeledInput"; // adjust path as needed
+
+
+
 import { itemKey } from "../utils/inventory";
 
 export default function BubbleColumn({
@@ -13,10 +18,7 @@ export default function BubbleColumn({
   onDropOnBubble,
   onUpdateItem,
   onUpdateBubbleNotes,
-  getAllocatedForDisplay,
-  onAllocatedForFocus,
-  onAllocatedForChange,
-  onAllocatedForBlur,
+
   onFieldFocus,
   onFieldBlur,
   onEditItem,
@@ -106,10 +108,8 @@ export default function BubbleColumn({
               <div className="mt-3 grid gap-2 text-sm">
                 <div className="grid grid-cols-2 gap-2">
                   {/* Allocated To */}
-                  <div>
-                    <label className="block text-xs text-slate-500">
-                      Allocated To (bubble)
-                    </label>
+                  <LabeledField label="Allocated To (bubble)">
+                  
                     <select
                       className="w-full border rounded-lg p-2 bg-white"
                       value={it.allocated_to}
@@ -127,83 +127,71 @@ export default function BubbleColumn({
                         </option>
                       ))}
                     </select>
-                  </div>
+                  
+                  </LabeledField>
 
-                  {/* Allocated For */}
-                  <div>
-                    <label className="block text-xs text-slate-500">
-                      Allocated For (price)
-                    </label>
-                    <input
-                      className="w-full border rounded-lg p-2"
-                      value={getAllocatedForDisplay(it)}
-                      onFocus={() => {
-                        onFieldFocus();
-                        onAllocatedForFocus(it.uid);
-                      }}
-                      onChange={(e) =>
-                        onAllocatedForChange(it.uid, e.target.value)
-                      }
-                      onBlur={() => {
-                        onAllocatedForBlur(it);
-                        onFieldBlur();
-                      }}
-                    />
-                  </div>
+               
+
+
+
+                  <LabeledInput 
+                    label="Allocated For (price)"
+                    value={it.allocated_for ?? ""}
+                    onChange={(e) =>
+                      onUpdateItem(itemKey(it), { allocated_for: e.target.value })
+                    }
+                    onFocus={onFieldFocus}
+                    onBlur={onFieldBlur}
+                   
+                  />
+
                 </div>
 
                 <div className="grid grid-cols-3 gap-2">
-                  <div>
-                    <label className="block text-xs text-slate-500">Cost</label>
-                    <input
-                      className="w-full border rounded-lg p-2"
+                  <LabeledInput 
+                      label="Cost"
                       value={it.cost}
                       onChange={(e) =>
                         onUpdateItem(itemKey(it), { cost: e.target.value })
                       }
                       onFocus={onFieldFocus}
                       onBlur={onFieldBlur}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-slate-500">
-                      Sold Status
-                    </label>
-                    <input
-                      className="w-full border rounded-lg p-2"
-                      value={it.sold_status}
-                      onChange={(e) =>
-                        onUpdateItem(itemKey(it), {
-                          sold_status: e.target.value,
-                        })
-                      }
-                      onFocus={onFieldFocus}
-                      onBlur={onFieldBlur}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-slate-500">
-                      Sold Date
-                    </label>
-                    <input
-                      className="w-full border rounded-lg p-2"
-                      value={it.sold_date}
-                      onChange={(e) =>
-                        onUpdateItem(itemKey(it), {
-                          sold_date: e.target.value,
-                        })
-                      }
-                      onFocus={onFieldFocus}
-                      onBlur={onFieldBlur}
-                    />
-                  </div>
+                  />
+                
+                 
+                  
+                  <LabeledInput label="Sold Status"
+                    
+                    value={it.sold_status}
+                    onChange={(e) =>
+                      onUpdateItem(itemKey(it), {
+                        sold_status: e.target.value,
+                      })
+                    }
+                    onFocus={onFieldFocus}
+                    onBlur={onFieldBlur}
+                  />
+               
+
+
+                  <LabeledInput label="Sold Date"
+                          value={it.sold_date}
+                          onChange={(e) => onUpdateItem(itemKey(it), {
+                              sold_date: e.target.value,
+                            })
+                          }
+                          onFocus={onFieldFocus}
+                          onBlur={onFieldBlur}
+                          
+                  />
+
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-xs text-slate-500">
-                      Notes 1
-                    </label>
+                  
+                  
+                  <LabeledField label="Notes 1">
+                  
                     <textarea
                       className="w-full border rounded-lg p-2"
                       rows={2}
@@ -214,11 +202,10 @@ export default function BubbleColumn({
                       onFocus={onFieldFocus}
                       onBlur={onFieldBlur}
                     />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-slate-500">
-                      Notes 2
-                    </label>
+                  
+                  </LabeledField>
+                  <LabeledField label="Notes 2">
+                 
                     <textarea
                       className="w-full border rounded-lg p-2"
                       rows={2}
@@ -229,7 +216,9 @@ export default function BubbleColumn({
                       onFocus={onFieldFocus}
                       onBlur={onFieldBlur}
                     />
-                  </div>
+
+                  
+                  </LabeledField>
                 </div>
               </div>
             )}

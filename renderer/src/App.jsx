@@ -31,8 +31,7 @@ export default function App() {
     editingItemUidRef.current = editingItemUid;
   }, [editingItemUid]);
 
-  // local edit buffer for allocated_for
-  const [editingAllocatedFor, setEditingAllocatedFor] = useState({});
+
 
   // Drag state (items only)
   const draggedItemUidRef = useRef(null);
@@ -43,7 +42,7 @@ export default function App() {
 
   // "User is editing any field" flag
   const isEditingAnythingRef = useRef(false);
-  const editingAllocatedForRef = useRef(false);
+  
 
   // === Load once & subscribe to file changes ===
   useEffect(() => {
@@ -145,49 +144,6 @@ export default function App() {
     setExpanded((p) => ({ ...p, [uid]: !p[uid] }));
   }
 
-  // allocated_for helpers
-  function getAllocatedForDisplay(it) {
-    if (editingAllocatedFor[it.uid] !== undefined) {
-      return editingAllocatedFor[it.uid];
-    }
-    return it.allocated_for ?? "";
-  }
-
-  function handleAllocatedForFocus(uid) {
-    editingAllocatedForRef.current = true;
-  }
-
-  function handleAllocatedForChange(uid, value) {
-    setEditingAllocatedFor((prev) => ({
-      ...prev,
-      [uid]: value,
-    }));
-  }
-
-  function handleAllocatedForBlur(it) {
-    editingAllocatedForRef.current = false;
-    const draft = editingAllocatedFor[it.uid];
-    const raw = draft !== undefined ? draft : it.allocated_for;
-    const normalized = raw == null ? "" : String(raw).trim();
-
-    setEditingAllocatedFor((prev) => {
-      const { [it.uid]: _ignored, ...rest } = prev;
-      return rest;
-    });
-
-    if (normalized !== (it.allocated_for ?? "")) {
-      const uid = it.uid;
-      setItems((prev) => {
-        const next = prev.map((item) =>
-          item.uid === uid ? { ...item, allocated_for: normalized } : item
-        );
-        // We can either rely on autosave or save immediately:
-        lastSavedRef.current = JSON.stringify(next);
-        api.writeItems(next);
-        return next;
-      });
-    }
-  }
 
   function addBubble() {
     const base = newBubbleName.trim() || "New Bubble";
@@ -410,10 +366,7 @@ export default function App() {
               onDropOnBubble={onDropOnBubble}
               onUpdateItem={updateItemByKey}
               onUpdateBubbleNotes={updateBubbleNotes}
-              getAllocatedForDisplay={getAllocatedForDisplay}
-              onAllocatedForFocus={handleAllocatedForFocus}
-              onAllocatedForChange={handleAllocatedForChange}
-              onAllocatedForBlur={handleAllocatedForBlur}
+              
               onFieldFocus={handleFieldFocus}
               onFieldBlur={handleFieldBlur}
               onEditItem={handleStartEdit}  
