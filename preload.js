@@ -26,4 +26,9 @@ contextBridge.exposeInMainWorld('api', {
   lockItem: (uid) => ipcRenderer.invoke('items:lock-item', uid),
   applyEdit: (uid, patch) => ipcRenderer.invoke('items:apply-edit', uid, patch),
   releaseLock: (uid) => ipcRenderer.invoke('items:release-lock', uid),
+
+  readUIState: () => ipcRenderer.invoke('ui-state:read'),
+  writeUIState: (state) => ipcRenderer.invoke('ui-state:write', state),
+  readOrders: () => ipcRenderer.invoke('orders:read'),
+  getOrdersPath: () => ipcRenderer.invoke('orders:get-path'),
 });

@@ -10,7 +10,9 @@ const LOCK_DURATION_MS = 20000; // 20 seconds
 
 // ---- data paths ----
 const DATA_FILE_DEFAULT = path.join(app.getPath('userData'), 'outstanding_items.json');
+const ORDERS_FILE_DEFAULT = path.join(app.getPath('userData'), 'orders.json');
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
+const UI_STATE_FILE = path.join(app.getPath('userData'), 'ui_state.json');
 const PRELOAD = path.resolve(__dirname, 'preload.js');
 
 // ---- log preload path exists ----
@@ -18,6 +20,7 @@ console.log('[main] preload path =', PRELOAD, 'exists?', fs.existsSync(PRELOAD))
 
 // ---- data helpers ----
 let dataFileOverride = null;
+let ordersFileOverride = null;
 let watcher = null;
 
 function readConfig() {
@@ -50,6 +53,13 @@ function writeItemsAt(file, items) {
 }
 function readItems() { return readItemsAt(getDataFile()); }
 function writeItems(items) { return writeItemsAt(getDataFile(), items); }
+
+function getOrdersFile() {
+  return ordersFileOverride || ORDERS_FILE_DEFAULT;
+}
+function readOrders() {
+  return readItemsAt(getOrdersFile());
+}
 
 function startWatching(win) {
   const file = getDataFile();
@@ -84,6 +94,7 @@ function cleanExpiredLocks(items) {
 
 // ---- window ----
 let win = null;
+let boundsSaveTimeout = null;
 
 async function createWindow() {
   // restore any saved custom data file path
@@ -91,10 +102,16 @@ async function createWindow() {
   if (cfg.dataFile && typeof cfg.dataFile === 'string') {
     dataFileOverride = cfg.dataFile;
   }
-
+  const windowBounds = cfg.windowBounds || {};
+  const defaultWidth = Number(windowBounds.width) || 1280;
+  const defaultHeight = Number(windowBounds.height) || 900;
+  const defaultX = Number.isFinite(windowBounds.x) ? windowBounds.x : undefined;
+  const defaultY = Number.isFinite(windowBounds.y) ? windowBounds.y : undefined;
   win = new BrowserWindow({
-    width: 1280,
-    height: 900,
+    width: defaultWidth,
+    height: defaultHeight,
+    x: defaultX,
+    y: defaultY,
     webPreferences: {
       preload: PRELOAD,            // must exist beside main.js
       contextIsolation: true,
@@ -129,6 +146,28 @@ async function createWindow() {
 
   console.log('[main] data file =', getDataFile());
   startWatching(win);
+
+  const scheduleSaveBounds = () => {
+    if (boundsSaveTimeout) clearTimeout(boundsSaveTimeout);
+    boundsSaveTimeout = setTimeout(() => {
+      if (!win || win.isDestroyed()) return;
+      const bounds = win.getBounds();
+      const cfg = readConfig();
+      cfg.windowBounds = bounds;
+      writeConfig(cfg);
+    }, 400);
+  };
+
+  win.on('move', scheduleSaveBounds);
+  win.on('resize', scheduleSaveBounds);
+  win.on('close', () => {
+    if (boundsSaveTimeout) clearTimeout(boundsSaveTimeout);
+    if (!win || win.isDestroyed()) return;
+    const bounds = win.getBounds();
+    const cfg = readConfig();
+    cfg.windowBounds = bounds;
+    writeConfig(cfg);
+  });
 }
 
 app.whenReady().then(createWindow);
@@ -178,6 +217,15 @@ ipcMain.handle('items:use-default', () => {
   startWatching(win);
   if (win && !win.isDestroyed()) win.webContents.send('items:updated', readItems());
   return { ok: true, path: getDataFile() };
+});
+
+ipcMain.handle('orders:read', () => readOrders());
+ipcMain.handle('orders:get-path', () => ({ path: getOrdersFile() }));
+
+ipcMain.handle('ui-state:read', () => ({ ok: true, state: readUIState() }));
+ipcMain.handle('ui-state:write', (_evt, state) => {
+  writeUIState(state && typeof state === 'object' ? state : {});
+  return { ok: true };
 });
 
 
@@ -257,4 +305,21 @@ ipcMain.handle('items:release-lock', (_evt, uid) => {
   writeItems(items);
   return { ok: true, released: true };
 });
-
+function readUIState() {
+  try {
+    if (fs.existsSync(UI_STATE_FILE)) {
+      const json = JSON.parse(fs.readFileSync(UI_STATE_FILE, 'utf-8'));
+      return typeof json === 'object' && json ? json : {};
+    }
+  } catch (e) {
+    console.error('[ui-state read]', e);
+  }
+  return {};
+}
+function writeUIState(state) {
+  try {
+    fs.writeFileSync(UI_STATE_FILE, JSON.stringify(state || {}, null, 2), 'utf-8');
+  } catch (e) {
+    console.error('[ui-state write]', e);
+  }
+}

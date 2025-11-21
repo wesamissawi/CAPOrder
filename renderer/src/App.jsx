@@ -3,30 +3,56 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import api from "./api";
 import Card from "./components/Card";
 import BubbleColumn from "./components/BubbleColumn";
+import InvoicePreview from "./components/InvoicePreview";
 import {
   DEFAULT_BUBBLES,
   normalizeItems,
   ensureBubblesForItems,
   groupItemsByBubble,
   mergeItems,
-  itemKey,
   uniqueName,
   makeUid,
 } from "./utils/inventory";
 
+const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
+const DELETE_DESTINATIONS = ["New Stock", "Stock", "Cash Sales", "Returns"];
 
 
+
+const VIEWS = [
+  { id: "dashboard", label: "Dashboard" },
+  { id: "stock-flow", label: "Stock Flow" },
+  { id: "order-management", label: "Order Management" },
+  { id: "payment-management", label: "Payment Management" },
+];
 
 export default function App() {
   const [bubbles, setBubbles] = useState(DEFAULT_BUBBLES);
   const [items, setItems] = useState([]);
   const [expanded, setExpanded] = useState({});
   const [newBubbleName, setNewBubbleName] = useState("");
+  const [bubblePositions, setBubblePositions] = useState({});
+  const [bubbleSizes, setBubbleSizes] = useState({});
+  const [activeBubbleKey, setActiveBubbleKey] = useState(null);
+  const [uiStateReady, setUiStateReady] = useState(false);
+  const [currentView, setCurrentView] = useState("stock-flow");
+  const [orders, setOrders] = useState([]);
+  const [ordersLoading, setOrdersLoading] = useState(false);
+  const [ordersError, setOrdersError] = useState(null);
+  const [ordersInitialized, setOrdersInitialized] = useState(false);
+  const [ordersSourcePath, setOrdersSourcePath] = useState("");
 
   const [editingItemUid, setEditingItemUid] = useState(null);
   const [editingDraft, setEditingDraft] = useState(null);
+  const [printBubbleId, setPrintBubbleId] = useState(null);
+  const [printGeneratedAt, setPrintGeneratedAt] = useState(null);
 
   const editingItemUidRef = useRef(null);
+  const printPreviewRef = useRef(null);
+  const workspaceRef = useRef(null);
+  const bubbleDragRef = useRef(null);
+  const bubbleResizeRef = useRef(null);
+  const prevBodyUserSelectRef = useRef("");
   useEffect(() => {
     editingItemUidRef.current = editingItemUid;
   }, [editingItemUid]);
@@ -164,6 +190,133 @@ export default function App() {
     () => groupItemsByBubble(items, bubbles),
     [items, bubbles]
   );
+  useEffect(() => {
+    let cancelled = false;
+    async function loadUIState() {
+      if (!api?.readUIState) {
+        if (!cancelled) setUiStateReady(true);
+        return;
+      }
+      try {
+        const res = await api.readUIState();
+        if (cancelled) return;
+        const state = res?.state || {};
+        if (state.bubblePositions) {
+          setBubblePositions((prev) => ({
+            ...prev,
+            ...state.bubblePositions,
+          }));
+        }
+        if (state.bubbleSizes) {
+          setBubbleSizes((prev) => ({
+            ...prev,
+            ...state.bubbleSizes,
+          }));
+        }
+      } catch (e) {
+        console.warn("[ui-state] read failed", e);
+      } finally {
+        if (!cancelled) setUiStateReady(true);
+      }
+    }
+    loadUIState();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  useEffect(() => {
+    if (!uiStateReady || !api?.writeUIState) return;
+    api
+      .writeUIState({ bubblePositions, bubbleSizes })
+      .catch((e) => console.warn("[ui-state] write failed", e));
+  }, [bubblePositions, bubbleSizes, uiStateReady]);
+  useEffect(() => {
+    setBubblePositions((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      bubbles.forEach((b, index) => {
+        const key = b.name || b.id;
+        if (!next[key]) {
+          const col = index % 3;
+          const row = Math.floor(index / 3);
+          next[key] = {
+            x: col * 360,
+            y: row * 360,
+          };
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+    setBubbleSizes((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      bubbles.forEach((b) => {
+        const key = b.name || b.id;
+        if (!next[key]) {
+          next[key] = 360;
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [bubbles]);
+  const printBubble = useMemo(
+    () => bubbles.find((b) => b.id === printBubbleId) || null,
+    [printBubbleId, bubbles]
+  );
+  const printItems = useMemo(() => {
+    if (!printBubble) return [];
+    return items.filter((it) => it.allocated_to === printBubble.name);
+  }, [items, printBubble]);
+
+  useEffect(() => {
+    function handlePointerMove(e) {
+      const point = "touches" in e ? e.touches[0] : e;
+      if (!point) return;
+      const drag = bubbleDragRef.current;
+      const resize = bubbleResizeRef.current;
+      if (!drag && !resize) return;
+      if (!workspaceRef.current) return;
+      e.preventDefault();
+      if (drag) {
+        const rect = workspaceRef.current.getBoundingClientRect();
+        const x = Math.max(0, point.clientX - rect.left - drag.offsetX);
+        const y = Math.max(0, point.clientY - rect.top - drag.offsetY);
+        setBubblePositions((prev) => ({
+          ...prev,
+          [drag.key]: { x, y },
+        }));
+      } else if (resize) {
+        const delta = point.clientX - resize.startX;
+        const width = Math.max(280, Math.min(900, resize.startWidth + delta));
+        setBubbleSizes((prev) => ({
+          ...prev,
+          [resize.key]: width,
+        }));
+      }
+    }
+
+    function endDrag() {
+      if (!bubbleDragRef.current && !bubbleResizeRef.current) return;
+      bubbleDragRef.current = null;
+      bubbleResizeRef.current = null;
+      document.body.style.userSelect = prevBodyUserSelectRef.current || "";
+    }
+
+    window.addEventListener("mousemove", handlePointerMove);
+    window.addEventListener("mouseup", endDrag);
+    window.addEventListener("touchmove", handlePointerMove, { passive: false });
+    window.addEventListener("touchend", endDrag);
+    window.addEventListener("touchcancel", endDrag);
+    return () => {
+      window.removeEventListener("mousemove", handlePointerMove);
+      window.removeEventListener("mouseup", endDrag);
+      window.removeEventListener("touchmove", handlePointerMove);
+      window.removeEventListener("touchend", endDrag);
+      window.removeEventListener("touchcancel", endDrag);
+    };
+  }, []);
 
   // Drag & drop
   function onDragStartItem(uid) {
@@ -179,8 +332,194 @@ export default function App() {
     updateItemByKey(uid, { allocated_to: targetBubbleName });
   }
 
-  async function handleExport() {
-    await api.exportItems(items);
+  function handleSplitItem(uid, splitQuantity, destinationBubbleName) {
+    setItems((prev) => {
+      const idx = prev.findIndex((it) => it.uid === uid);
+      if (idx === -1) return prev;
+      const item = prev[idx];
+      const currentQty = Number(item.quantity) || 0;
+      const qtyToMove = Math.floor(Number(splitQuantity));
+      if (!qtyToMove || qtyToMove <= 0 || qtyToMove >= currentQty) {
+        return prev;
+      }
+      const remainder = currentQty - qtyToMove;
+      const targetBubble = destinationBubbleName || item.allocated_to;
+      const newItem = {
+        ...item,
+        uid: makeUid(),
+        quantity: qtyToMove,
+        allocated_to: targetBubble,
+      };
+      const next = [...prev];
+      next[idx] = { ...item, quantity: remainder };
+      next.splice(idx + 1, 0, newItem);
+      ensureBubblesForItems(next, setBubbles);
+      return next;
+    });
+  }
+
+  function handleConsolidateBubbleItems(bubbleName) {
+    if (!bubbleName) return;
+    setItems((prev) => {
+      const groupedByItem = new Map();
+      for (const item of prev) {
+        if (item.allocated_to !== bubbleName) continue;
+        const key = item.itemcode || item.reference_num || item.uid;
+        if (!groupedByItem.has(key)) {
+          groupedByItem.set(key, []);
+        }
+        groupedByItem.get(key).push(item);
+      }
+
+      let changed = false;
+      const replacements = new Map();
+
+      groupedByItem.forEach((itemsForKey) => {
+        if (itemsForKey.length < 2) return;
+        changed = true;
+        const totalQuantity = itemsForKey.reduce(
+          (sum, curr) => sum + (Number(curr.quantity) || 0),
+          0
+        );
+        const totalCost = itemsForKey.reduce(
+          (sum, curr) => sum + (Number(curr.cost) || 0) * (Number(curr.quantity) || 0),
+          0
+        );
+        const highestPrice = itemsForKey.reduce(
+          (max, curr) => Math.max(max, Number(curr.allocated_for) || 0),
+          0
+        );
+        const reference = itemsForKey[0];
+        const mergedItem = {
+          ...reference,
+          uid: reference.uid,
+          quantity: totalQuantity,
+          cost: totalQuantity ? (totalCost / totalQuantity).toFixed(2) : reference.cost,
+          allocated_for: String(highestPrice || ""),
+        };
+        replacements.set(reference.uid, mergedItem);
+        for (let i = 1; i < itemsForKey.length; i++) {
+          replacements.set(itemsForKey[i].uid, null);
+        }
+      });
+
+      if (!changed) return prev;
+
+      return prev
+        .map((item) => {
+          if (!replacements.has(item.uid)) return item;
+          const replacement = replacements.get(item.uid);
+          if (replacement === null) return null;
+          return replacement;
+        })
+        .filter(Boolean);
+    });
+  }
+
+  function handleDeleteBubble(bubbleId, fallbackTargetName) {
+    const bubble = bubbles.find((b) => b.id === bubbleId);
+    if (!bubble) return;
+    const validTargets = DELETE_DESTINATIONS.filter((name) => name !== bubble.name);
+    const fallback =
+      validTargets.includes(fallbackTargetName) && fallbackTargetName
+        ? fallbackTargetName
+        : validTargets[0] || "New Stock";
+    let updatedItemsSnapshot = null;
+    setItems((prev) => {
+      const next = prev.map((it) =>
+        it.allocated_to === bubble.name ? { ...it, allocated_to: fallback } : it
+      );
+      updatedItemsSnapshot = next;
+      return next;
+    });
+    if (updatedItemsSnapshot) {
+      ensureBubblesForItems(updatedItemsSnapshot, setBubbles);
+    }
+    setBubbles((prev) => prev.filter((b) => b.id !== bubbleId));
+  }
+
+  function handleStartBubbleMove(bubbleKey, clientX, clientY) {
+    if (!workspaceRef.current) return;
+    const rect = workspaceRef.current.getBoundingClientRect();
+    const current = bubblePositions[bubbleKey] || { x: 0, y: 0 };
+    prevBodyUserSelectRef.current = document.body.style.userSelect;
+    document.body.style.userSelect = "none";
+    setActiveBubbleKey(bubbleKey);
+    bubbleDragRef.current = {
+      key: bubbleKey,
+      offsetX: clientX - rect.left - current.x,
+      offsetY: clientY - rect.top - current.y,
+    };
+  }
+
+  function handleStartBubbleResize(bubbleKey, clientX) {
+    prevBodyUserSelectRef.current = document.body.style.userSelect;
+    document.body.style.userSelect = "none";
+    setActiveBubbleKey(bubbleKey);
+    bubbleResizeRef.current = {
+      key: bubbleKey,
+      startX: clientX,
+      startWidth: bubbleSizes[bubbleKey] || 360,
+    };
+  }
+
+  function handleOpenPrint(bubble) {
+    if (!bubble || DEFAULT_BUBBLE_NAMES.has(bubble.name)) return;
+    setPrintBubbleId(bubble.id);
+    setPrintGeneratedAt(new Date());
+  }
+
+  function handleClosePrint() {
+    setPrintBubbleId(null);
+    setPrintGeneratedAt(null);
+  }
+
+  function handleConfirmPrint() {
+    if (!printBubble || printItems.length === 0) return;
+    const todayStr = new Date().toLocaleDateString("en-CA");
+    const ids = new Set(printItems.map((it) => it.uid));
+    setItems((prev) =>
+      prev.map((it) => (ids.has(it.uid) ? { ...it, sold_date: todayStr } : it))
+    );
+    setPrintGeneratedAt(new Date());
+    setTimeout(() => {
+      if (!printPreviewRef.current) return;
+      const contents = printPreviewRef.current.innerHTML;
+      const printWindow = window.open("", "PRINT", "width=900,height=1100");
+      if (!printWindow) return;
+      printWindow.document.write(`
+        <!doctype html>
+        <html>
+          <head>
+            <title>Invoice - ${printBubble.name}</title>
+            <style>
+              body {
+                margin: 0;
+                padding: 24px;
+                background: #e2e8f0;
+                font-family: 'Inter', 'Segoe UI', sans-serif;
+              }
+              @media print {
+                body {
+                  padding: 0;
+                  background: white;
+                }
+              }
+              .page {
+                width: 8.5in;
+                min-height: 11in;
+                margin: 0 auto;
+              }
+            </style>
+          </head>
+          <body>${contents}</body>
+        </html>
+      `);
+      printWindow.document.close();
+      printWindow.focus();
+      printWindow.print();
+      printWindow.close();
+    }, 100);
   }
 
   // "editing anything" flags for all text inputs
@@ -257,123 +596,315 @@ export default function App() {
     setEditingDraft(null);
   }
 
+  async function loadOrders() {
+    try {
+      setOrdersLoading(true);
+      setOrdersError(null);
+      const [ordersRes, pathRes] = await Promise.all([
+        window.api?.readOrders?.(),
+        window.api?.getOrdersPath?.(),
+      ]);
+      const list = ordersRes?.state || ordersRes || [];
+      setOrders(Array.isArray(list) ? list : []);
+      if (pathRes?.path) setOrdersSourcePath(pathRes.path);
+      setOrdersInitialized(true);
+    } catch (e) {
+      console.error("[orders] fetch error", e);
+      setOrdersError(e?.message || "Failed to load orders.");
+    } finally {
+      setOrdersLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (currentView === "order-management" && !ordersInitialized && !ordersLoading) {
+      loadOrders();
+    }
+  }, [currentView, ordersInitialized, ordersLoading]);
+
+
+  const currentViewMeta = VIEWS.find((v) => v.id === currentView);
+  const isStockFlowView = currentView === "stock-flow";
 
   return (
     <div className="min-h-screen w-full bg-gradient-to-br from-fuchsia-100 via-sky-100 to-emerald-100">
-      <div className="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
-        <header className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
-          <h1 className="text-2xl sm:text-3xl font-bold text-slate-800">
-            Inventory Bubbles — Drag & Drop
-          </h1>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={handleExport}
-              className="text-sm px-3 py-2 rounded-xl bg-indigo-600 text-white shadow hover:bg-indigo-700"
-            >
-              Export updated JSON
-            </button>
-            <button
-              onClick={async () => {
-                const { path } = await api.getDataPath();
-                alert(`Current data file:\n${path}`);
-              }}
-              className="text-sm px-3 py-2 rounded-xl bg-white border shadow-sm"
-            >
-              Show Data File Path
-            </button>
-            <button
-              onClick={() => api.revealDataFile()}
-              className="text-sm px-3 py-2 rounded-xl bg-white border shadow-sm"
-            >
-              Reveal Data File
-            </button>
-            <button
-              onClick={async () => {
-                const res = await api.chooseItemsFile();
-                if (res?.ok) {
-                  const arr = await api.readItems();
-                  const norm = normalizeItems(arr || []);
-                  setItems(norm);
-                  lastSavedRef.current = JSON.stringify(norm);
-                  ensureBubblesForItems(norm, setBubbles);
-                }
-              }}
-              className="text-sm px-3 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700"
-            >
-              Choose Items JSON…
-            </button>
-            <button
-              onClick={async () => {
-                const res = await api.useDefaultFile?.();
-                if (res?.ok) {
-                  const arr = await api.readItems();
-                  const norm = normalizeItems(arr || []);
-                  setItems(norm);
-                  lastSavedRef.current = JSON.stringify(norm);
-                  ensureBubblesForItems(norm, setBubbles);
-                }
-              }}
-              className="text-sm px-3 py-2 rounded-xl bg-white border shadow-sm"
-            >
-              Use Default File
-            </button>
+      <div className="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
+        <header className="bg-white/80 rounded-3xl shadow border border-white/50">
+          <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h1 className="text-2xl sm:text-3xl font-bold text-slate-800">
+                Business Control Center
+              </h1>
+              <p className="text-sm text-slate-500">Manage pipelines, orders, and payments from one dashboard.</p>
+            </div>
+            <nav className="flex flex-wrap gap-2">
+              {VIEWS.map((view) => (
+                <button
+                  key={view.id}
+                  onClick={() => setCurrentView(view.id)}
+                  className={`px-4 py-2 rounded-full border text-sm font-semibold transition ${
+                    currentView === view.id
+                      ? "bg-indigo-600 text-white border-indigo-600 shadow"
+                      : "bg-white border-slate-200 text-slate-600 hover:text-indigo-600"
+                  }`}
+                >
+                  {view.label}
+                </button>
+              ))}
+            </nav>
           </div>
         </header>
 
-        <section className="mt-4">
-          <Card>
-            <div className="flex flex-col lg:flex-row gap-3 lg:items-center">
-              <div className="flex-1">
-                <div className="text-slate-700">Create a new bubble</div>
-                <div className="mt-2 flex items-center gap-2">
-                  <input
-                    className="flex-1 border rounded-xl p-2"
-                    placeholder="e.g., Waiting on Customer"
-                    value={newBubbleName}
-                    onChange={(e) => setNewBubbleName(e.target.value)}
-                    onFocus={handleFieldFocus}
-                    onBlur={handleFieldBlur}
-                  />
-                  <button
-                    onClick={addBubble}
-                    className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700"
-                  >
-                    Add Bubble
-                  </button>
+        {isStockFlowView ? (
+          <>
+            <section>
+              <Card>
+                <div className="flex flex-col lg:flex-row gap-3 lg:items-center">
+                  <div className="flex-1">
+                    <div className="text-slate-700">Create a new bubble</div>
+                    <div className="mt-2 flex items-center gap-2">
+                      <input
+                        className="flex-1 border rounded-xl p-2"
+                        placeholder="e.g., Waiting on Customer"
+                        value={newBubbleName}
+                        onChange={(e) => setNewBubbleName(e.target.value)}
+                        onFocus={handleFieldFocus}
+                        onBlur={handleFieldBlur}
+                      />
+                      <button
+                        onClick={addBubble}
+                        className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700"
+                      >
+                        Add Bubble
+                      </button>
+                    </div>
+                    <p className="mt-2 text-xs text-slate-500">
+                      If a bubble name already exists, a numeric suffix (e.g., “2”) will be added automatically.
+                    </p>
+                  </div>
+                  <div className="text-sm text-slate-600">
+                    <div>Tip: Drag an item card into a bubble to reassign it.</div>
+                  </div>
                 </div>
-                <p className="mt-2 text-xs text-slate-500">
-                  If a bubble name already exists, a numeric suffix (e.g., “2”)
-                  will be added automatically.
+              </Card>
+            </section>
+
+            <section>
+              <div
+                ref={workspaceRef}
+                className={`relative min-h-[600px] transition-opacity ${printBubble ? "pointer-events-none opacity-30" : ""}`}
+              >
+                {bubbles.map((b, index) => {
+                  const bubbleKey = b.name || b.id;
+                  const pos = bubblePositions[bubbleKey] || { x: 0, y: index * 340 };
+                  const width = bubbleSizes[bubbleKey] || 360;
+                  const isActive = activeBubbleKey === bubbleKey;
+                  return (
+                    <div
+                      key={b.id}
+                      className="absolute"
+                      style={{
+                        left: `${pos.x}px`,
+                        top: `${pos.y}px`,
+                        width: `${width}px`,
+                        zIndex: isActive ? 1000 : 100 + index,
+                      }}
+                    >
+                      <BubbleColumn
+                        bubble={b}
+                        items={itemsByBubble.get(b.name) || []}
+                        bubbles={bubbles}
+                        expanded={expanded}
+                        onToggleExpand={toggleExpand}
+                        onDragStartItem={onDragStartItem}
+                        onDropOnBubble={onDropOnBubble}
+                        onUpdateItem={updateItemByKey}
+                        onUpdateBubbleNotes={updateBubbleNotes}
+                        
+                        onFieldFocus={handleFieldFocus}
+                        onFieldBlur={handleFieldBlur}
+                        showPrintAction={!DEFAULT_BUBBLE_NAMES.has(b.name)}
+                        onRequestPrint={handleOpenPrint}
+                        onEditItem={handleStartEdit}
+                        onSplitItem={handleSplitItem}
+                        onConsolidateItems={handleConsolidateBubbleItems}
+                        onDeleteBubble={handleDeleteBubble}
+                        deleteTargets={DELETE_DESTINATIONS}
+                        isDefaultBubble={DEFAULT_BUBBLE_NAMES.has(b.name)}
+                        onStartBubbleMove={handleStartBubbleMove}
+                        onStartBubbleResize={handleStartBubbleResize}
+                        onActivateBubble={() => setActiveBubbleKey(bubbleKey)}
+                        widthPixels={width}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          </>
+        ) : currentView === "order-management" ? (
+          <>
+            <section>
+              <Card>
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm uppercase tracking-wide text-slate-400">Orders feed</div>
+                    <div className="text-base font-semibold text-slate-700">Live orders from your local server</div>
+                    <div className="text-xs text-slate-400 mt-1">
+                      Source:{" "}
+                      <code className="text-indigo-600 break-all">
+                        {ordersSourcePath || "orders.json (user data folder)"}
+                      </code>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={loadOrders}
+                      disabled={ordersLoading}
+                      className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-semibold disabled:opacity-50"
+                    >
+                      {ordersLoading ? "Refreshing…" : "Refresh Orders"}
+                    </button>
+                  </div>
+                </div>
+                {ordersError && (
+                  <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+                    {ordersError}
+                  </div>
+                )}
+              </Card>
+            </section>
+            <section>
+              {ordersLoading && orders.length === 0 ? (
+                <div className="py-12 text-center text-slate-500">Loading orders…</div>
+              ) : (
+                <div className="grid gap-3">
+                  {orders.map((order, idx) => {
+                    const key = `${order.reference || "order"}-${order.warehouse || idx}`;
+                    return (
+                      <Card key={key} className="border-indigo-100">
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                          <div>
+                            <div className="text-lg font-semibold text-slate-800">
+                              {order.warehouse || "—"} — {order.reference || "No reference"}
+                            </div>
+                            <div className="text-xs uppercase tracking-wide text-slate-400">
+                              Orders pipeline
+                            </div>
+                          </div>
+                          <div className="flex gap-2 text-xs">
+                            {Boolean(order.enteredInSage) && (
+                              <span className="px-2 py-1 rounded-full bg-emerald-50 text-emerald-600 border border-emerald-200">
+                                Sage
+                              </span>
+                            )}
+                            {Boolean(order.inStore) && (
+                              <span className="px-2 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-200">
+                                Arrived
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                          {[
+                            { label: "Picked Up", field: "pickedUp" },
+                            { label: "Arrived", field: "inStore" },
+                            { label: "Entered in Sage", field: "invoiceSageUpdate" },
+                            { label: "Value Check", field: "invoiceValueCheck" },
+                          ].map((meta) => (
+                            <label key={meta.field} className="flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 bg-white/60">
+                              <input type="checkbox" checked={Boolean(order[meta.field])} readOnly disabled />
+                              <span className="text-slate-700 text-sm">{meta.label}</span>
+                            </label>
+                          ))}
+                        </div>
+                        <div className="mt-4 grid gap-3 md:grid-cols-2">
+                          <div className="flex flex-col gap-1">
+                            <span className="text-xs uppercase tracking-wide text-slate-400">Invoice #</span>
+                            <input
+                              className="border rounded-xl px-3 py-2 bg-slate-50 text-sm text-slate-600"
+                              value={order.invoiceNum || ""}
+                              readOnly
+                            />
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            <span className="text-xs uppercase tracking-wide text-slate-400">Journal Entry</span>
+                            <input
+                              className="border rounded-xl px-3 py-2 bg-slate-50 text-sm text-slate-600"
+                              value={order.journalEntry || ""}
+                              readOnly
+                            />
+                          </div>
+                        </div>
+                      </Card>
+                    );
+                  })}
+                  {!ordersLoading && orders.length === 0 && !ordersError && (
+                    <Card>
+                      <div className="py-10 text-center text-slate-500 text-sm">
+                        No orders available from the data source.
+                      </div>
+                    </Card>
+                  )}
+                </div>
+              )}
+            </section>
+          </>
+        ) : (
+          <section>
+            <Card>
+              <div className="py-12 text-center space-y-2">
+                <p className="text-xl font-semibold text-slate-700">{currentViewMeta?.label}</p>
+                <p className="text-slate-500">
+                  This view is under construction. Check back soon for tailored insights and workflows.
                 </p>
               </div>
-              <div className="text-sm text-slate-600">
-                <div>Tip: Drag an item card into a bubble to reassign it.</div>
-              </div>
-            </div>
-          </Card>
-        </section>
-
-        <section className="mt-6 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {bubbles.map((b) => (
-            <BubbleColumn
-              key={b.id}
-              bubble={b}
-              items={itemsByBubble.get(b.name) || []}
-              bubbles={bubbles}
-              expanded={expanded}
-              onToggleExpand={toggleExpand}
-              onDragStartItem={onDragStartItem}
-              onDropOnBubble={onDropOnBubble}
-              onUpdateItem={updateItemByKey}
-              onUpdateBubbleNotes={updateBubbleNotes}
-              
-              onFieldFocus={handleFieldFocus}
-              onFieldBlur={handleFieldBlur}
-              onEditItem={handleStartEdit}  
-            />
-          ))}
-        </section>
+            </Card>
+          </section>
+        )}
       </div>
+      {printBubble && (
+        <div className="fixed inset-0 z-[5000] bg-slate-900/60 flex items-center justify-center px-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl p-6 flex flex-col gap-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-semibold text-slate-800">
+                Print Preview — {printBubble.name}
+              </h2>
+              <button
+                className="text-slate-500 hover:text-slate-700"
+                onClick={handleClosePrint}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                className="px-4 py-2 rounded-full border border-slate-300 text-slate-700"
+                onClick={handleClosePrint}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-5 py-2 rounded-full bg-indigo-600 text-white shadow hover:bg-indigo-700"
+                onClick={handleConfirmPrint}
+              >
+                Print
+              </button>
+            </div>
+            <div
+              ref={printPreviewRef}
+              className="max-h-[70vh] overflow-auto rounded-2xl border border-slate-200 bg-slate-50 p-4"
+            >
+              <InvoicePreview
+                bubbleName={printBubble.name}
+                bubbleNotes={printBubble.notes}
+                items={printItems}
+                generatedDate={printGeneratedAt || new Date()}
+              />
+            </div>
+          </div>
+        </div>
+      )}
             {editingDraft && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-xl">
