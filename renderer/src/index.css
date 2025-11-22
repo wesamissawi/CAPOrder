@@ -8,7 +8,7 @@ body {
   @apply bg-gradient-to-br from-fuchsia-100 via-sky-100 to-emerald-100;
 }
 
-:root {
+:root { 
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
