@@ -1,9 +1,11 @@
-// src/App.jsx
+﻿// src/App.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import api from "./api";
-import Card from "./components/Card";
-import BubbleColumn from "./components/BubbleColumn";
 import InvoicePreview from "./components/InvoicePreview";
+import DashboardView from "./views/DashboardView";
+import StockFlowView from "./views/StockFlowView";
+import OrderManagementView from "./views/OrderManagementView";
+import PaymentManagementView from "./views/PaymentManagementView";
 import {
   DEFAULT_BUBBLES,
   normalizeItems,
@@ -41,6 +43,10 @@ export default function App() {
   const [ordersError, setOrdersError] = useState(null);
   const [ordersInitialized, setOrdersInitialized] = useState(false);
   const [ordersSourcePath, setOrdersSourcePath] = useState("");
+  const [ordersDirty, setOrdersDirty] = useState(false);
+  const [ordersSaving, setOrdersSaving] = useState(false);
+  const [ordersSearch, setOrdersSearch] = useState("");
+  const ordersLastSavedRef = useRef("");
 
   const [editingItemUid, setEditingItemUid] = useState(null);
   const [editingDraft, setEditingDraft] = useState(null);
@@ -601,11 +607,14 @@ export default function App() {
       setOrdersLoading(true);
       setOrdersError(null);
       const [ordersRes, pathRes] = await Promise.all([
-        window.api?.readOrders?.(),
-        window.api?.getOrdersPath?.(),
+        api?.readOrders?.(),
+        api?.getOrdersPath?.(),
       ]);
       const list = ordersRes?.state || ordersRes || [];
-      setOrders(Array.isArray(list) ? list : []);
+      const normalized = Array.isArray(list) ? list : [];
+      setOrders(normalized);
+      ordersLastSavedRef.current = JSON.stringify(normalized);
+      setOrdersDirty(false);
       if (pathRes?.path) setOrdersSourcePath(pathRes.path);
       setOrdersInitialized(true);
     } catch (e) {
@@ -616,11 +625,72 @@ export default function App() {
     }
   }
 
+  function updateOrderAt(index, patch) {
+    if (index < 0) return;
+    setOrders((prev) => {
+      if (index >= prev.length) return prev;
+      const next = [...prev];
+      const current = next[index] || {};
+      next[index] = { ...current, ...patch };
+      return next;
+    });
+    setOrdersDirty(true);
+  }
+
+  function handleOrderCheckboxChange(index, field, checked) {
+    updateOrderAt(index, { [field]: checked });
+  }
+
+  function handleOrderFieldChange(index, field, value) {
+    updateOrderAt(index, { [field]: value });
+  }
+
+  async function handleSaveOrders() {
+    if (!ordersDirty || ordersSaving) return;
+    try {
+      setOrdersSaving(true);
+      setOrdersError(null);
+      const res = await api?.writeOrders?.(orders);
+      if (!res?.ok) {
+        throw new Error("Failed to save orders.");
+      }
+      ordersLastSavedRef.current = JSON.stringify(orders);
+      setOrdersDirty(false);
+    } catch (e) {
+      console.error("[orders] save error", e);
+      setOrdersError(e?.message || "Failed to save orders.");
+    } finally {
+      setOrdersSaving(false);
+    }
+  }
+
   useEffect(() => {
     if (currentView === "order-management" && !ordersInitialized && !ordersLoading) {
       loadOrders();
     }
   }, [currentView, ordersInitialized, ordersLoading]);
+
+  const filteredOrders = useMemo(() => {
+    const q = ordersSearch.trim().toLowerCase();
+    if (!q) return orders;
+    return orders.filter((order) => {
+      const fields = [
+        order.reference,
+        order.warehouse,
+        order.invoiceNum,
+        order.journalEntry,
+        order.customerName,
+        order.supplier,
+        order.source,
+      ];
+      return fields.some((val) => {
+        if (val === undefined || val === null) return false;
+        return String(val).toLowerCase().includes(q);
+      });
+    });
+  }, [orders, ordersSearch]);
+
+  const hasSearch = ordersSearch.trim().length > 0;
 
 
   const currentViewMeta = VIEWS.find((v) => v.id === currentView);
@@ -655,212 +725,57 @@ export default function App() {
           </div>
         </header>
 
-        {isStockFlowView ? (
-          <>
-            <section>
-              <Card>
-                <div className="flex flex-col lg:flex-row gap-3 lg:items-center">
-                  <div className="flex-1">
-                    <div className="text-slate-700">Create a new bubble</div>
-                    <div className="mt-2 flex items-center gap-2">
-                      <input
-                        className="flex-1 border rounded-xl p-2"
-                        placeholder="e.g., Waiting on Customer"
-                        value={newBubbleName}
-                        onChange={(e) => setNewBubbleName(e.target.value)}
-                        onFocus={handleFieldFocus}
-                        onBlur={handleFieldBlur}
-                      />
-                      <button
-                        onClick={addBubble}
-                        className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700"
-                      >
-                        Add Bubble
-                      </button>
-                    </div>
-                    <p className="mt-2 text-xs text-slate-500">
-                      If a bubble name already exists, a numeric suffix (e.g., “2”) will be added automatically.
-                    </p>
-                  </div>
-                  <div className="text-sm text-slate-600">
-                    <div>Tip: Drag an item card into a bubble to reassign it.</div>
-                  </div>
-                </div>
-              </Card>
-            </section>
-
-            <section>
-              <div
-                ref={workspaceRef}
-                className={`relative min-h-[600px] transition-opacity ${printBubble ? "pointer-events-none opacity-30" : ""}`}
-              >
-                {bubbles.map((b, index) => {
-                  const bubbleKey = b.name || b.id;
-                  const pos = bubblePositions[bubbleKey] || { x: 0, y: index * 340 };
-                  const width = bubbleSizes[bubbleKey] || 360;
-                  const isActive = activeBubbleKey === bubbleKey;
-                  return (
-                    <div
-                      key={b.id}
-                      className="absolute"
-                      style={{
-                        left: `${pos.x}px`,
-                        top: `${pos.y}px`,
-                        width: `${width}px`,
-                        zIndex: isActive ? 1000 : 100 + index,
-                      }}
-                    >
-                      <BubbleColumn
-                        bubble={b}
-                        items={itemsByBubble.get(b.name) || []}
-                        bubbles={bubbles}
-                        expanded={expanded}
-                        onToggleExpand={toggleExpand}
-                        onDragStartItem={onDragStartItem}
-                        onDropOnBubble={onDropOnBubble}
-                        onUpdateItem={updateItemByKey}
-                        onUpdateBubbleNotes={updateBubbleNotes}
-                        
-                        onFieldFocus={handleFieldFocus}
-                        onFieldBlur={handleFieldBlur}
-                        showPrintAction={!DEFAULT_BUBBLE_NAMES.has(b.name)}
-                        onRequestPrint={handleOpenPrint}
-                        onEditItem={handleStartEdit}
-                        onSplitItem={handleSplitItem}
-                        onConsolidateItems={handleConsolidateBubbleItems}
-                        onDeleteBubble={handleDeleteBubble}
-                        deleteTargets={DELETE_DESTINATIONS}
-                        isDefaultBubble={DEFAULT_BUBBLE_NAMES.has(b.name)}
-                        onStartBubbleMove={handleStartBubbleMove}
-                        onStartBubbleResize={handleStartBubbleResize}
-                        onActivateBubble={() => setActiveBubbleKey(bubbleKey)}
-                        widthPixels={width}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-          </>
+        {currentView === "dashboard" ? (
+          <DashboardView />
+        ) : isStockFlowView ? (
+          <StockFlowView
+            newBubbleName={newBubbleName}
+            setNewBubbleName={setNewBubbleName}
+            handleFieldFocus={handleFieldFocus}
+            handleFieldBlur={handleFieldBlur}
+            addBubble={addBubble}
+            bubbles={bubbles}
+            bubblePositions={bubblePositions}
+            bubbleSizes={bubbleSizes}
+            activeBubbleKey={activeBubbleKey}
+            workspaceRef={workspaceRef}
+            printBubble={printBubble}
+            itemsByBubble={itemsByBubble}
+            expanded={expanded}
+            toggleExpand={toggleExpand}
+            onDragStartItem={onDragStartItem}
+            onDropOnBubble={onDropOnBubble}
+            onUpdateItem={updateItemByKey}
+            onUpdateBubbleNotes={updateBubbleNotes}
+            onRequestPrint={handleOpenPrint}
+            onEditItem={handleStartEdit}
+            onSplitItem={handleSplitItem}
+            onConsolidateItems={handleConsolidateBubbleItems}
+            onDeleteBubble={handleDeleteBubble}
+            deleteTargets={DELETE_DESTINATIONS}
+            defaultBubbleNames={DEFAULT_BUBBLE_NAMES}
+            onStartBubbleMove={handleStartBubbleMove}
+            onStartBubbleResize={handleStartBubbleResize}
+            onActivateBubble={setActiveBubbleKey}
+          />
         ) : currentView === "order-management" ? (
-          <> 
-            <section>
-              <Card>
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <div className="text-sm uppercase tracking-wide text-slate-400">Orders feed</div>
-                    <div className="text-base font-semibold text-slate-700">Live orders from your local server</div>
-                    <div className="text-xs text-slate-400 mt-1">
-                      Source:{" "}
-                      <code className="text-indigo-600 break-all">
-                        {ordersSourcePath || "orders.json (user data folder)"}
-                      </code>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={loadOrders}
-                      disabled={ordersLoading}
-                      className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-semibold disabled:opacity-50"
-                    >
-                      {ordersLoading ? "Refreshing…" : "Refresh Orders"}
-                    </button>
-                  </div>
-                </div>
-                {ordersError && (
-                  <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
-                    {ordersError}
-                  </div>
-                )}
-              </Card>
-            </section>
-            <section>
-              {ordersLoading && orders.length === 0 ? (
-                <div className="py-12 text-center text-slate-500">Loading orders…</div>
-              ) : (
-                <div className="grid gap-3">
-                  {orders.map((order, idx) => {
-                    const key = `${order.reference || "order"}-${order.warehouse || idx}`;
-                    return (
-                      <Card key={key} className="border-indigo-100">
-                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                          <div>
-                            <div className="text-lg font-semibold text-slate-800">
-                              {order.warehouse || "—"} — {order.reference || "No reference"}
-                            </div>
-                            <div className="text-xs uppercase tracking-wide text-slate-400">
-                              Orders pipeline
-                            </div>
-                          </div>
-                          <div className="flex gap-2 text-xs">
-                            {Boolean(order.enteredInSage) && (
-                              <span className="px-2 py-1 rounded-full bg-emerald-50 text-emerald-600 border border-emerald-200">
-                                Sage
-                              </span>
-                            )}
-                            {Boolean(order.inStore) && (
-                              <span className="px-2 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-200">
-                                Arrived
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-                          {[
-                            { label: "Picked Up", field: "pickedUp" },
-                            { label: "Arrived", field: "inStore" },
-                            { label: "Entered in Sage", field: "invoiceSageUpdate" },
-                            { label: "Value Check", field: "invoiceValueCheck" },
-                          ].map((meta) => (
-                            <label key={meta.field} className="flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 bg-white/60">
-                              <input type="checkbox" checked={Boolean(order[meta.field])} readOnly disabled />
-                              <span className="text-slate-700 text-sm">{meta.label}</span>
-                            </label>
-                          ))}
-                        </div>
-                        <div className="mt-4 grid gap-3 md:grid-cols-2">
-                          <div className="flex flex-col gap-1">
-                            <span className="text-xs uppercase tracking-wide text-slate-400">Invoice #</span>
-                            <input
-                              className="border rounded-xl px-3 py-2 bg-slate-50 text-sm text-slate-600"
-                              value={order.invoiceNum || ""}
-                              readOnly
-                            />
-                          </div>
-                          <div className="flex flex-col gap-1">
-                            <span className="text-xs uppercase tracking-wide text-slate-400">Journal Entry</span>
-                            <input
-                              className="border rounded-xl px-3 py-2 bg-slate-50 text-sm text-slate-600"
-                              value={order.journalEntry || ""}
-                              readOnly
-                            />
-                          </div>
-                        </div>
-                      </Card>
-                    );
-                  })}
-                  {!ordersLoading && orders.length === 0 && !ordersError && (
-                    <Card>
-                      <div className="py-10 text-center text-slate-500 text-sm">
-                        No orders available from the data source.
-                      </div>
-                    </Card>
-                  )}
-                </div>
-              )}
-            </section>
-          </>
+          <OrderManagementView
+            ordersSourcePath={ordersSourcePath}
+            ordersSearch={ordersSearch}
+            setOrdersSearch={setOrdersSearch}
+            ordersDirty={ordersDirty}
+            ordersSaving={ordersSaving}
+            ordersLoading={ordersLoading}
+            ordersError={ordersError}
+            loadOrders={loadOrders}
+            handleSaveOrders={handleSaveOrders}
+            filteredOrders={filteredOrders}
+            handleOrderCheckboxChange={handleOrderCheckboxChange}
+            handleOrderFieldChange={handleOrderFieldChange}
+            hasSearch={hasSearch}
+          />
         ) : (
-          <section>
-            <Card>
-              <div className="py-12 text-center space-y-2">
-                <p className="text-xl font-semibold text-slate-700">{currentViewMeta?.label}</p>
-                <p className="text-slate-500">
-                  This view is under construction. Check back soon for tailored insights and workflows.
-                </p>
-              </div>
-            </Card>
-          </section>
+          <PaymentManagementView currentViewMeta={currentViewMeta} />
         )}
       </div>
       {printBubble && (
@@ -868,13 +783,13 @@ export default function App() {
           <div className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl p-6 flex flex-col gap-4">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-semibold text-slate-800">
-                Print Preview — {printBubble.name}
+                Print Preview - {printBubble.name}
               </h2>
               <button
                 className="text-slate-500 hover:text-slate-700"
                 onClick={handleClosePrint}
               >
-                ✕
+                x
               </button>
             </div>
             <div className="flex justify-end gap-3">

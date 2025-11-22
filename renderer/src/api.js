@@ -17,6 +17,9 @@ const fallbackApi = {
   releaseLock: async () => ({ ok: false }),
 
 
+  readOrders: async () => [],
+  writeOrders: async () => ({ ok: false }),
+  getOrdersPath: async () => ({ path: "(not in Electron)" }),
 };
 
 const api = window.api ?? fallbackApi;

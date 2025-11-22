@@ -30,5 +30,6 @@ contextBridge.exposeInMainWorld('api', {
   readUIState: () => ipcRenderer.invoke('ui-state:read'),
   writeUIState: (state) => ipcRenderer.invoke('ui-state:write', state),
   readOrders: () => ipcRenderer.invoke('orders:read'),
+  writeOrders: (orders) => ipcRenderer.invoke('orders:write', orders),
   getOrdersPath: () => ipcRenderer.invoke('orders:get-path'),
 });

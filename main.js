@@ -9,8 +9,19 @@ const LOCK_DURATION_MS = 20000; // 20 seconds
 
 
 // ---- data paths ----
-const DATA_FILE_DEFAULT = path.join(app.getPath('userData'), 'outstanding_items.json');
-const ORDERS_FILE_DEFAULT = path.join(app.getPath('userData'), 'orders.json');
+const base = "\\\\GIRLSBOYS\\ushare\\Ghost PO\\Order_Items";
+const DATA_FILE_DEFAULT = path.join(base, "outstanding_items.json");
+
+// const DATA_FILE_DEFAULT = path.join(app.getPath('userData'), 'outstanding_items.json');
+
+
+const base2 = "\\\\GIRLSBOYS\\ushare\\Ghost PO\\Orders";
+const ORDERS_FILE_DEFAULT = path.join(base2, 'allOrders.json');
+
+// const ORDERS_FILE_DEFAULT = path.join(app.getPath('userData'), 'orders.json');
+
+
+
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
 const UI_STATE_FILE = path.join(app.getPath('userData'), 'ui_state.json');
 const PRELOAD = path.resolve(__dirname, 'preload.js');
@@ -59,6 +70,13 @@ function getOrdersFile() {
 }
 function readOrders() {
   return readItemsAt(getOrdersFile());
+}
+function writeOrdersAt(file, orders) {
+  ensureDataFileAt(file);
+  fs.writeFileSync(file, JSON.stringify(orders ?? [], null, 2), 'utf-8');
+}
+function writeOrders(orders) {
+  return writeOrdersAt(getOrdersFile(), orders);
 }
 
 function startWatching(win) {
@@ -221,6 +239,13 @@ ipcMain.handle('items:use-default', () => {
 
 ipcMain.handle('orders:read', () => readOrders());
 ipcMain.handle('orders:get-path', () => ({ path: getOrdersFile() }));
+ipcMain.handle('orders:write', (_evt, orders) => {
+  const current = readOrders();                  // existing array
+  const a = JSON.stringify(current);
+  const b = JSON.stringify(orders ?? []);
+  if (a !== b) writeOrders(orders);              // only write if actually different
+  return { ok: true };
+});
 
 ipcMain.handle('ui-state:read', () => ({ ok: true, state: readUIState() }));
 ipcMain.handle('ui-state:write', (_evt, state) => {

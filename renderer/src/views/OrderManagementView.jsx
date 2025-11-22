@@ -1,0 +1,151 @@
+import React from "react";
+import Card from "../components/Card";
+
+export default function OrderManagementView({
+  ordersSourcePath,
+  ordersSearch,
+  setOrdersSearch,
+  ordersDirty,
+  ordersSaving,
+  ordersLoading,
+  ordersError,
+  loadOrders,
+  handleSaveOrders,
+  filteredOrders,
+  handleOrderCheckboxChange,
+  handleOrderFieldChange,
+  hasSearch,
+}) {
+  return (
+    <>
+      <section>
+        <Card>
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="text-sm uppercase tracking-wide text-slate-400">Orders feed</div>
+              <div className="text-base font-semibold text-slate-700">Live orders from your local server</div>
+              <div className="text-xs text-slate-400 mt-1">
+                Source:{" "}
+                <code className="text-indigo-600 break-all">
+                  {ordersSourcePath || "orders.json (user data folder)"}
+                </code>
+              </div>
+            </div>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+              <input
+                type="search"
+                value={ordersSearch}
+                onChange={(e) => setOrdersSearch(e.target.value)}
+                placeholder="Search orders..."
+                className="w-full sm:w-56 border rounded-xl px-3 py-2 text-sm bg-white"
+              />
+              {ordersDirty && !ordersLoading && (
+                <span className="text-xs px-3 py-1 rounded-full bg-amber-100 text-amber-700 border border-amber-200">
+                  Unsaved changes
+                </span>
+              )}
+              <button
+                onClick={handleSaveOrders}
+                disabled={!ordersDirty || ordersSaving}
+                className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold disabled:opacity-50"
+              >
+                {ordersSaving ? "Saving..." : ordersDirty ? "Save Changes" : "Saved"}
+              </button>
+              <button
+                onClick={loadOrders}
+                disabled={ordersLoading}
+                className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-semibold disabled:opacity-50"
+              >
+                {ordersLoading ? "Refreshing..." : "Refresh Orders"}
+              </button>
+            </div>
+          </div>
+          {ordersError && (
+            <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+              {ordersError}
+            </div>
+          )}
+        </Card>
+      </section>
+      <section>
+        {ordersLoading && filteredOrders.length === 0 ? (
+          <div className="py-12 text-center text-slate-500">Loading orders...</div>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {filteredOrders.map((order, idx) => {
+              const key = `${order.reference || "order"}-${order.warehouse || idx}`;
+              return (
+                <Card key={key} className="border-indigo-100">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                    <div>
+                      <div className="text-lg font-semibold text-slate-800">
+                        {order.warehouse || "-"} - {order.reference || "No reference"}
+                      </div>
+                      <div className="text-xs uppercase tracking-wide text-slate-400">
+                        Orders pipeline
+                      </div>
+                    </div>
+                    <div className="flex gap-2 text-xs">
+                      {Boolean(order.enteredInSage) && (
+                        <span className="px-2 py-1 rounded-full bg-emerald-50 text-emerald-600 border border-emerald-200">
+                          Sage
+                        </span>
+                      )}
+                      {Boolean(order.inStore) && (
+                        <span className="px-2 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-200">
+                          Arrived
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="mt-3 flex flex-col gap-2 text-sm">
+                    {[
+                      { label: "Picked Up", field: "pickedUp" },
+                      { label: "Arrived", field: "inStore" },
+                      { label: "Entered in Sage", field: "invoiceSageUpdate" },
+                      { label: "Value Check", field: "invoiceValueCheck" },
+                    ].map((meta) => (
+                      <label key={meta.field} className="flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 bg-white/60">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(order[meta.field])}
+                          onChange={(e) => handleOrderCheckboxChange(idx, meta.field, e.target.checked)}
+                        />
+                        <span className="text-slate-700 text-sm">{meta.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-xs uppercase tracking-wide text-slate-400">Invoice #</span>
+                      <input
+                        className="border rounded-xl px-3 py-1.5 bg-white text-sm text-slate-700 max-w-xs"
+                        value={order.invoiceNum || ""}
+                        onChange={(e) => handleOrderFieldChange(idx, "invoiceNum", e.target.value)}
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <span className="text-xs uppercase tracking-wide text-slate-400">Journal Entry</span>
+                      <input
+                        className="border rounded-xl px-3 py-1.5 bg-white text-sm text-slate-700 max-w-xs"
+                        value={order.journalEntry || ""}
+                        onChange={(e) => handleOrderFieldChange(idx, "journalEntry", e.target.value)}
+                      />
+                    </div>
+                  </div>
+                </Card>
+              );
+            })}
+            {!ordersLoading && filteredOrders.length === 0 && !ordersError && (
+              <Card>
+                <div className="py-10 text-center text-slate-500 text-sm">
+                  {hasSearch ? "No orders match your search." : "No orders available from the data source."}
+                </div>
+              </Card>
+            )}
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
