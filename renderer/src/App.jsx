@@ -6,6 +6,7 @@ import DashboardView from "./views/DashboardView";
 import StockFlowView from "./views/StockFlowView";
 import OrderManagementView from "./views/OrderManagementView";
 import PaymentManagementView from "./views/PaymentManagementView";
+import ReturnsManagementView from "./views/ReturnsManagementView";
 import {
   DEFAULT_BUBBLES,
   normalizeItems,
@@ -17,13 +18,14 @@ import {
 } from "./utils/inventory";
 
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
-const DELETE_DESTINATIONS = ["New Stock", "Stock", "Cash Sales", "Returns"];
+const DELETE_DESTINATIONS = ["New Stock", "Shelf", "Cash Sales", "Returns"];
 
 
 
 const VIEWS = [
   { id: "dashboard", label: "Dashboard" },
   { id: "stock-flow", label: "Stock Flow" },
+  { id: "returns-management", label: "Returns Management" },
   { id: "order-management", label: "Order Management" },
   { id: "payment-management", label: "Payment Management" },
 ];
@@ -38,6 +40,12 @@ export default function App() {
   const [activeBubbleKey, setActiveBubbleKey] = useState(null);
   const [uiStateReady, setUiStateReady] = useState(false);
   const [currentView, setCurrentView] = useState("stock-flow");
+  const [returnsFilterEnabled, setReturnsFilterEnabled] = useState(false);
+  const [returnsFilterDays, setReturnsFilterDays] = useState(0);
+  const [timeFilterEnabled, setTimeFilterEnabled] = useState(false);
+  const [timeFilterMinutes, setTimeFilterMinutes] = useState(0);
+  const [timeFilterHours, setTimeFilterHours] = useState(0);
+  const [timeFilterDays, setTimeFilterDays] = useState(0);
   const [orders, setOrders] = useState([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState(null);
@@ -84,6 +92,11 @@ export default function App() {
       setItems(norm);
       lastSavedRef.current = JSON.stringify(norm);
       ensureBubblesForItems(norm, setBubbles);
+      const needsLastMovedPersist =
+        (arr || []).some((it) => !it || !it.last_moved_at);
+      if (needsLastMovedPersist) {
+        api.writeItems(norm);
+      }
     });
 
     // const off = api.onItemsUpdated((arr) => {
@@ -168,7 +181,18 @@ export default function App() {
   // === Helpers ===
   function updateItemByKey(uid, patch) {
     setItems((prev) =>
-      prev.map((it) => (it.uid === uid ? { ...it, ...patch } : it))
+      prev.map((it) => {
+        if (it.uid !== uid) return it;
+        const next = { ...it, ...patch };
+        if (
+          patch.hasOwnProperty("allocated_to") &&
+          patch.allocated_to &&
+          patch.allocated_to !== it.allocated_to
+        ) {
+          next.last_moved_at = new Date().toISOString();
+        }
+        return next;
+      })
     );
   }
 
@@ -192,10 +216,58 @@ export default function App() {
     );
   }
 
+  const filteredItems = useMemo(() => {
+    const nowMs = Date.now();
+    const specialBubbles = new Set(["Returns", "Cash Sales", "Shelf"]);
+    const generalThresholdMs =
+      Number(timeFilterMinutes || 0) * 60_000 +
+      Number(timeFilterHours || 0) * 3_600_000 +
+      Number(timeFilterDays || 0) * 86_400_000;
+
+    return items.filter((it) => {
+      const target = it.allocated_to || "New Stock";
+      const movedAt = new Date(it.last_moved_at).getTime();
+      if (Number.isNaN(movedAt)) return true;
+      const ageMs = nowMs - movedAt;
+
+      if (timeFilterEnabled && generalThresholdMs > 0 && ageMs > generalThresholdMs) {
+        return false;
+      }
+
+      if (returnsFilterEnabled && specialBubbles.has(target)) {
+        const limitDays = Number(returnsFilterDays || 0);
+        const ageDays = ageMs / 86_400_000;
+        if (ageDays > limitDays) return false;
+      }
+
+      return true;
+    });
+  }, [
+    items,
+    returnsFilterDays,
+    returnsFilterEnabled,
+    timeFilterDays,
+    timeFilterEnabled,
+    timeFilterHours,
+    timeFilterMinutes,
+  ]);
+
   const itemsByBubble = useMemo(
-    () => groupItemsByBubble(items, bubbles),
-    [items, bubbles]
+    () => groupItemsByBubble(filteredItems, bubbles),
+    [filteredItems, bubbles]
   );
+  const returnsByWarehouse = useMemo(() => {
+    const groups = new Map();
+    filteredItems.forEach((it) => {
+      if ((it.allocated_to || "").toLowerCase() !== "returns") return;
+      const warehouse = (it.warehouse || "").trim() || "Unspecified Warehouse";
+      if (!groups.has(warehouse)) groups.set(warehouse, []);
+      groups.get(warehouse).push(it);
+    });
+    return Array.from(groups.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([warehouse, groupedItems]) => ({ warehouse, items: groupedItems }));
+  }, [filteredItems]);
   useEffect(() => {
     let cancelled = false;
     async function loadUIState() {
@@ -273,8 +345,8 @@ export default function App() {
   );
   const printItems = useMemo(() => {
     if (!printBubble) return [];
-    return items.filter((it) => it.allocated_to === printBubble.name);
-  }, [items, printBubble]);
+    return filteredItems.filter((it) => it.allocated_to === printBubble.name);
+  }, [filteredItems, printBubble]);
 
   useEffect(() => {
     function handlePointerMove(e) {
@@ -355,6 +427,7 @@ export default function App() {
         uid: makeUid(),
         quantity: qtyToMove,
         allocated_to: targetBubble,
+        last_moved_at: new Date().toISOString(),
       };
       const next = [...prev];
       next[idx] = { ...item, quantity: remainder };
@@ -432,8 +505,11 @@ export default function App() {
         : validTargets[0] || "New Stock";
     let updatedItemsSnapshot = null;
     setItems((prev) => {
+      const nowIso = new Date().toISOString();
       const next = prev.map((it) =>
-        it.allocated_to === bubble.name ? { ...it, allocated_to: fallback } : it
+        it.allocated_to === bubble.name
+          ? { ...it, allocated_to: fallback, last_moved_at: nowIso }
+          : it
       );
       updatedItemsSnapshot = next;
       return next;
@@ -467,6 +543,16 @@ export default function App() {
       startX: clientX,
       startWidth: bubbleSizes[bubbleKey] || 360,
     };
+  }
+
+  function handleReturnItemToNewStock(uid) {
+    setItems((prev) => {
+      const next = prev.map((it) =>
+        it.uid === uid ? { ...it, allocated_to: "New Stock", last_moved_at: new Date().toISOString() } : it
+      );
+      ensureBubblesForItems(next, setBubbles);
+      return next;
+    });
   }
 
   function handleOpenPrint(bubble) {
@@ -726,7 +812,20 @@ export default function App() {
         </header>
 
         {currentView === "dashboard" ? (
-          <DashboardView />
+          <DashboardView
+            returnsFilterEnabled={returnsFilterEnabled}
+            setReturnsFilterEnabled={setReturnsFilterEnabled}
+            returnsFilterDays={returnsFilterDays}
+            setReturnsFilterDays={setReturnsFilterDays}
+            timeFilterEnabled={timeFilterEnabled}
+            setTimeFilterEnabled={setTimeFilterEnabled}
+            timeFilterMinutes={timeFilterMinutes}
+            setTimeFilterMinutes={setTimeFilterMinutes}
+            timeFilterHours={timeFilterHours}
+            setTimeFilterHours={setTimeFilterHours}
+            timeFilterDays={timeFilterDays}
+            setTimeFilterDays={setTimeFilterDays}
+          />
         ) : isStockFlowView ? (
           <StockFlowView
             newBubbleName={newBubbleName}
@@ -757,6 +856,11 @@ export default function App() {
             onStartBubbleMove={handleStartBubbleMove}
             onStartBubbleResize={handleStartBubbleResize}
             onActivateBubble={setActiveBubbleKey}
+          />
+        ) : currentView === "returns-management" ? (
+          <ReturnsManagementView
+            groups={returnsByWarehouse}
+            onReturnToNewStock={handleReturnItemToNewStock}
           />
         ) : currentView === "order-management" ? (
           <OrderManagementView

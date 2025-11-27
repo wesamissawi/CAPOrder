@@ -20,7 +20,7 @@ const toNumber = (value) => {
 
 const FALLBACK_DELETE_INFO = [
   "New Stock",
-  "Stock",
+  "Shelf",
   "Cash Sales",
   "Returns",
 ];
@@ -54,6 +54,7 @@ export default function BubbleColumn({
   const bubbleKey = name || id;
   const list = items || [];
   const [splitDrafts, setSplitDrafts] = React.useState({});
+  const [showAdvancedTools, setShowAdvancedTools] = React.useState(false);
   const allowDelete = !!onDeleteBubble && !isDefaultBubble;
   const deleteOptions = React.useMemo(() => {
     if (!allowDelete) return [];
@@ -82,6 +83,7 @@ export default function BubbleColumn({
   const bubbleTax = bubbleSubtotal * 0.13;
   const bubbleTotal = bubbleSubtotal + bubbleTax;
   const showSummary = !isDefaultBubble;
+  const hasAdvancedActions = onConsolidateItems || (allowDelete && deleteOptions.length > 0);
 
   const updateSplitDraft = (uid, patch) => {
     setSplitDrafts((prev) => {
@@ -196,61 +198,6 @@ export default function BubbleColumn({
           </div>
         </div>
       )}
-      {onConsolidateItems || (allowDelete && deleteOptions.length > 0) ? (
-        <div className="rounded-2xl border border-slate-200 bg-white/70 p-3 text-sm text-slate-700 flex flex-col gap-3">
-          {onConsolidateItems && (
-            <button
-              type="button"
-              className="w-full rounded-lg border border-indigo-200 px-3 py-2 text-indigo-700 font-semibold hover:bg-indigo-50 disabled:opacity-40"
-              disabled={!list || list.length === 0}
-              onClick={() => onConsolidateItems?.(name)}
-            >
-              Consolidate duplicate items
-            </button>
-          )}
-          {allowDelete && deleteOptions.length > 0 && (
-            <div className="flex flex-col gap-2 text-xs text-amber-900">
-              <select
-                className="border border-amber-200 rounded-lg bg-white/90 p-2 text-sm text-slate-700"
-                value={deleteSelection}
-                onChange={(e) => setDeleteSelection(e.target.value)}
-              >
-                {deleteOptions.map((option) => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-white bg-amber-500 hover:bg-amber-600 disabled:opacity-40"
-                disabled={!deleteSelection}
-                onClick={() => {
-                  if (!deleteSelection) return;
-                  const confirmed =
-                    typeof window === "undefined"
-                      ? true
-                      : window.confirm(
-                          list && list.length > 0
-                            ? `Delete "${name}" and move ${list.length} item(s) to ${deleteSelection}?`
-                            : `Delete "${name}" bubble?`
-                        );
-                  if (!confirmed) return;
-                  onDeleteBubble?.(id, deleteSelection);
-                }}
-              >
-                {deleteSelection
-                  ? `Delete bubble & move items to ${deleteSelection}`
-                  : "Delete bubble & move items"}
-              </button>
-              <p className="text-[11px]">
-                Move items manually first if they need different destinations. Any remaining items
-                will be reassigned to the selected bubble.
-              </p>
-            </div>
-          )}
-        </div>
-      ) : null}
       <textarea
         rows={2}
         className="mt-2 w-full rounded-xl border border-slate-300 p-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
@@ -269,7 +216,7 @@ export default function BubbleColumn({
           const cost = toNumber(it.cost);
           const itemSubtotal = qty * salesPrice;
           const showWarning =
-            !["New Stock Returns", "Stock"].includes(name) && cost > salesPrice;
+            !["New Stock Returns", "Shelf"].includes(name) && cost > salesPrice;
           const splitDraft = splitDrafts[uid] || {};
           const splitAmount = splitDraft.quantity ?? "";
           const splitTarget = splitDraft.target || it.allocated_to;
@@ -285,7 +232,7 @@ export default function BubbleColumn({
             <Card
               key={uid}
               className={`relative bg-white hover:shadow-xl transition-shadow duration-200 cursor-grab ${
-                !["New Stock Returns", "Stock"].includes(name) &&
+                !["New Stock Returns", "Shelf"].includes(name) &&
                 toNumber(it.cost) > toNumber(it.allocated_for || 0)
                   ? "border-2 border-red-300 shadow-red-200"
                   : ""
@@ -522,6 +469,87 @@ export default function BubbleColumn({
           );
         })}
       </div>
+
+      {hasAdvancedActions && (
+        <div className="mt-auto pt-1">
+          {showAdvancedTools ? (
+            <div className="rounded-2xl border border-slate-200 bg-white/80 p-3 text-sm text-slate-700 flex flex-col gap-3 shadow-inner">
+              <div className="flex items-center justify-between text-xs uppercase tracking-wide text-slate-500">
+                <span>Advanced tools</span>
+                <button
+                  type="button"
+                  className="rounded-full border border-slate-200 px-3 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-100"
+                  onClick={() => setShowAdvancedTools(false)}
+                  title="Hide advanced tools"
+                >
+                  Hide
+                </button>
+              </div>
+
+              {onConsolidateItems && (
+                <button
+                  type="button"
+                  className="w-full rounded-lg border border-indigo-200 px-3 py-2 text-indigo-700 font-semibold hover:bg-indigo-50 disabled:opacity-40"
+                  disabled={!list || list.length === 0}
+                  onClick={() => onConsolidateItems?.(name)}
+                >
+                  Consolidate duplicate items
+                </button>
+              )}
+              {allowDelete && deleteOptions.length > 0 && (
+                <div className="flex flex-col gap-2 text-xs text-amber-900">
+                  <select
+                    className="border border-amber-200 rounded-lg bg-white/90 p-2 text-sm text-slate-700"
+                    value={deleteSelection}
+                    onChange={(e) => setDeleteSelection(e.target.value)}
+                  >
+                    {deleteOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="w-full px-3 py-2 rounded-lg text-sm font-semibold text-white bg-amber-500 hover:bg-amber-600 disabled:opacity-40"
+                    disabled={!deleteSelection}
+                    onClick={() => {
+                      if (!deleteSelection) return;
+                      const confirmed =
+                        typeof window === "undefined"
+                          ? true
+                          : window.confirm(
+                              list && list.length > 0
+                                ? `Delete "${name}" and move ${list.length} item(s) to ${deleteSelection}?`
+                                : `Delete "${name}" bubble?`
+                            );
+                      if (!confirmed) return;
+                      onDeleteBubble?.(id, deleteSelection);
+                    }}
+                  >
+                    {deleteSelection
+                      ? `Delete bubble & move items to ${deleteSelection}`
+                      : "Delete bubble & move items"}
+                  </button>
+                  <p className="text-[11px]">
+                    Move items manually first if they need different destinations. Any remaining items
+                    will be reassigned to the selected bubble.
+                  </p>
+                </div>
+              )}
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="w-full rounded-full border border-indigo-200 bg-white/80 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-indigo-700 shadow hover:bg-indigo-50"
+              onClick={() => setShowAdvancedTools(true)}
+              title="Show advanced tools"
+            >
+              Advanced tools
+            </button>
+          )}
+        </div>
+      )}
       <button
         type="button"
         className="absolute right-2 bottom-2 w-5 h-5 rounded-full bg-slate-300 text-white text-[10px] flex items-center justify-center cursor-ew-resize shadow"

@@ -50,7 +50,7 @@ const itemKey = (it) => it.uid;
 const DEFAULT_BUBBLES = [
   { id: "new", name: "New Stock", notes: "" },
   { id: "cash", name: "Cash Sales", notes: "" },
-  { id: "stock", name: "Stock", notes: "" },
+  { id: "shelf", name: "Shelf", notes: "" },
   { id: "returns", name: "Returns", notes: "" },
 ];
 
@@ -65,10 +65,14 @@ function normalizeItems(arr) {
   return (arr || []).map((raw) => {
     const it = { ...raw };
     it.uid = it.uid || it.id || makeUid();
+    const allocatedToRaw =
+      it.allocated_to && it.allocated_to !== "" ? it.allocated_to : "New Stock";
+    const allocatedTo =
+      allocatedToRaw === "Stock" ? "Shelf" : allocatedToRaw;
     return {
       uid: it.uid,
       allocated_for: it.allocated_for ?? "",
-      allocated_to: it.allocated_to && it.allocated_to !== "" ? it.allocated_to : "New Stock",
+      allocated_to: allocatedTo,
       cost: String(it.cost ?? ""),
       date: String(it.date ?? ""),
       invoice_num: String(it.invoice_num ?? ""),

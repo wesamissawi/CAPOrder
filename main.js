@@ -9,16 +9,16 @@ const LOCK_DURATION_MS = 20000; // 20 seconds
 
 
 // ---- data paths ----
-const base = "\\\\GIRLSBOYS\\ushare\\Ghost PO\\Order_Items";
-const DATA_FILE_DEFAULT = path.join(base, "outstanding_items.json");
+// const base = "\\\\GIRLSBOYS\\ushare\\Ghost PO\\Order_Items";
+// const DATA_FILE_DEFAULT = path.join(base, "outstanding_items.json");
 
-// const DATA_FILE_DEFAULT = path.join(app.getPath('userData'), 'outstanding_items.json');
+const DATA_FILE_DEFAULT = path.join(app.getPath('userData'), 'outstanding_items.json');
 
 
-const base2 = "\\\\GIRLSBOYS\\ushare\\Ghost PO\\Orders";
-const ORDERS_FILE_DEFAULT = path.join(base2, 'allOrders.json');
+// const base2 = "\\\\GIRLSBOYS\\ushare\\Ghost PO\\Orders";
+// const ORDERS_FILE_DEFAULT = path.join(base2, 'allOrders.json');
 
-// const ORDERS_FILE_DEFAULT = path.join(app.getPath('userData'), 'orders.json');
+const ORDERS_FILE_DEFAULT = path.join(app.getPath('userData'), 'orders.json');
 
 
 
