@@ -1,6 +1,6 @@
 {
   "name": "my-electron-app",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "OrderMgmtSystem",
   "keywords": [
     "CAP",
@@ -30,6 +30,7 @@
     "@electron/fuses": "^1.8.0",
     "concurrently": "^9.2.1",
     "electron": "^39.1.1",
+    "electron-packager": "^17.1.2",
     "wait-on": "^7.0.1"
   },
   "dependencies": {
