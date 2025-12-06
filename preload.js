@@ -32,4 +32,8 @@ contextBridge.exposeInMainWorld('api', {
   readOrders: () => ipcRenderer.invoke('orders:read'),
   writeOrders: (orders) => ipcRenderer.invoke('orders:write', orders),
   getOrdersPath: () => ipcRenderer.invoke('orders:get-path'),
+  fetchWorldOrders: () => ipcRenderer.invoke('orders:fetch-world'),
+  fetchTransbecOrders: () => ipcRenderer.invoke('orders:fetch-transbec'),
+  fetchProforceOrders: () => ipcRenderer.invoke('orders:fetch-proforce'),
+  addOrdersToOutstanding: () => ipcRenderer.invoke('orders:add-to-outstanding'),
 });

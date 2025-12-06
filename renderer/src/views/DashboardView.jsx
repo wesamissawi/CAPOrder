@@ -14,6 +14,22 @@ export default function DashboardView({
   setTimeFilterHours,
   timeFilterDays,
   setTimeFilterDays,
+  onGetWorldOrders,
+  worldOrdersRunning,
+  worldOrdersStatus,
+  worldOrdersError,
+  onGetTransbecOrders,
+  transbecOrdersRunning,
+  transbecOrdersStatus,
+  transbecOrdersError,
+  onGetProforceOrders,
+  proforceRunning,
+  proforceStatus,
+  proforceError,
+  onAddOutstanding,
+  outstandingRunning,
+  outstandingStatus,
+  outstandingError,
 }) {
   return (
     <section className="grid gap-4 lg:grid-cols-2">
@@ -114,6 +130,120 @@ export default function DashboardView({
             <span className="text-xs text-slate-700">{timeFilterDays}d</span>
           </div>
         </div>
+      </Card>
+
+      <Card className="bg-white/80">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-lg font-semibold text-slate-800">World orders pull</p>
+            <p className="text-sm text-slate-500">
+              Opens iautoparts and saves the latest orders using your stored credentials.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onGetWorldOrders}
+            disabled={worldOrdersRunning}
+            className="px-4 py-2 rounded-full bg-indigo-600 text-white text-sm font-semibold disabled:opacity-60"
+          >
+            {worldOrdersRunning ? "Fetching..." : "GetWorldOrders"}
+          </button>
+        </div>
+        {worldOrdersError && (
+          <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+            {worldOrdersError}
+          </div>
+        )}
+        {worldOrdersStatus && !worldOrdersError && (
+          <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700">
+            {worldOrdersStatus}
+          </div>
+        )}
+      </Card>
+
+      <Card className="bg-white/80">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-lg font-semibold text-slate-800">Transbec orders pull</p>
+            <p className="text-sm text-slate-500">
+              Opens Transbec and saves the latest orders/products using stored credentials.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onGetTransbecOrders}
+            disabled={transbecOrdersRunning}
+            className="px-4 py-2 rounded-full bg-indigo-600 text-white text-sm font-semibold disabled:opacity-60"
+          >
+            {transbecOrdersRunning ? "Fetching..." : "GetTransbecOrders"}
+          </button>
+        </div>
+        {transbecOrdersError && (
+          <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+            {transbecOrdersError}
+          </div>
+        )}
+        {transbecOrdersStatus && !transbecOrdersError && (
+          <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700">
+            {transbecOrdersStatus}
+          </div>
+        )}
+      </Card>
+
+      <Card className="bg-white/80">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-lg font-semibold text-slate-800">Proforce orders pull</p>
+            <p className="text-sm text-slate-500">Logs in, scrapes Proforce orders, and saves to orders.json.</p>
+          </div>
+          <button
+            type="button"
+            onClick={onGetProforceOrders}
+            disabled={proforceRunning}
+            className="px-4 py-2 rounded-full bg-indigo-600 text-white text-sm font-semibold disabled:opacity-60"
+          >
+            {proforceRunning ? "Fetching..." : "GetProforceOrders"}
+          </button>
+        </div>
+        {proforceError && (
+          <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+            {proforceError}
+          </div>
+        )}
+        {proforceStatus && !proforceError && (
+          <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700">
+            {proforceStatus}
+          </div>
+        )}
+      </Card>
+
+      <Card className="bg-white/80">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-lg font-semibold text-slate-800">Add to Outstanding</p>
+            <p className="text-sm text-slate-500">
+              Scans orders.json for line items not yet added and appends them to outstanding_items.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onAddOutstanding}
+            disabled={outstandingRunning}
+            className="px-4 py-2 rounded-full bg-emerald-600 text-white text-sm font-semibold disabled:opacity-60"
+          >
+            {outstandingRunning ? "Adding..." : "Add Outstanding"}
+          </button>
+        </div>
+        {outstandingError && (
+          <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+            {outstandingError}
+          </div>
+        )}
+        {outstandingStatus && !outstandingError && (
+          <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700">
+            {outstandingStatus}
+          </div>
+        )}
       </Card>
     </section>
   );

@@ -11,6 +11,7 @@ export default function StockFlowView({
   bubbles,
   bubblePositions,
   bubbleSizes,
+  bubbleZOrder,
   activeBubbleKey,
   workspaceRef,
   printBubble,
@@ -76,6 +77,12 @@ export default function StockFlowView({
             const pos = bubblePositions[bubbleKey] || { x: 0, y: index * 340 };
             const width = bubbleSizes[bubbleKey] || 360;
             const isActive = activeBubbleKey === bubbleKey;
+            const zIndexBase = 200;
+            const orderIndex = bubbleZOrder?.indexOf(bubbleKey);
+            const zIndex =
+              orderIndex !== undefined && orderIndex >= 0
+                ? zIndexBase + orderIndex
+                : zIndexBase + index;
             return (
               <div
                 key={b.id}
@@ -84,7 +91,7 @@ export default function StockFlowView({
                   left: `${pos.x}px`,
                   top: `${pos.y}px`,
                   width: `${width}px`,
-                  zIndex: isActive ? 1000 : 100 + index,
+                  zIndex,
                 }}
               >
                 <BubbleColumn
