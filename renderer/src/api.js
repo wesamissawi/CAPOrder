@@ -20,6 +20,8 @@ const fallbackApi = {
   readOrders: async () => [],
   writeOrders: async () => ({ ok: false }),
   getOrdersPath: async () => ({ path: "(not in Electron)" }),
+  fetchWorldOrders: async () => ({ ok: false }),
+  addOrdersToOutstanding: async () => ({ ok: false }),
 };
 
 const api = window.api ?? fallbackApi;

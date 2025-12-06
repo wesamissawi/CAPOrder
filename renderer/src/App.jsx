@@ -5,6 +5,7 @@ import InvoicePreview from "./components/InvoicePreview";
 import DashboardView from "./views/DashboardView";
 import StockFlowView from "./views/StockFlowView";
 import OrderManagementView from "./views/OrderManagementView";
+import RefToInvView from "./views/RefToInvView";
 import PaymentManagementView from "./views/PaymentManagementView";
 import ReturnsManagementView from "./views/ReturnsManagementView";
 import {
@@ -27,6 +28,7 @@ const VIEWS = [
   { id: "stock-flow", label: "Stock Flow" },
   { id: "returns-management", label: "Returns Management" },
   { id: "order-management", label: "Order Management" },
+  { id: "ref-to-inv", label: "Ref to Inv" },
   { id: "payment-management", label: "Payment Management" },
 ];
 
@@ -37,6 +39,7 @@ export default function App() {
   const [newBubbleName, setNewBubbleName] = useState("");
   const [bubblePositions, setBubblePositions] = useState({});
   const [bubbleSizes, setBubbleSizes] = useState({});
+  const [bubbleZOrder, setBubbleZOrder] = useState([]);
   const [activeBubbleKey, setActiveBubbleKey] = useState(null);
   const [uiStateReady, setUiStateReady] = useState(false);
   const [currentView, setCurrentView] = useState("stock-flow");
@@ -54,6 +57,19 @@ export default function App() {
   const [ordersDirty, setOrdersDirty] = useState(false);
   const [ordersSaving, setOrdersSaving] = useState(false);
   const [ordersSearch, setOrdersSearch] = useState("");
+  const [ordersPickupFilter, setOrdersPickupFilter] = useState("all");
+  const [worldOrdersRunning, setWorldOrdersRunning] = useState(false);
+  const [worldOrdersStatus, setWorldOrdersStatus] = useState("");
+  const [worldOrdersError, setWorldOrdersError] = useState("");
+  const [transbecOrdersRunning, setTransbecOrdersRunning] = useState(false);
+  const [transbecOrdersStatus, setTransbecOrdersStatus] = useState("");
+  const [transbecOrdersError, setTransbecOrdersError] = useState("");
+  const [proforceRunning, setProforceRunning] = useState(false);
+  const [proforceStatus, setProforceStatus] = useState("");
+  const [proforceError, setProforceError] = useState("");
+  const [outstandingRunning, setOutstandingRunning] = useState(false);
+  const [outstandingStatus, setOutstandingStatus] = useState("");
+  const [outstandingError, setOutstandingError] = useState("");
   const ordersLastSavedRef = useRef("");
 
   const [editingItemUid, setEditingItemUid] = useState(null);
@@ -62,6 +78,7 @@ export default function App() {
   const [printGeneratedAt, setPrintGeneratedAt] = useState(null);
 
   const editingItemUidRef = useRef(null);
+  const pendingItemsRefreshRef = useRef(false);
   const printPreviewRef = useRef(null);
   const workspaceRef = useRef(null);
   const bubbleDragRef = useRef(null);
@@ -123,11 +140,13 @@ export default function App() {
       // If a modal edit is open, ignore external changes
       if (editingItemUidRef.current) {
         console.log("[ipc] items:updated ignored (modal editing)");
+        pendingItemsRefreshRef.current = true;
         return;
       }
 
       if (isEditingAnythingRef.current) {
         console.log("[ipc] items:updated ignored (user is editing)");
+        pendingItemsRefreshRef.current = true;
         return;
       }
 
@@ -291,6 +310,9 @@ export default function App() {
             ...state.bubbleSizes,
           }));
         }
+        if (Array.isArray(state.bubbleZOrder)) {
+          setBubbleZOrder(state.bubbleZOrder);
+        }
       } catch (e) {
         console.warn("[ui-state] read failed", e);
       } finally {
@@ -305,9 +327,9 @@ export default function App() {
   useEffect(() => {
     if (!uiStateReady || !api?.writeUIState) return;
     api
-      .writeUIState({ bubblePositions, bubbleSizes })
+      .writeUIState({ bubblePositions, bubbleSizes, bubbleZOrder })
       .catch((e) => console.warn("[ui-state] write failed", e));
-  }, [bubblePositions, bubbleSizes, uiStateReady]);
+  }, [bubblePositions, bubbleSizes, bubbleZOrder, uiStateReady]);
   useEffect(() => {
     setBubblePositions((prev) => {
       let changed = false;
@@ -337,6 +359,13 @@ export default function App() {
         }
       });
       return changed ? next : prev;
+    });
+    setBubbleZOrder((prev) => {
+      const keys = bubbles.map((b) => b.name || b.id);
+      const filtered = prev.filter((k) => keys.includes(k));
+      const missing = keys.filter((k) => !filtered.includes(k));
+      const next = filtered.concat(missing);
+      return JSON.stringify(next) === JSON.stringify(prev) ? prev : next;
     });
   }, [bubbles]);
   const printBubble = useMemo(
@@ -526,7 +555,7 @@ export default function App() {
     const current = bubblePositions[bubbleKey] || { x: 0, y: 0 };
     prevBodyUserSelectRef.current = document.body.style.userSelect;
     document.body.style.userSelect = "none";
-    setActiveBubbleKey(bubbleKey);
+    handleActivateBubble(bubbleKey);
     bubbleDragRef.current = {
       key: bubbleKey,
       offsetX: clientX - rect.left - current.x,
@@ -537,7 +566,7 @@ export default function App() {
   function handleStartBubbleResize(bubbleKey, clientX) {
     prevBodyUserSelectRef.current = document.body.style.userSelect;
     document.body.style.userSelect = "none";
-    setActiveBubbleKey(bubbleKey);
+    handleActivateBubble(bubbleKey);
     bubbleResizeRef.current = {
       key: bubbleKey,
       startX: clientX,
@@ -552,6 +581,15 @@ export default function App() {
       );
       ensureBubblesForItems(next, setBubbles);
       return next;
+    });
+  }
+
+  function handleActivateBubble(bubbleKey) {
+    setActiveBubbleKey(bubbleKey);
+    setBubbleZOrder((prev) => {
+      const keys = bubbles.map((b) => b.name || b.id);
+      const filtered = prev.filter((k) => keys.includes(k) && k !== bubbleKey);
+      return [...filtered, bubbleKey];
     });
   }
 
@@ -670,6 +708,7 @@ export default function App() {
 
       setEditingItemUid(null);
       setEditingDraft(null);
+      await refreshItemsIfPending();
     } catch (e) {
       console.error("applyEdit error", e);
       alert("Error saving changes.");
@@ -686,6 +725,25 @@ export default function App() {
     }
     setEditingItemUid(null);
     setEditingDraft(null);
+    await refreshItemsIfPending();
+  }
+
+  async function refreshItemsIfPending() {
+    if (!pendingItemsRefreshRef.current) return;
+    try {
+      const latest = await api.readItems();
+      const norm = normalizeItems(latest || []);
+      setItems((prev) => {
+        const merged = mergeItems(prev, norm);
+        lastSavedRef.current = JSON.stringify(merged);
+        ensureBubblesForItems(merged, setBubbles);
+        return merged;
+      });
+    } catch (e) {
+      console.error("[items] refresh after edit failed", e);
+    } finally {
+      pendingItemsRefreshRef.current = false;
+    }
   }
 
   async function loadOrders() {
@@ -727,8 +785,32 @@ export default function App() {
     updateOrderAt(index, { [field]: checked });
   }
 
-  function handleOrderFieldChange(index, field, value) {
-    updateOrderAt(index, { [field]: value });
+  function updateOrderByKey(key, patch) {
+    if (!key) return;
+    setOrders((prev) => {
+      let changed = false;
+      const next = prev.map((o) => {
+        if (!o) return o;
+        const refMatch =
+          o.reference &&
+          String(o.reference).trim().toUpperCase() === String(key).trim().toUpperCase();
+        const rowMatch = o.__row && String(o.__row) === String(key);
+        if (!refMatch && !rowMatch) return o;
+        changed = true;
+        return { ...o, ...(patch || {}) };
+      });
+      if (changed) setOrdersDirty(true);
+      return next;
+    });
+  }
+  function handleOrderFieldChange(referenceKey, field, value) {
+    updateOrderByKey(referenceKey, { [field]: value });
+  }
+  function handleOrderInvoiceChange(referenceKey, value) {
+    updateOrderByKey(referenceKey, { source_invoice: value });
+  }
+  function handleOrderCheckboxChange(referenceKey, field, checked) {
+    updateOrderByKey(referenceKey, { [field]: checked });
   }
 
   async function handleSaveOrders() {
@@ -736,11 +818,16 @@ export default function App() {
     try {
       setOrdersSaving(true);
       setOrdersError(null);
-      const res = await api?.writeOrders?.(orders);
+      const normalized = (orders || []).map((o) => {
+        const invFilled = Boolean((o?.source_invoice || "").trim());
+        return { ...o, hasInvoiceNum: invFilled };
+      });
+      const res = await api?.writeOrders?.(normalized);
       if (!res?.ok) {
         throw new Error("Failed to save orders.");
       }
-      ordersLastSavedRef.current = JSON.stringify(orders);
+      setOrders(normalized);
+      ordersLastSavedRef.current = JSON.stringify(normalized);
       setOrdersDirty(false);
     } catch (e) {
       console.error("[orders] save error", e);
@@ -750,31 +837,168 @@ export default function App() {
     }
   }
 
+  async function handleGetWorldOrders() {
+    if (!api?.fetchWorldOrders) return;
+    try {
+      setWorldOrdersRunning(true);
+      setWorldOrdersError("");
+      setWorldOrdersStatus("");
+      setOrdersError(null);
+      const res = await api.fetchWorldOrders();
+      if (!res?.ok) {
+        throw new Error(res?.error || "Failed to fetch World orders.");
+      }
+      const list = Array.isArray(res.orders) ? res.orders : [];
+      setOrders(list);
+      ordersLastSavedRef.current = JSON.stringify(list);
+      setOrdersDirty(false);
+      setOrdersInitialized(true);
+      if (res.path) setOrdersSourcePath(res.path);
+      const baseMsg = `Fetched ${res.count ?? list.length} orders and saved to ${res.path || "orders.json"}.`;
+      const logMsg = Array.isArray(res.statusLog) && res.statusLog.length
+        ? `\n${res.statusLog.join("\n")}`
+        : "";
+      setWorldOrdersStatus(baseMsg + logMsg);
+    } catch (e) {
+      console.error("[orders] world fetch error", e);
+      setWorldOrdersError(e?.message || "Failed to fetch World orders.");
+    } finally {
+      setWorldOrdersRunning(false);
+    }
+  }
+
+  async function handleGetTransbecOrders() {
+    if (!api?.fetchTransbecOrders) return;
+    try {
+      setTransbecOrdersRunning(true);
+      setTransbecOrdersError("");
+      setTransbecOrdersStatus("");
+      setOrdersError(null);
+      const res = await api.fetchTransbecOrders();
+      if (!res?.ok) {
+        throw new Error(res?.error || "Failed to fetch Transbec orders.");
+      }
+      const list = Array.isArray(res.orders) ? res.orders : [];
+      setOrders(list);
+      ordersLastSavedRef.current = JSON.stringify(list);
+      setOrdersDirty(false);
+      setOrdersInitialized(true);
+      if (res.path) setOrdersSourcePath(res.path);
+      const baseMsg = `Fetched ${list.length} Transbec order(s) and saved to ${res.path || "orders.json"}.`;
+      const logMsg =
+        Array.isArray(res.statusLog) && res.statusLog.length ? `\n${res.statusLog.join("\n")}` : "";
+      setTransbecOrdersStatus(baseMsg + logMsg);
+    } catch (e) {
+      console.error("[orders] transbec fetch error", e);
+      setTransbecOrdersError(e?.message || "Failed to fetch Transbec orders.");
+    } finally {
+      setTransbecOrdersRunning(false);
+    }
+  }
+
+  async function handleGetProforceOrders() {
+    if (!api?.fetchProforceOrders) return;
+    try {
+      setProforceRunning(true);
+      setProforceError("");
+      setProforceStatus("");
+      setOrdersError(null);
+      const res = await api.fetchProforceOrders();
+      if (!res?.ok) throw new Error(res?.error || "Failed to fetch Proforce orders.");
+      const list = Array.isArray(res.orders) ? res.orders : [];
+      setOrders(list);
+      ordersLastSavedRef.current = JSON.stringify(list);
+      setOrdersDirty(false);
+      setOrdersInitialized(true);
+      if (res.path) setOrdersSourcePath(res.path);
+      const baseMsg = `Fetched ${list.length} Proforce order(s) and saved to ${res.path || "orders.json"}.`;
+      const logMsg =
+        Array.isArray(res.statusLog) && res.statusLog.length ? `\n${res.statusLog.join("\n")}` : "";
+      setProforceStatus(baseMsg + logMsg);
+    } catch (e) {
+      console.error("[orders] proforce fetch error", e);
+      setProforceError(e?.message || "Failed to fetch Proforce orders.");
+    } finally {
+      setProforceRunning(false);
+    }
+  }
+
+  async function handleAddOutstanding() {
+    if (!api?.addOrdersToOutstanding) return;
+    try {
+      setOutstandingRunning(true);
+      setOutstandingError("");
+      setOutstandingStatus("");
+      const res = await api.addOrdersToOutstanding();
+      if (!res?.ok) throw new Error(res?.error || "Failed to add outstanding items.");
+      setOutstandingStatus(`Added ${res.added ?? 0} outstanding line(s).`);
+
+      // Pull fresh outstanding items immediately (fs.watch can be skipped while editing)
+      const latestItems = await api.readItems();
+      const normItems = normalizeItems(latestItems || []);
+      setItems((prev) => {
+        const merged = mergeItems(prev, normItems);
+        lastSavedRef.current = JSON.stringify(merged);
+        ensureBubblesForItems(merged, setBubbles);
+        return merged;
+      });
+
+      if (ordersInitialized) {
+        // refresh orders so addedToOutstanding flags are reflected
+        const refreshed = await api.readOrders();
+        setOrders(Array.isArray(refreshed) ? refreshed : []);
+      }
+    } catch (e) {
+      console.error("[outstanding] add error", e);
+      setOutstandingError(e?.message || "Failed to add outstanding items.");
+    } finally {
+      setOutstandingRunning(false);
+    }
+  }
+
   useEffect(() => {
-    if (currentView === "order-management" && !ordersInitialized && !ordersLoading) {
+    const needsOrders = currentView === "order-management" || currentView === "ref-to-inv";
+    if (needsOrders && !ordersInitialized && !ordersLoading) {
       loadOrders();
     }
   }, [currentView, ordersInitialized, ordersLoading]);
 
   const filteredOrders = useMemo(() => {
     const q = ordersSearch.trim().toLowerCase();
-    if (!q) return orders;
-    return orders.filter((order) => {
-      const fields = [
-        order.reference,
-        order.warehouse,
-        order.invoiceNum,
-        order.journalEntry,
-        order.customerName,
-        order.supplier,
-        order.source,
-      ];
-      return fields.some((val) => {
-        if (val === undefined || val === null) return false;
-        return String(val).toLowerCase().includes(q);
-      });
+    const filtered = !q
+      ? orders
+      : orders.filter((order) => {
+          const fields = [
+            order.reference,
+            order.warehouse,
+            order.source_invoice,
+            order.journalEntry,
+            order.customerName,
+            order.supplier,
+            order.source,
+          ];
+          return fields.some((val) => {
+            if (val === undefined || val === null) return false;
+            return String(val).toLowerCase().includes(q);
+          });
+        });
+
+    const pickupFiltered = filtered.filter((order) => {
+      if (ordersPickupFilter === "picked") return Boolean(order.pickedUp);
+      if (ordersPickupFilter === "not-picked") return !order.pickedUp;
+      return true;
     });
-  }, [orders, ordersSearch]);
+
+    // sort by orderDate descending (newest first), fallback to orderDateRaw string
+    return [...(pickupFiltered || [])].sort((a, b) => {
+      const da = new Date(a?.orderDate || a?.orderDateRaw || 0).getTime();
+      const db = new Date(b?.orderDate || b?.orderDateRaw || 0).getTime();
+      if (Number.isNaN(da) && Number.isNaN(db)) return 0;
+      if (Number.isNaN(da)) return 1;
+      if (Number.isNaN(db)) return -1;
+      return db - da;
+    });
+  }, [orders, ordersSearch, ordersPickupFilter]);
 
   const hasSearch = ordersSearch.trim().length > 0;
 
@@ -825,6 +1049,22 @@ export default function App() {
             setTimeFilterHours={setTimeFilterHours}
             timeFilterDays={timeFilterDays}
             setTimeFilterDays={setTimeFilterDays}
+            onGetWorldOrders={handleGetWorldOrders}
+            worldOrdersRunning={worldOrdersRunning}
+            worldOrdersStatus={worldOrdersStatus}
+            worldOrdersError={worldOrdersError}
+            onGetTransbecOrders={handleGetTransbecOrders}
+            transbecOrdersRunning={transbecOrdersRunning}
+            transbecOrdersStatus={transbecOrdersStatus}
+            transbecOrdersError={transbecOrdersError}
+            onGetProforceOrders={handleGetProforceOrders}
+            proforceRunning={proforceRunning}
+            proforceStatus={proforceStatus}
+            proforceError={proforceError}
+            onAddOutstanding={handleAddOutstanding}
+            outstandingRunning={outstandingRunning}
+            outstandingStatus={outstandingStatus}
+            outstandingError={outstandingError}
           />
         ) : isStockFlowView ? (
           <StockFlowView
@@ -836,6 +1076,7 @@ export default function App() {
             bubbles={bubbles}
             bubblePositions={bubblePositions}
             bubbleSizes={bubbleSizes}
+            bubbleZOrder={bubbleZOrder}
             activeBubbleKey={activeBubbleKey}
             workspaceRef={workspaceRef}
             printBubble={printBubble}
@@ -855,18 +1096,28 @@ export default function App() {
             defaultBubbleNames={DEFAULT_BUBBLE_NAMES}
             onStartBubbleMove={handleStartBubbleMove}
             onStartBubbleResize={handleStartBubbleResize}
-            onActivateBubble={setActiveBubbleKey}
+            onActivateBubble={handleActivateBubble}
           />
         ) : currentView === "returns-management" ? (
           <ReturnsManagementView
             groups={returnsByWarehouse}
             onReturnToNewStock={handleReturnItemToNewStock}
           />
+        ) : currentView === "ref-to-inv" ? (
+          <RefToInvView
+            orders={orders}
+            ordersLoading={ordersLoading}
+            ordersError={ordersError}
+            handleOrderInvoiceChange={handleOrderInvoiceChange}
+            handleSaveOrders={handleSaveOrders}
+          />
         ) : currentView === "order-management" ? (
           <OrderManagementView
             ordersSourcePath={ordersSourcePath}
             ordersSearch={ordersSearch}
             setOrdersSearch={setOrdersSearch}
+            ordersPickupFilter={ordersPickupFilter}
+            setOrdersPickupFilter={setOrdersPickupFilter}
             ordersDirty={ordersDirty}
             ordersSaving={ordersSaving}
             ordersLoading={ordersLoading}

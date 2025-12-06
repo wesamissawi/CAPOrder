@@ -34,6 +34,8 @@
     "wait-on": "^7.0.1"
   },
   "dependencies": {
-    "electron-squirrel-startup": "^1.0.1"
+    "dotenv": "^17.2.3",
+    "electron-squirrel-startup": "^1.0.1",
+    "playwright": "^1.57.0"
   }
 }

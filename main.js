@@ -2,6 +2,10 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { randomUUID } = require('crypto');
+const { getWorldOrders } = require('./src/scrapers/worldScraper');
+const { getTransbecOrders } = require('./src/scrapers/transbecScraper');
+const { getProforceOrders } = require('./src/scrapers/proforceScraper');
 
 const isDev = !app.isPackaged;
 
@@ -19,6 +23,13 @@ const DATA_FILE_DEFAULT = path.join(app.getPath('userData'), 'outstanding_items.
 // const ORDERS_FILE_DEFAULT = path.join(base2, 'allOrders.json');
 
 const ORDERS_FILE_DEFAULT = path.join(app.getPath('userData'), 'orders.json');
+const WORLD_DATA_DIR = path.join(app.getPath('userData'), 'world');
+const WORLD_STORAGE_STATE = path.join(WORLD_DATA_DIR, 'world_storage_state.json');
+const TRANSBEC_DATA_DIR = path.join(app.getPath('userData'), 'transbec');
+const TRANSBEC_STORAGE_STATE = path.join(TRANSBEC_DATA_DIR, 'transbec_storage_state.json');
+const TRANSBEC_PRODUCTS_PATH = path.join(TRANSBEC_DATA_DIR, 'transbec_products.json');
+const PROFORCE_DATA_DIR = path.join(app.getPath('userData'), 'proforce');
+const PROFORCE_STORAGE_STATE = path.join(PROFORCE_DATA_DIR, 'proforce_storage_state.json');
 
 
 
@@ -77,6 +88,63 @@ function writeOrdersAt(file, orders) {
 }
 function writeOrders(orders) {
   return writeOrdersAt(getOrdersFile(), orders);
+}
+function ensureDir(dirPath) {
+  try { fs.mkdirSync(dirPath, { recursive: true }); } catch {}
+}
+
+function toMoneyString(val) {
+  if (val === null || val === undefined || val === '') return '';
+  const num = Number(val);
+  if (Number.isFinite(num)) return num.toFixed(2);
+  return String(val);
+}
+
+function toDDMMYYYY(order) {
+  // Prefer ISO orderDate
+  if (order?.orderDate) {
+    const d = new Date(order.orderDate);
+    if (!Number.isNaN(d.getTime())) {
+      const dd = String(d.getDate()).padStart(2, '0');
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const yyyy = d.getFullYear();
+      return `${dd}${mm}${yyyy}`;
+    }
+  }
+  // Fallback: sageDate (DDMMYY)
+  const s = String(order?.sageDate || '').trim();
+  if (s.length === 6) {
+    return `${s.slice(0, 2)}${s.slice(2, 4)}20${s.slice(4, 6)}`;
+  }
+  return '';
+}
+
+function makeOutstandingFromLine(order, line) {
+  const nowIso = new Date().toISOString();
+  const itemcode = `${line?.partLineCode || ''} ${line?.partNumber || ''}`.trim() || (line?.partNumber || line?.partLineCode || 'ITEM');
+  const costVal = line?.costPriceValue ?? line?.costPrice ?? line?.extendedValue ?? line?.extended;
+  const qty = Number(line?.quantity ?? 1) || 1;
+  const inv = (order?.source_invoice || order?.invoiceNum || '').trim();
+  return {
+    uid: randomUUID(),
+    allocated_for: toMoneyString(line?.extended ?? line?.costPrice ?? order?.total ?? order?.totalRaw ?? ''),
+    allocated_to: 'New Stock',
+    cost: toMoneyString(costVal),
+    date: toDDMMYYYY(order),
+    invoice_num: '',
+    'invoiced date': '',
+    'invoiced status': '',
+    itemcode,
+    notes1: line?.partDescription || '',
+    notes2: '',
+    source_inv: inv || order?.source || 'world',
+    warehouse: order?.warehouse || order?.seller || '',
+    last_moved_at: nowIso,
+    quantity: qty,
+    reference_num: order?.reference || '',
+    sold_date: '',
+    sold_status: '',
+  };
 }
 
 function startWatching(win) {
@@ -244,7 +312,160 @@ ipcMain.handle('orders:write', (_evt, orders) => {
   const a = JSON.stringify(current);
   const b = JSON.stringify(orders ?? []);
   if (a !== b) writeOrders(orders);              // only write if actually different
+  try {
+    syncOutstandingInvoices(orders ?? []);
+  } catch (e) {
+    console.error('[orders:write] sync outstanding failed', e);
+  }
   return { ok: true };
+});
+ipcMain.handle('orders:add-to-outstanding', () => {
+  try {
+    const orders = readOrders();
+    const items = readItems();
+    const newItems = [];
+    let lineUpdates = 0;
+
+    const updatedOrders = orders.map((order) => {
+      if (!order || !Array.isArray(order.lineItems)) return order;
+      const updatedLineItems = order.lineItems.map((line) => {
+        if (!line || line.addedToOutstanding === true) return line;
+        const outItem = makeOutstandingFromLine(order, line);
+        newItems.push(outItem);
+        lineUpdates += 1;
+        return { ...line, addedToOutstanding: true };
+      });
+      return { ...order, lineItems: updatedLineItems };
+    });
+
+    if (newItems.length > 0) {
+      const mergedItems = items.concat(newItems);
+      writeItems(mergedItems);
+      writeOrders(updatedOrders);
+    }
+
+    return { ok: true, added: newItems.length, linesUpdated: lineUpdates };
+  } catch (e) {
+    console.error('[orders:add-to-outstanding]', e);
+    return { ok: false, error: e?.message || 'Failed to add outstanding items.' };
+  }
+});
+
+function syncOutstandingInvoices(orders) {
+  try {
+    const items = readItems();
+    const byRef = new Map();
+    (orders || []).forEach((o) => {
+      if (!o || !o.reference) return;
+      const inv = (o.source_invoice || o.invoiceNum || '').trim();
+      if (!inv) return;
+      const key = String(o.reference).trim().toUpperCase();
+      if (key) byRef.set(key, inv);
+    });
+    if (byRef.size === 0) return;
+
+    let changed = false;
+    const updated = items.map((it) => {
+      if (!it || !it.reference_num) return it;
+      const key = String(it.reference_num).trim().toUpperCase();
+      const inv = byRef.get(key);
+      if (!inv) return it;
+      if (it.source_inv === inv) return it;
+      changed = true;
+      return { ...it, source_inv: inv };
+    });
+
+    if (changed) {
+      writeItems(updated);
+    }
+  } catch (e) {
+    console.error('[syncOutstandingInvoices]', e);
+  }
+}
+ipcMain.handle('orders:fetch-world', async () => {
+  try {
+    ensureDir(WORLD_DATA_DIR);
+    const existing = readOrders();
+    const targetOrdersPath = getOrdersFile();
+    const res = await getWorldOrders({
+      storageDir: WORLD_DATA_DIR,
+      storageStatePath: WORLD_STORAGE_STATE,
+      ordersPath: targetOrdersPath,
+      existingOrders: existing,
+    });
+    if (res?.ok && Array.isArray(res.orders)) {
+      writeOrders(res.orders);
+    }
+    return { ok: true, ...(res || {}), path: targetOrdersPath };
+  } catch (e) {
+    console.error('[orders:fetch-world]', e);
+    return { ok: false, error: e?.message || 'Failed to fetch World orders.' };
+  }
+});
+
+ipcMain.handle('orders:fetch-transbec', async () => {
+  try {
+    ensureDir(TRANSBEC_DATA_DIR);
+    const targetOrdersPath = getOrdersFile();
+    const existing = readOrders();
+    const res = await getTransbecOrders({
+      storageDir: TRANSBEC_DATA_DIR,
+      storageStatePath: TRANSBEC_STORAGE_STATE,
+      ordersPath: targetOrdersPath,
+      productsPath: TRANSBEC_PRODUCTS_PATH,
+      existingOrders: existing,
+      maxPages: 1, // limit to first page as requested
+    });
+    let merged = Array.isArray(res?.orders) ? res.orders : [];
+    if (res?.ok) {
+      const byRef = new Map();
+      (existing || []).forEach((o) => {
+        if (!o?.reference) return;
+        const key = String(o.reference).trim().toUpperCase();
+        if (key) byRef.set(key, o);
+      });
+      for (const o of merged) {
+        const key = o?.reference ? String(o.reference).trim().toUpperCase() : "";
+        if (!key) continue;
+        if (!byRef.has(key)) {
+          byRef.set(key, o);
+        }
+      }
+      merged = Array.from(byRef.values());
+      writeOrders(merged);
+    }
+    return {
+      ok: true,
+      ...(res || {}),
+      orders: merged,
+      path: targetOrdersPath,
+      productsPath: TRANSBEC_PRODUCTS_PATH,
+    };
+  } catch (e) {
+    console.error('[orders:fetch-transbec]', e);
+    return { ok: false, error: e?.message || 'Failed to fetch Transbec orders.' };
+  }
+});
+
+ipcMain.handle('orders:fetch-proforce', async () => {
+  try {
+    ensureDir(PROFORCE_DATA_DIR);
+    const targetOrdersPath = getOrdersFile();
+    const existing = readOrders();
+    const res = await getProforceOrders({
+      storageDir: PROFORCE_DATA_DIR,
+      storageStatePath: PROFORCE_STORAGE_STATE,
+      ordersPath: targetOrdersPath,
+      existingOrders: existing,
+    });
+    if (res?.ok && Array.isArray(res.orders)) {
+      writeOrders(res.orders);
+    }
+    return { ok: true, ...(res || {}), path: targetOrdersPath };
+  } catch (e) {
+    console.error('[orders:login-proforce]', e);
+    return { ok: false, error: e?.message || 'Failed to fetch Proforce orders.' };
+  }
 });
 
 ipcMain.handle('ui-state:read', () => ({ ok: true, state: readUIState() }));
