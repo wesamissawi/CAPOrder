@@ -70,6 +70,8 @@ export default function App() {
   const [outstandingRunning, setOutstandingRunning] = useState(false);
   const [outstandingStatus, setOutstandingStatus] = useState("");
   const [outstandingError, setOutstandingError] = useState("");
+  const [storagePaths, setStoragePaths] = useState(null);
+  const [pathsLoading, setPathsLoading] = useState(false);
   const ordersLastSavedRef = useRef("");
 
   const [editingItemUid, setEditingItemUid] = useState(null);
@@ -99,10 +101,88 @@ export default function App() {
 
   // "User is editing any field" flag
   const isEditingAnythingRef = useRef(false);
+
+  async function refreshStoragePaths() {
+    if (!api?.getStoragePaths) return;
+    try {
+      setPathsLoading(true);
+      const res = await api.getStoragePaths();
+      if (res) {
+        setStoragePaths(res);
+        if (res.ordersPath) setOrdersSourcePath(res.ordersPath);
+      }
+    } catch (e) {
+      console.error("[paths] refresh failed", e);
+    } finally {
+      setPathsLoading(false);
+    }
+  }
+
+  async function reloadItemsFromDisk() {
+    try {
+      const arr = await api.readItems();
+      const norm = normalizeItems(arr || []);
+      setItems(norm);
+      lastSavedRef.current = JSON.stringify(norm);
+      ensureBubblesForItems(norm, setBubbles);
+    } catch (e) {
+      console.error("[items] reload failed", e);
+    }
+  }
+
+  async function handleChooseItemsFolder() {
+    if (!api?.chooseItemsFolder) return;
+    try {
+      setPathsLoading(true);
+      const res = await api.chooseItemsFolder();
+      if (res?.ok) {
+        await refreshStoragePaths();
+        await reloadItemsFromDisk();
+      }
+    } catch (e) {
+      console.error("[paths] choose items folder failed", e);
+    } finally {
+      setPathsLoading(false);
+    }
+  }
+
+  async function handleChooseOrdersFolder() {
+    if (!api?.chooseOrdersFolder) return;
+    try {
+      setPathsLoading(true);
+      const res = await api.chooseOrdersFolder();
+      if (res?.ok) {
+        await refreshStoragePaths();
+        await loadOrders();
+      }
+    } catch (e) {
+      console.error("[paths] choose orders folder failed", e);
+    } finally {
+      setPathsLoading(false);
+    }
+  }
+
+  async function handleUseDefaultFolders() {
+    if (!api?.useDefaultFolders) return;
+    try {
+      setPathsLoading(true);
+      const res = await api.useDefaultFolders();
+      if (res?.ok) {
+        await refreshStoragePaths();
+        await reloadItemsFromDisk();
+        await loadOrders();
+      }
+    } catch (e) {
+      console.error("[paths] reset to defaults failed", e);
+    } finally {
+      setPathsLoading(false);
+    }
+  }
   
 
   // === Load once & subscribe to file changes ===
   useEffect(() => {
+    refreshStoragePaths();
     api.readItems().then((arr) => {
       const norm = normalizeItems(arr || []);
       console.log("[init] readItems ->", norm);
@@ -1065,6 +1145,11 @@ export default function App() {
             outstandingRunning={outstandingRunning}
             outstandingStatus={outstandingStatus}
             outstandingError={outstandingError}
+            storagePaths={storagePaths}
+            onChooseItemsFolder={handleChooseItemsFolder}
+            onChooseOrdersFolder={handleChooseOrdersFolder}
+            onUseDefaultFolders={handleUseDefaultFolders}
+            pathsLoading={pathsLoading}
           />
         ) : isStockFlowView ? (
           <StockFlowView

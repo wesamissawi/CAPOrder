@@ -143,3 +143,48 @@ vite.config.ts.timestamp-*
 
 # playwright session state
 world_storage_state.json
+
+
+
+# Vite renderer build output
+renderer/dist/
+
+# Electron builder output
+dist/
+out/
+
+
+# Windows installer artifacts
+*.exe
+*.msi
+*.blockmap
+*.zip
+
+# macOS artifacts (if you build on mac later)
+*.dmg
+*.pkg
+*.AppImage
+
+# Electron caches
+*.asar
+*.asar.unpacked
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# Environment files
+.env
+.env.*
+.DS_Store
+
+# VS Code settings
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# misc
+Thumbs.db

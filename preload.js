@@ -21,6 +21,10 @@ contextBridge.exposeInMainWorld('api', {
   revealDataFile: () => ipcRenderer.invoke('items:reveal'),
   chooseItemsFile: () => ipcRenderer.invoke('items:choose-file'),
   useDefaultFile: () => ipcRenderer.invoke('items:use-default'),
+  getStoragePaths: () => ipcRenderer.invoke('paths:get-info'),
+  chooseItemsFolder: () => ipcRenderer.invoke('paths:choose-items-dir'),
+  chooseOrdersFolder: () => ipcRenderer.invoke('paths:choose-orders-dir'),
+  useDefaultFolders: () => ipcRenderer.invoke('paths:use-defaults'),
 
     // locking
   lockItem: (uid) => ipcRenderer.invoke('items:lock-item', uid),

@@ -30,6 +30,11 @@ export default function DashboardView({
   outstandingRunning,
   outstandingStatus,
   outstandingError,
+  storagePaths,
+  onChooseItemsFolder,
+  onChooseOrdersFolder,
+  onUseDefaultFolders,
+  pathsLoading,
 }) {
   return (
     <section className="grid gap-4 lg:grid-cols-2">
@@ -128,6 +133,83 @@ export default function DashboardView({
               className="accent-indigo-600"
             />
             <span className="text-xs text-slate-700">{timeFilterDays}d</span>
+          </div>
+        </div>
+      </Card>
+
+      <Card className="bg-white/80">
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-lg font-semibold text-slate-800">Data locations</p>
+              <p className="text-sm text-slate-500">
+                Choose where <code>outstanding_items.json</code> and <code>orders.json</code> live. macOS
+                prefers a local folder; Windows defaults to the UNC share.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onUseDefaultFolders}
+              disabled={pathsLoading}
+              className="px-3 py-2 rounded-full bg-white border border-slate-200 text-xs font-semibold text-slate-700 disabled:opacity-60"
+            >
+              Use OS defaults
+            </button>
+          </div>
+          <div className="text-xs text-slate-500">
+            macOS → local folder you pick. Windows → server UNC path you pick (defaults to the share if not set).
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-2xl border border-slate-200 bg-white/70 p-3 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="text-xs uppercase tracking-wide text-slate-500">Outstanding items</div>
+                  <div className="text-sm text-slate-700 break-all">
+                    <code className="text-indigo-600 break-all">
+                      {storagePaths?.itemsPath || "outstanding_items.json"}
+                    </code>
+                  </div>
+                  {storagePaths?.defaults?.itemsPath && (
+                    <div className="text-[11px] text-slate-500">
+                      Default: {storagePaths.defaults.itemsPath}
+                    </div>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={onChooseItemsFolder}
+                  disabled={pathsLoading}
+                  className="px-3 py-2 rounded-xl bg-indigo-600 text-white text-xs font-semibold disabled:opacity-60"
+                >
+                  Choose folder
+                </button>
+              </div>
+            </div>
+            <div className="rounded-2xl border border-slate-200 bg-white/70 p-3 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="text-xs uppercase tracking-wide text-slate-500">Orders</div>
+                  <div className="text-sm text-slate-700 break-all">
+                    <code className="text-indigo-600 break-all">
+                      {storagePaths?.ordersPath || "orders.json"}
+                    </code>
+                  </div>
+                  {storagePaths?.defaults?.ordersPath && (
+                    <div className="text-[11px] text-slate-500">
+                      Default: {storagePaths.defaults.ordersPath}
+                    </div>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={onChooseOrdersFolder}
+                  disabled={pathsLoading}
+                  className="px-3 py-2 rounded-xl bg-indigo-600 text-white text-xs font-semibold disabled:opacity-60"
+                >
+                  Choose folder
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </Card>

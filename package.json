@@ -1,6 +1,6 @@
 {
   "name": "my-electron-app",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "OrderMgmtSystem",
   "keywords": [
     "CAP",
@@ -17,7 +17,9 @@
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
     "build:renderer": "cd renderer && npm run build",
     "build": "npm run build:renderer",
-    "start": "electron ."
+    "start": "electron .",
+    "dist": "electron-builder -w",
+    "dist:publish": "electron-builder -w --publish always"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.10.2",
@@ -30,12 +32,38 @@
     "@electron/fuses": "^1.8.0",
     "concurrently": "^9.2.1",
     "electron": "^39.1.1",
+    "electron-builder": "^26.0.12",
     "electron-packager": "^17.1.2",
     "wait-on": "^7.0.1"
   },
   "dependencies": {
     "dotenv": "^17.2.3",
+    "electron-log": "^5.4.3",
     "electron-squirrel-startup": "^1.0.1",
+    "electron-updater": "^6.6.2",
     "playwright": "^1.57.0"
+  },
+  "build": {
+    "appId": "com.caporder.app",
+    "productName": "CAPOrder",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "wesamissawi",
+        "repo": "CAPOrder"
+      }
+    ]
   }
 }

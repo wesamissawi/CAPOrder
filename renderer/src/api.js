@@ -8,6 +8,10 @@ const fallbackApi = {
   revealDataFile: async () => ({ ok: false }),
   chooseItemsFile: async () => ({ ok: false }),
   useDefaultFile: async () => ({ ok: false }),
+  getStoragePaths: async () => ({ ok: false }),
+  chooseItemsFolder: async () => ({ ok: false }),
+  chooseOrdersFolder: async () => ({ ok: false }),
+  useDefaultFolders: async () => ({ ok: false }),
 
 
 

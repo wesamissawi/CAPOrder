@@ -1,11 +1,14 @@
 // main.js
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { getWorldOrders } = require('./src/scrapers/worldScraper');
 const { getTransbecOrders } = require('./src/scrapers/transbecScraper');
 const { getProforceOrders } = require('./src/scrapers/proforceScraper');
+let log = console;
+try { log = require('electron-log'); } catch (e) { console.warn('[autoUpdater] electron-log not installed; falling back to console'); }
 
 const isDev = !app.isPackaged;
 
@@ -13,16 +16,13 @@ const LOCK_DURATION_MS = 20000; // 20 seconds
 
 
 // ---- data paths ----
-// const base = "\\\\GIRLSBOYS\\ushare\\Ghost PO\\Order_Items";
-// const DATA_FILE_DEFAULT = path.join(base, "outstanding_items.json");
+const DATA_FILENAME = 'outstanding_items.json';
+const ORDERS_FILENAME = 'orders.json';
 
-const DATA_FILE_DEFAULT = path.join(app.getPath('userData'), 'outstanding_items.json');
+const DEFAULT_WIN_ITEMS_DIR = '\\\\GIRLSBOYS\\ushare\\Ghost PO\\Order_Items';
+const DEFAULT_WIN_ORDERS_DIR = '\\\\GIRLSBOYS\\ushare\\Ghost PO\\Orders';
+const DEFAULT_LOCAL_BASE = path.join(app.getPath('documents'), 'CAPOrder');
 
-
-// const base2 = "\\\\GIRLSBOYS\\ushare\\Ghost PO\\Orders";
-// const ORDERS_FILE_DEFAULT = path.join(base2, 'allOrders.json');
-
-const ORDERS_FILE_DEFAULT = path.join(app.getPath('userData'), 'orders.json');
 const WORLD_DATA_DIR = path.join(app.getPath('userData'), 'world');
 const WORLD_STORAGE_STATE = path.join(WORLD_DATA_DIR, 'world_storage_state.json');
 const TRANSBEC_DATA_DIR = path.join(app.getPath('userData'), 'transbec');
@@ -43,19 +43,45 @@ console.log('[main] preload path =', PRELOAD, 'exists?', fs.existsSync(PRELOAD))
 // ---- data helpers ----
 let dataFileOverride = null;
 let ordersFileOverride = null;
+let configCache = null;
 let watcher = null;
 
 function readConfig() {
-  try { if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')); } catch {}
-  return {};
+  try {
+    if (configCache) return configCache;
+    if (fs.existsSync(CONFIG_FILE)) {
+      configCache = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+      return configCache;
+    }
+  } catch {}
+  configCache = {};
+  return configCache;
 }
 function writeConfig(cfg) {
-  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8'); } catch (e) { console.error('[config write]', e); }
+  try { configCache = cfg; fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8'); } catch (e) { console.error('[config write]', e); }
+}
+
+function getDefaultItemsDir() {
+  if (process.platform === 'win32') return DEFAULT_WIN_ITEMS_DIR;
+  if (process.platform === 'darwin') return path.join(DEFAULT_LOCAL_BASE, 'items');
+  return app.getPath('userData');
+}
+function getDefaultOrdersDir() {
+  if (process.platform === 'win32') return DEFAULT_WIN_ORDERS_DIR;
+  if (process.platform === 'darwin') return path.join(DEFAULT_LOCAL_BASE, 'orders');
+  return app.getPath('userData');
+}
+function getDefaultDataFile() {
+  return path.join(getDefaultItemsDir(), DATA_FILENAME);
+}
+function getDefaultOrdersFile() {
+  return path.join(getDefaultOrdersDir(), ORDERS_FILENAME);
 }
 function getDataFile() {
-  return dataFileOverride || DATA_FILE_DEFAULT;
+  return dataFileOverride || getDefaultDataFile();
 }
 function ensureDataFileAt(file) {
+  try { ensureDir(path.dirname(file)); } catch {}
   if (!fs.existsSync(file)) fs.writeFileSync(file, '[]', 'utf-8');
 }
 function readItemsAt(file) {
@@ -77,7 +103,7 @@ function readItems() { return readItemsAt(getDataFile()); }
 function writeItems(items) { return writeItemsAt(getDataFile(), items); }
 
 function getOrdersFile() {
-  return ordersFileOverride || ORDERS_FILE_DEFAULT;
+  return ordersFileOverride || getDefaultOrdersFile();
 }
 function readOrders() {
   return readItemsAt(getOrdersFile());
@@ -174,6 +200,61 @@ function cleanExpiredLocks(items) {
   return { items: cleaned, changed };
 }
 
+function setupAutoUpdater(mainWindow) {
+  if (isDev) return; // skip auto-updates in dev
+
+  try {
+    if (log?.transports?.file) log.transports.file.level = 'info';
+    autoUpdater.logger = log;
+  } catch (e) {
+    console.error('[autoUpdater] logger init failed', e);
+  }
+
+  autoUpdater.on('update-available', (info) => {
+    log.info?.('[autoUpdater] Update available', info?.version || info);
+  });
+
+  autoUpdater.on('update-not-available', (info) => {
+    log.info?.('[autoUpdater] No update available', info?.version || info);
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.error('[autoUpdater] Error', err);
+    log.error?.(err);
+  });
+
+  autoUpdater.on('update-downloaded', async (_evt, info) => {
+    try {
+      const { response } = await dialog.showMessageBox(mainWindow || undefined, {
+        type: 'info',
+        title: 'Update ready',
+        message: `Version ${info?.version || ''} has been downloaded. Restart now to apply the update?`,
+        buttons: ['Restart now', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+      });
+      if (response === 0) {
+        autoUpdater.quitAndInstall();
+      }
+    } catch (e) {
+      console.error('[autoUpdater] dialog failed', e);
+    }
+  });
+
+  const triggerCheck = () => {
+    autoUpdater.checkForUpdates().catch((e) => {
+      console.error('[autoUpdater] check failed', e);
+      log.error?.(e);
+    });
+  };
+
+  if (mainWindow) {
+    mainWindow.once('ready-to-show', triggerCheck);
+  } else {
+    app.whenReady().then(triggerCheck);
+  }
+}
+
 
 
 
@@ -185,8 +266,15 @@ let boundsSaveTimeout = null;
 async function createWindow() {
   // restore any saved custom data file path
   const cfg = readConfig();
-  if (cfg.dataFile && typeof cfg.dataFile === 'string') {
+  if (cfg.dataDir && typeof cfg.dataDir === 'string') {
+    dataFileOverride = path.join(cfg.dataDir, DATA_FILENAME);
+  } else if (cfg.dataFile && typeof cfg.dataFile === 'string') {
     dataFileOverride = cfg.dataFile;
+  }
+  if (cfg.ordersDir && typeof cfg.ordersDir === 'string') {
+    ordersFileOverride = path.join(cfg.ordersDir, ORDERS_FILENAME);
+  } else if (cfg.ordersFile && typeof cfg.ordersFile === 'string') {
+    ordersFileOverride = cfg.ordersFile;
   }
   const windowBounds = cfg.windowBounds || {};
   const defaultWidth = Number(windowBounds.width) || 1280;
@@ -232,6 +320,7 @@ async function createWindow() {
 
   console.log('[main] data file =', getDataFile());
   startWatching(win);
+  if (!isDev) setupAutoUpdater(win);
 
   const scheduleSaveBounds = () => {
     if (boundsSaveTimeout) clearTimeout(boundsSaveTimeout);
@@ -286,27 +375,90 @@ ipcMain.handle('items:export', async (_evt, items) => {
   fs.writeFileSync(filePath, JSON.stringify(items ?? [], null, 2), 'utf-8');
   return { ok: true, filePath };
 });
-ipcMain.handle('items:get-path', () => ({ path: getDataFile() }));
+ipcMain.handle('items:get-path', () => ({
+  path: getDataFile(),
+  defaultPath: getDefaultDataFile(),
+  platform: process.platform,
+}));
 ipcMain.handle('items:reveal', () => { const f = getDataFile(); if (fs.existsSync(f)) shell.showItemInFolder(f); return { ok: true }; });
 ipcMain.handle('items:choose-file', async () => {
   const res = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'JSON', extensions: ['json'] }] });
   if (res.canceled || !res.filePaths?.[0]) return { ok: false, canceled: true };
   dataFileOverride = res.filePaths[0];
-  const cfg = readConfig(); cfg.dataFile = dataFileOverride; writeConfig(cfg);
+  const cfg = readConfig();
+  cfg.dataFile = dataFileOverride;
+  cfg.dataDir = path.dirname(dataFileOverride);
+  writeConfig(cfg);
   startWatching(win);
   if (win && !win.isDestroyed()) win.webContents.send('items:updated', readItems());
   return { ok: true, path: dataFileOverride };
 });
 ipcMain.handle('items:use-default', () => {
   dataFileOverride = null;
-  const cfg = readConfig(); delete cfg.dataFile; writeConfig(cfg);
+  const cfg = readConfig(); delete cfg.dataFile; delete cfg.dataDir; writeConfig(cfg);
   startWatching(win);
   if (win && !win.isDestroyed()) win.webContents.send('items:updated', readItems());
   return { ok: true, path: getDataFile() };
 });
 
+ipcMain.handle('paths:get-info', () => {
+  const cfg = readConfig();
+  return {
+    ok: true,
+    itemsPath: getDataFile(),
+    ordersPath: getOrdersFile(),
+    defaults: {
+      itemsPath: getDefaultDataFile(),
+      ordersPath: getDefaultOrdersFile(),
+      itemsDir: getDefaultItemsDir(),
+      ordersDir: getDefaultOrdersDir(),
+    },
+    overrides: {
+      itemsDir: (dataFileOverride && path.dirname(dataFileOverride)) || cfg.dataDir || null,
+      ordersDir: (ordersFileOverride && path.dirname(ordersFileOverride)) || cfg.ordersDir || null,
+    },
+    platform: process.platform,
+  };
+});
+
+ipcMain.handle('paths:choose-items-dir', async () => {
+  const res = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
+  if (res.canceled || !res.filePaths?.[0]) return { ok: false, canceled: true };
+  const dir = res.filePaths[0];
+  dataFileOverride = path.join(dir, DATA_FILENAME);
+  const cfg = readConfig(); cfg.dataDir = dir; delete cfg.dataFile; writeConfig(cfg);
+  startWatching(win);
+  if (win && !win.isDestroyed()) win.webContents.send('items:updated', readItems());
+  return { ok: true, path: getDataFile(), dir };
+});
+
+ipcMain.handle('paths:choose-orders-dir', async () => {
+  const res = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
+  if (res.canceled || !res.filePaths?.[0]) return { ok: false, canceled: true };
+  const dir = res.filePaths[0];
+  ordersFileOverride = path.join(dir, ORDERS_FILENAME);
+  const cfg = readConfig(); cfg.ordersDir = dir; delete cfg.ordersFile; writeConfig(cfg);
+  return { ok: true, path: getOrdersFile(), dir };
+});
+
+ipcMain.handle('paths:use-defaults', () => {
+  dataFileOverride = null;
+  ordersFileOverride = null;
+  const cfg = readConfig();
+  delete cfg.dataFile; delete cfg.dataDir;
+  delete cfg.ordersFile; delete cfg.ordersDir;
+  writeConfig(cfg);
+  startWatching(win);
+  if (win && !win.isDestroyed()) win.webContents.send('items:updated', readItems());
+  return { ok: true, itemsPath: getDataFile(), ordersPath: getOrdersFile() };
+});
+
 ipcMain.handle('orders:read', () => readOrders());
-ipcMain.handle('orders:get-path', () => ({ path: getOrdersFile() }));
+ipcMain.handle('orders:get-path', () => ({
+  path: getOrdersFile(),
+  defaultPath: getDefaultOrdersFile(),
+  platform: process.platform,
+}));
 ipcMain.handle('orders:write', (_evt, orders) => {
   const current = readOrders();                  // existing array
   const a = JSON.stringify(current);
