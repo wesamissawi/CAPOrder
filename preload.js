@@ -35,5 +35,7 @@ contextBridge.exposeInMainWorld('api', {
   fetchWorldOrders: () => ipcRenderer.invoke('orders:fetch-world'),
   fetchTransbecOrders: () => ipcRenderer.invoke('orders:fetch-transbec'),
   fetchProforceOrders: () => ipcRenderer.invoke('orders:fetch-proforce'),
+  fetchCbkOrders: () => ipcRenderer.invoke('orders:fetch-cbk'),
+  fetchBestBuyOrders: () => ipcRenderer.invoke('orders:fetch-bestbuy'),
   addOrdersToOutstanding: () => ipcRenderer.invoke('orders:add-to-outstanding'),
 });

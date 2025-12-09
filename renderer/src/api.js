@@ -21,6 +21,8 @@ const fallbackApi = {
   writeOrders: async () => ({ ok: false }),
   getOrdersPath: async () => ({ path: "(not in Electron)" }),
   fetchWorldOrders: async () => ({ ok: false }),
+  fetchCbkOrders: async () => ({ ok: false }),
+  fetchBestBuyOrders: async () => ({ ok: false }),
   addOrdersToOutstanding: async () => ({ ok: false }),
 };
 

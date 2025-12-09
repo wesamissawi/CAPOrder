@@ -61,6 +61,12 @@ export default function App() {
   const [worldOrdersRunning, setWorldOrdersRunning] = useState(false);
   const [worldOrdersStatus, setWorldOrdersStatus] = useState("");
   const [worldOrdersError, setWorldOrdersError] = useState("");
+  const [cbkOrdersRunning, setCbkOrdersRunning] = useState(false);
+  const [cbkOrdersStatus, setCbkOrdersStatus] = useState("");
+  const [cbkOrdersError, setCbkOrdersError] = useState("");
+  const [bestBuyOrdersRunning, setBestBuyOrdersRunning] = useState(false);
+  const [bestBuyOrdersStatus, setBestBuyOrdersStatus] = useState("");
+  const [bestBuyOrdersError, setBestBuyOrdersError] = useState("");
   const [transbecOrdersRunning, setTransbecOrdersRunning] = useState(false);
   const [transbecOrdersStatus, setTransbecOrdersStatus] = useState("");
   const [transbecOrdersError, setTransbecOrdersError] = useState("");
@@ -867,6 +873,64 @@ export default function App() {
     }
   }
 
+  async function handleGetCbkOrders() {
+    if (!api?.fetchCbkOrders) return;
+    try {
+      setCbkOrdersRunning(true);
+      setCbkOrdersError("");
+      setCbkOrdersStatus("");
+      setOrdersError(null);
+      const res = await api.fetchCbkOrders();
+      if (!res?.ok) {
+        throw new Error(res?.error || "Failed to fetch CBK orders.");
+      }
+      const list = Array.isArray(res.orders) ? res.orders : [];
+      setOrders(list);
+      ordersLastSavedRef.current = JSON.stringify(list);
+      setOrdersDirty(false);
+      setOrdersInitialized(true);
+      if (res.path) setOrdersSourcePath(res.path);
+      const baseMsg = `Fetched ${list.length} CBK order(s) and saved to ${res.path || "orders.json"}.`;
+      const logMsg =
+        Array.isArray(res.statusLog) && res.statusLog.length ? `\n${res.statusLog.join("\n")}` : "";
+      setCbkOrdersStatus(baseMsg + logMsg);
+    } catch (e) {
+      console.error("[orders] cbk fetch error", e);
+      setCbkOrdersError(e?.message || "Failed to fetch CBK orders.");
+    } finally {
+      setCbkOrdersRunning(false);
+    }
+  }
+
+  async function handleGetBestBuyOrders() {
+    if (!api?.fetchBestBuyOrders) return;
+    try {
+      setBestBuyOrdersRunning(true);
+      setBestBuyOrdersError("");
+      setBestBuyOrdersStatus("");
+      setOrdersError(null);
+      const res = await api.fetchBestBuyOrders();
+      if (!res?.ok) {
+        throw new Error(res?.error || "Failed to fetch BestBuy orders.");
+      }
+      const list = Array.isArray(res.orders) ? res.orders : [];
+      setOrders(list);
+      ordersLastSavedRef.current = JSON.stringify(list);
+      setOrdersDirty(false);
+      setOrdersInitialized(true);
+      if (res.path) setOrdersSourcePath(res.path);
+      const baseMsg = `Fetched ${list.length} BestBuy order(s) and saved to ${res.path || "orders.json"}.`;
+      const logMsg =
+        Array.isArray(res.statusLog) && res.statusLog.length ? `\n${res.statusLog.join("\n")}` : "";
+      setBestBuyOrdersStatus(baseMsg + logMsg);
+    } catch (e) {
+      console.error("[orders] bestbuy fetch error", e);
+      setBestBuyOrdersError(e?.message || "Failed to fetch BestBuy orders.");
+    } finally {
+      setBestBuyOrdersRunning(false);
+    }
+  }
+
   async function handleGetTransbecOrders() {
     if (!api?.fetchTransbecOrders) return;
     try {
@@ -1053,6 +1117,14 @@ export default function App() {
             worldOrdersRunning={worldOrdersRunning}
             worldOrdersStatus={worldOrdersStatus}
             worldOrdersError={worldOrdersError}
+            onGetCbkOrders={handleGetCbkOrders}
+            cbkOrdersRunning={cbkOrdersRunning}
+            cbkOrdersStatus={cbkOrdersStatus}
+            cbkOrdersError={cbkOrdersError}
+            onGetBestBuyOrders={handleGetBestBuyOrders}
+            bestBuyOrdersRunning={bestBuyOrdersRunning}
+            bestBuyOrdersStatus={bestBuyOrdersStatus}
+            bestBuyOrdersError={bestBuyOrdersError}
             onGetTransbecOrders={handleGetTransbecOrders}
             transbecOrdersRunning={transbecOrdersRunning}
             transbecOrdersStatus={transbecOrdersStatus}

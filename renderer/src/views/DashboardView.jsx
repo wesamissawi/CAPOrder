@@ -18,6 +18,14 @@ export default function DashboardView({
   worldOrdersRunning,
   worldOrdersStatus,
   worldOrdersError,
+  onGetCbkOrders,
+  cbkOrdersRunning,
+  cbkOrdersStatus,
+  cbkOrdersError,
+  onGetBestBuyOrders,
+  bestBuyOrdersRunning,
+  bestBuyOrdersStatus,
+  bestBuyOrdersError,
   onGetTransbecOrders,
   transbecOrdersRunning,
   transbecOrdersStatus,
@@ -157,6 +165,64 @@ export default function DashboardView({
         {worldOrdersStatus && !worldOrdersError && (
           <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700">
             {worldOrdersStatus}
+          </div>
+        )}
+      </Card>
+
+      <Card className="bg-white/80">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-lg font-semibold text-slate-800">CBK orders pull</p>
+            <p className="text-sm text-slate-500">
+              Logs into cbklink, checks Remember Me, and saves any visible orders on the landing page.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onGetCbkOrders}
+            disabled={cbkOrdersRunning}
+            className="px-4 py-2 rounded-full bg-indigo-600 text-white text-sm font-semibold disabled:opacity-60"
+          >
+            {cbkOrdersRunning ? "Fetching..." : "GetCbkOrders"}
+          </button>
+        </div>
+        {cbkOrdersError && (
+          <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+            {cbkOrdersError}
+          </div>
+        )}
+        {cbkOrdersStatus && !cbkOrdersError && (
+          <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700">
+            {cbkOrdersStatus}
+          </div>
+        )}
+      </Card>
+
+      <Card className="bg-white/80">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-lg font-semibold text-slate-800">BestBuy orders pull</p>
+            <p className="text-sm text-slate-500">
+              Logs into bestbuycapp, sets the recent date range, and saves any visible orders with details.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onGetBestBuyOrders}
+            disabled={bestBuyOrdersRunning}
+            className="px-4 py-2 rounded-full bg-indigo-600 text-white text-sm font-semibold disabled:opacity-60"
+          >
+            {bestBuyOrdersRunning ? "Fetching..." : "GetBestBuyOrders"}
+          </button>
+        </div>
+        {bestBuyOrdersError && (
+          <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+            {bestBuyOrdersError}
+          </div>
+        )}
+        {bestBuyOrdersStatus && !bestBuyOrdersError && (
+          <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700">
+            {bestBuyOrdersStatus}
           </div>
         )}
       </Card>

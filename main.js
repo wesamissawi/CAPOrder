@@ -6,6 +6,8 @@ const { randomUUID } = require('crypto');
 const { getWorldOrders } = require('./src/scrapers/worldScraper');
 const { getTransbecOrders } = require('./src/scrapers/transbecScraper');
 const { getProforceOrders } = require('./src/scrapers/proforceScraper');
+const { getBestBuyOrders } = require('./src/scrapers/bestBuyScraper');
+const { getCbkOrders } = require('./src/scrapers/cbkScraper');
 
 const isDev = !app.isPackaged;
 
@@ -30,6 +32,10 @@ const TRANSBEC_STORAGE_STATE = path.join(TRANSBEC_DATA_DIR, 'transbec_storage_st
 const TRANSBEC_PRODUCTS_PATH = path.join(TRANSBEC_DATA_DIR, 'transbec_products.json');
 const PROFORCE_DATA_DIR = path.join(app.getPath('userData'), 'proforce');
 const PROFORCE_STORAGE_STATE = path.join(PROFORCE_DATA_DIR, 'proforce_storage_state.json');
+const BESTBUY_DATA_DIR = path.join(app.getPath('userData'), 'bestbuy');
+const BESTBUY_STORAGE_STATE = path.join(BESTBUY_DATA_DIR, 'bestbuy_storage_state.json');
+const CBK_DATA_DIR = path.join(app.getPath('userData'), 'cbk');
+const CBK_STORAGE_STATE = path.join(CBK_DATA_DIR, 'cbk_storage_state.json');
 
 
 
@@ -465,6 +471,48 @@ ipcMain.handle('orders:fetch-proforce', async () => {
   } catch (e) {
     console.error('[orders:login-proforce]', e);
     return { ok: false, error: e?.message || 'Failed to fetch Proforce orders.' };
+  }
+});
+
+ipcMain.handle('orders:fetch-cbk', async () => {
+  try {
+    ensureDir(CBK_DATA_DIR);
+    const targetOrdersPath = getOrdersFile();
+    const existing = readOrders();
+    const res = await getCbkOrders({
+      storageDir: CBK_DATA_DIR,
+      storageStatePath: CBK_STORAGE_STATE,
+      ordersPath: targetOrdersPath,
+      existingOrders: existing,
+    });
+    if (res?.ok && Array.isArray(res.orders)) {
+      writeOrders(res.orders);
+    }
+    return { ok: true, ...(res || {}), path: targetOrdersPath };
+  } catch (e) {
+    console.error('[orders:fetch-cbk]', e);
+    return { ok: false, error: e?.message || 'Failed to fetch CBK orders.' };
+  }
+});
+
+ipcMain.handle('orders:fetch-bestbuy', async () => {
+  try {
+    ensureDir(BESTBUY_DATA_DIR);
+    const targetOrdersPath = getOrdersFile();
+    const existing = readOrders();
+    const res = await getBestBuyOrders({
+      storageDir: BESTBUY_DATA_DIR,
+      storageStatePath: BESTBUY_STORAGE_STATE,
+      ordersPath: targetOrdersPath,
+      existingOrders: existing,
+    });
+    if (res?.ok && Array.isArray(res.orders)) {
+      writeOrders(res.orders);
+    }
+    return { ok: true, ...(res || {}), path: targetOrdersPath };
+  } catch (e) {
+    console.error('[orders:fetch-bestbuy]', e);
+    return { ok: false, error: e?.message || 'Failed to fetch BestBuy orders.' };
   }
 });
 
