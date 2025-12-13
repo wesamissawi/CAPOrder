@@ -1,7 +1,9 @@
 // src/scrapers/bestBuyScraper.js
+// Scrapes order history and detail pages from BestBuy's portal using Playwright.
 const path = require("path");
 const fs = require("fs");
 const { chromium } = require("playwright");
+const { standardizeOrderForSage } = require("./sageStandardize");
 require("dotenv").config();
 
 const BASE_URL = "https://bestbuycapp.ca:30443/bestbuy02";
@@ -9,10 +11,13 @@ const CBK_STYLE_LOGIN = `${BASE_URL}/login.html`;
 const HISTORY_URL = `${BASE_URL}/history.html`;
 const DEFAULT_HEADLESS = process.env.BESTBUY_HEADLESS === "true";
 
+/**
+ * Applies normalized defaults to an order so downstream consumers always have expected flags/shape.
+ */
 function applyDefaults(order = {}) {
   const reference = (order.reference || "").trim();
   const invoice = (order.invoiceNum || order.source_invoice || "").trim();
-  return {
+  return standardizeOrderForSage({
     ...order,
     source: "bestbuy",
     warehouse: order.warehouse || "BestBuy",
@@ -25,9 +30,12 @@ function applyDefaults(order = {}) {
     enteredInSage: order.enteredInSage ?? false,
     inStore: order.inStore ?? false,
     source_invoice: invoice || "",
-  };
+  });
 }
 
+/**
+ * Builds storage/output paths and ensures directories exist.
+ */
 function resolvePaths(options = {}) {
   const baseDir = options.storageDir || path.join(__dirname, "..");
   const storageStatePath =
@@ -47,6 +55,9 @@ function getCredentials() {
   return { user, pass };
 }
 
+/**
+ * Reuses a saved session if present; otherwise returns a fresh context.
+ */
 async function createContextWithStorage(browser, storageStatePath) {
   if (fs.existsSync(storageStatePath)) {
     return browser.newContext({ storageState: storageStatePath });
@@ -54,13 +65,22 @@ async function createContextWithStorage(browser, storageStatePath) {
   return browser.newContext();
 }
 
+/**
+ * BestBuy expects MM/DD/YYYY.
+ */
 function formatDateForInput(date) {
   const mm = String(date.getMonth() + 1).padStart(2, "0");
   const dd = String(date.getDate()).padStart(2, "0");
   const yyyy = date.getFullYear();
+  // const mm = '05'
+  // const dd = '03'
+  // const yyyy = '2025'
   return `${mm}/${dd}/${yyyy}`;
 }
 
+/**
+ * Logs into the portal (or reuses existing session) and persists storage state.
+ */
 async function ensureLoggedIn(page, storageStatePath, statusLog = []) {
   const { user, pass } = getCredentials();
   await page.goto(CBK_STYLE_LOGIN, { waitUntil: "domcontentloaded" });
@@ -69,6 +89,7 @@ async function ensureLoggedIn(page, storageStatePath, statusLog = []) {
   const usernameInput = await page.$("#username, input[name='username']");
   const passwordInput = await page.$("#password, input[name='password']");
 
+  // If the form isn't present, assume the session is still valid and store it for reuse.
   if (!usernameInput || !passwordInput) {
     statusLog.push("Login form missing; assuming existing session.");
     await page.context().storageState({ path: storageStatePath });
@@ -81,8 +102,21 @@ async function ensureLoggedIn(page, storageStatePath, statusLog = []) {
   const remember = (await page.$("#rememberMe")) || (await page.$("input[name='rememberLogin']"));
   if (remember) {
     try {
-      if (!(await remember.isChecked())) await remember.check();
-      statusLog.push("Checked Remember Me.");
+      // Some templates hide the native checkbox; prefer forcing the underlying input to checked.
+      await remember.evaluate((el) => {
+        el.checked = true;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      if (!(await remember.isChecked())) {
+        // Fallback: click the label if the programmatic set didn't stick.
+        await page.evaluate(() => {
+          const lbl =
+            document.querySelector("label[for='rememberMe']") ||
+            document.querySelector("#login-remember");
+          lbl?.click();
+        });
+      }
     } catch (e) {
       statusLog.push("Could not check Remember Me checkbox.");
     }
@@ -95,29 +129,15 @@ async function ensureLoggedIn(page, storageStatePath, statusLog = []) {
     (await page.$("#loginForm input[type='submit']"));
 
   statusLog.push("Submitting BestBuy login…");
-  const navPromise = page
-    .waitForNavigation({ waitUntil: "domcontentloaded", timeout: 3000 })
-    .catch(() => null);
   if (loginButton) {
     await loginButton.click().catch(() => {});
   } else {
-    const fallback = await page.$("#login-button-div") || (await page.$("#loginForm"));
-    if (fallback) await fallback.click().catch(() => {});
+    await page.keyboard.press("Enter").catch(() => {});
   }
-  await Promise.race([navPromise, page.waitForTimeout(1000)]);
-  await page.waitForTimeout(200);
 
-  // If still on login page, try once more quickly then fail
-  const stillOnLogin = await page.$("#loginForm #username");
-  if (stillOnLogin) {
-    statusLog.push("Login form still visible; retrying submit once.");
-    await page.evaluate(() => {
-      const form = document.querySelector("#loginForm");
-      if (form) form.submit();
-    });
-    await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 2000 }).catch(() => null);
-    await page.waitForTimeout(200);
-  }
+  // Wait for navigation or a short delay to allow the page to transition.
+  await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => null);
+  await page.waitForTimeout(200);
 
   const loginFormPresent = await page.$("#loginForm #username");
   if (loginFormPresent) {
@@ -129,6 +149,9 @@ async function ensureLoggedIn(page, storageStatePath, statusLog = []) {
   return { loggedIn: true, usedStoredSession: false, loginPerformed: true };
 }
 
+/**
+ * Opens the history page, sets a date range (current month back one month), and triggers search.
+ */
 async function goToHistoryAndSearch(page, statusLog = []) {
   const today = new Date();
   const start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
@@ -175,6 +198,9 @@ async function goToHistoryAndSearch(page, statusLog = []) {
   statusLog.push("Loaded BestBuy history page and triggered Search.");
 }
 
+/**
+ * Scrapes the visible order table rows from the history page.
+ */
 async function scrapeOrders(page, statusLog = []) {
   await page.waitForLoadState("domcontentloaded").catch(() => {});
 
@@ -235,6 +261,9 @@ async function scrapeOrders(page, statusLog = []) {
   return orders.map((o) => applyDefaults(o));
 }
 
+/**
+ * Loads the order detail page and extracts line items/totals.
+ */
 async function fetchDetail(context, detailUrl) {
   if (!detailUrl) return { ok: false, reason: "no-detail-url" };
   const page = await context.newPage();
@@ -329,6 +358,9 @@ async function fetchDetail(context, detailUrl) {
   }
 }
 
+/**
+ * Merges existing and newly scraped orders, preferring latest data while keeping detail lines.
+ */
 function mergeOrders(existing = [], incoming = []) {
   const byRef = new Map();
   (existing || []).forEach((o) => {
@@ -350,6 +382,9 @@ function mergeOrders(existing = [], incoming = []) {
   return Array.from(byRef.values()).map(applyDefaults);
 }
 
+/**
+ * Orchestrates the BestBuy scrape: login, search, scrape rows, fetch details, and persist orders.
+ */
 async function getBestBuyOrders(options = {}) {
   const headless = options.headless ?? DEFAULT_HEADLESS ?? false;
   const { storageStatePath, ordersJsonPath } = resolvePaths(options);

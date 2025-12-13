@@ -16,6 +16,7 @@ export default function OrderManagementView({
   filteredOrders,
   handleOrderCheckboxChange,
   handleOrderFieldChange,
+  onMarkForSage,
   hasSearch,
 }) {
   return (
@@ -86,6 +87,7 @@ export default function OrderManagementView({
             {filteredOrders.map((order, idx) => {
               const key = `${order.reference || "order"}-${order.warehouse || idx}`;
               const refKey = order.reference || order.__row || key;
+              const isSageTriggered = Boolean(order.sage_trigger);
               return (
                 <Card key={key} className="border-indigo-100">
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
@@ -97,17 +99,31 @@ export default function OrderManagementView({
                         {order.orderDateRaw || "Date unknown"}
                       </div>
                     </div>
-                    <div className="flex gap-2 text-xs">
-                      {Boolean(order.enteredInSage) && (
-                        <span className="px-2 py-1 rounded-full bg-emerald-50 text-emerald-600 border border-emerald-200">
-                          Sage
-                        </span>
-                      )}
-                      {Boolean(order.inStore) && (
-                        <span className="px-2 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-200">
-                          Arrived
-                        </span>
-                      )}
+                    <div className="flex flex-col items-end gap-2">
+                      <div className="flex gap-2 text-xs">
+                        {Boolean(order.enteredInSage) && (
+                          <span className="px-2 py-1 rounded-full bg-emerald-50 text-emerald-600 border border-emerald-200">
+                            Sage
+                          </span>
+                        )}
+                        {Boolean(order.inStore) && (
+                          <span className="px-2 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-200">
+                            Arrived
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onMarkForSage(refKey)}
+                        disabled={isSageTriggered}
+                        className={`px-3 py-1 rounded-full text-xs font-semibold border ${
+                          isSageTriggered
+                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                            : "bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50"
+                        }`}
+                      >
+                        {isSageTriggered ? "Ready for Sage" : "Send to Sage"}
+                      </button>
                     </div>
                   </div>
                   <div className="mt-3 flex flex-col gap-2 text-sm">

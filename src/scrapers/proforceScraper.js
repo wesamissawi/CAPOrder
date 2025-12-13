@@ -2,6 +2,7 @@
 const path = require("path");
 const fs = require("fs");
 const { chromium } = require("playwright");
+const { standardizeOrderForSage } = require("./sageStandardize");
 require("dotenv").config();
 
 const BASE_URL = "https://eoffice.epartconnection.com";
@@ -393,7 +394,9 @@ async function getProforceOrders(options = {}) {
         mergedMap.set(key, o);
       }
     }
-    const mergedOrders = Array.from(mergedMap.values());
+    const mergedOrders = Array.from(mergedMap.values()).map((o) =>
+      standardizeOrderForSage({ ...o, source: "proforce", warehouse: o.warehouse || "Proforce" })
+    );
 
     saveJson(ordersJsonPath, mergedOrders);
 

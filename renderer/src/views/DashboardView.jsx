@@ -38,9 +38,47 @@ export default function DashboardView({
   outstandingRunning,
   outstandingStatus,
   outstandingError,
+  sageIntegrationEnabled,
+  setSageIntegrationEnabled,
+  sageReadyOrders,
+  sageWatchError,
 }) {
   return (
     <section className="grid gap-4 lg:grid-cols-2">
+      <Card className="bg-white/80">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="space-y-1">
+            <p className="text-lg font-semibold text-slate-800">Sage interface</p>
+            <p className="text-sm text-slate-500">
+              Enable on the machine that runs Sage + AutoHotkey to respond when orders are flagged with
+              <code className="ml-1 text-indigo-700">sage_trigger: true</code>.
+            </p>
+            {sageIntegrationEnabled && (
+              <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
+                Watching orders.json — {sageReadyOrders.length} order{sageReadyOrders.length === 1 ? "" : "s"} ready
+                for Sage.
+              </p>
+            )}
+            {sageWatchError && (
+              <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+                {sageWatchError}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setSageIntegrationEnabled((v) => !v)}
+            className={`px-4 py-2 rounded-full text-sm font-semibold border transition ${
+              sageIntegrationEnabled
+                ? "bg-emerald-100 text-emerald-700 border-emerald-200"
+                : "bg-white text-slate-700 border-slate-200"
+            }`}
+          >
+            {sageIntegrationEnabled ? "Sage On" : "Sage Off"}
+          </button>
+        </div>
+      </Card>
+
       <Card className="bg-white/80">
         <div className="flex items-center justify-between gap-3">
           <div>

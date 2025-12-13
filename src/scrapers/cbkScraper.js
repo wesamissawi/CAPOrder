@@ -2,6 +2,7 @@
 const path = require("path");
 const fs = require("fs");
 const { chromium } = require("playwright");
+const { standardizeOrderForSage } = require("./sageStandardize");
 require("dotenv").config();
 
 const BASE_URL = "http://cbklink.cappcon.com:32000/cbk01";
@@ -11,7 +12,7 @@ const DEFAULT_HEADLESS = process.env.CBK_HEADLESS === "true";
 
 function applyCbkDefaults(order = {}) {
   const reference = (order.reference || "").trim();
-  return {
+  return standardizeOrderForSage({
     ...order,
     source: "cbk",
     warehouse: order.warehouse || "CBK",
@@ -24,7 +25,7 @@ function applyCbkDefaults(order = {}) {
     enteredInSage: order.enteredInSage ?? false,
     inStore: order.inStore ?? false,
     source_invoice: reference || order.source_invoice || "",
-  };
+  });
 }
 
 function resolvePaths(options = {}) {

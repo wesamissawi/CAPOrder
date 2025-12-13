@@ -31,6 +31,12 @@ contextBridge.exposeInMainWorld('api', {
   writeUIState: (state) => ipcRenderer.invoke('ui-state:write', state),
   readOrders: () => ipcRenderer.invoke('orders:read'),
   writeOrders: (orders) => ipcRenderer.invoke('orders:write', orders),
+  watchOrders: (enable) => ipcRenderer.invoke('orders:watch', enable),
+  onOrdersUpdated: (cb) => {
+    const listener = (_e, data) => cb(data);
+    ipcRenderer.on('orders:updated', listener);
+    return () => ipcRenderer.removeListener('orders:updated', listener);
+  },
   getOrdersPath: () => ipcRenderer.invoke('orders:get-path'),
   fetchWorldOrders: () => ipcRenderer.invoke('orders:fetch-world'),
   fetchTransbecOrders: () => ipcRenderer.invoke('orders:fetch-transbec'),

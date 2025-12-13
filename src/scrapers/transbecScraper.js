@@ -2,6 +2,7 @@
 const path = require("path");
 const fs = require("fs");
 const { chromium } = require("playwright");
+const { standardizeOrderForSage } = require("./sageStandardize");
 require("dotenv").config();
 
 const BASE_URL = "https://orderstransbec.com";
@@ -653,7 +654,9 @@ async function getTransbecOrders(options = {}) {
       if (!key) continue;
       if (!mergedMap.has(key)) mergedMap.set(key, o);
     }
-    const mergedOrders = Array.from(mergedMap.values());
+    const mergedOrders = Array.from(mergedMap.values()).map((o) =>
+      standardizeOrderForSage({ ...o, source: "transbec" })
+    );
 
     const products = aggregateProducts(mergedOrders);
     statusLog.push(`Aggregated ${products.length} unique products from order line items.`);

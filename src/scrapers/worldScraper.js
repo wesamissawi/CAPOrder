@@ -2,6 +2,7 @@
 const path = require("path");
 const fs = require("fs");
 const { chromium } = require("playwright");
+const { standardizeOrderForSage } = require("./sageStandardize");
 require("dotenv").config();
 
 const WORLD_LOGIN_URL = "https://www.iautoparts.biz/pronto/entrepot/WAW";
@@ -521,13 +522,21 @@ async function getWorldOrders(options = {}) {
     }
     statusLog.push(`Detail fetch complete. ${detailFetched} detail pages scraped.`);
 
-    saveOrdersToJson(mergedOrders, ordersJsonPath);
+    const standardizedOrders = mergedOrders.map((o) =>
+      standardizeOrderForSage({
+        ...o,
+        source: "world",
+        warehouse: o.warehouse || o.seller || o.orderedBy || "World",
+      })
+    );
+
+    saveOrdersToJson(standardizedOrders, ordersJsonPath);
 
     return {
       ok: true,
-      count: mergedOrders.length,
+      count: standardizedOrders.length,
       path: ordersJsonPath,
-      orders: mergedOrders,
+      orders: standardizedOrders,
       added: newOnes.length,
       detailFetched,
       loginInfo,

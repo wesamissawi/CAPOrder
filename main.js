@@ -50,6 +50,7 @@ console.log('[main] preload path =', PRELOAD, 'exists?', fs.existsSync(PRELOAD))
 let dataFileOverride = null;
 let ordersFileOverride = null;
 let watcher = null;
+let ordersWatcher = null;
 
 function readConfig() {
   try { if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')); } catch {}
@@ -164,6 +165,24 @@ function startWatching(win) {
       console.log('[main] watch -> items:updated', arr.length);
     }
   });
+}
+
+function startOrdersWatching(win) {
+  const file = getOrdersFile();
+  try { if (ordersWatcher) ordersWatcher.close(); } catch {}
+  ensureDataFileAt(file);
+  ordersWatcher = fs.watch(file, { persistent: false }, () => {
+    const arr = readOrders();
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('orders:updated', arr);
+      console.log('[main] watch -> orders:updated', Array.isArray(arr) ? arr.length : 0);
+    }
+  });
+}
+
+function stopOrdersWatching() {
+  try { if (ordersWatcher) ordersWatcher.close(); } catch {}
+  ordersWatcher = null;
 }
 
 function cleanExpiredLocks(items) {
@@ -313,6 +332,19 @@ ipcMain.handle('items:use-default', () => {
 
 ipcMain.handle('orders:read', () => readOrders());
 ipcMain.handle('orders:get-path', () => ({ path: getOrdersFile() }));
+ipcMain.handle('orders:watch', (_evt, enable = true) => {
+  try {
+    if (enable === false) {
+      stopOrdersWatching();
+      return { ok: true, watching: false };
+    }
+    startOrdersWatching(win);
+    return { ok: true, watching: true, path: getOrdersFile() };
+  } catch (e) {
+    console.error('[orders:watch]', e);
+    return { ok: false, error: e?.message || 'Failed to watch orders file.' };
+  }
+});
 ipcMain.handle('orders:write', (_evt, orders) => {
   const current = readOrders();                  // existing array
   const a = JSON.stringify(current);

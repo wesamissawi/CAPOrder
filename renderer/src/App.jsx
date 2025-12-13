@@ -58,6 +58,9 @@ export default function App() {
   const [ordersSaving, setOrdersSaving] = useState(false);
   const [ordersSearch, setOrdersSearch] = useState("");
   const [ordersPickupFilter, setOrdersPickupFilter] = useState("all");
+  const [sageIntegrationEnabled, setSageIntegrationEnabled] = useState(false);
+  const [sageReadyOrders, setSageReadyOrders] = useState([]);
+  const [sageWatchError, setSageWatchError] = useState("");
   const [worldOrdersRunning, setWorldOrdersRunning] = useState(false);
   const [worldOrdersStatus, setWorldOrdersStatus] = useState("");
   const [worldOrdersError, setWorldOrdersError] = useState("");
@@ -319,6 +322,9 @@ export default function App() {
         if (Array.isArray(state.bubbleZOrder)) {
           setBubbleZOrder(state.bubbleZOrder);
         }
+        if (typeof state.sageIntegrationEnabled === "boolean") {
+          setSageIntegrationEnabled(state.sageIntegrationEnabled);
+        }
       } catch (e) {
         console.warn("[ui-state] read failed", e);
       } finally {
@@ -333,9 +339,9 @@ export default function App() {
   useEffect(() => {
     if (!uiStateReady || !api?.writeUIState) return;
     api
-      .writeUIState({ bubblePositions, bubbleSizes, bubbleZOrder })
+      .writeUIState({ bubblePositions, bubbleSizes, bubbleZOrder, sageIntegrationEnabled })
       .catch((e) => console.warn("[ui-state] write failed", e));
-  }, [bubblePositions, bubbleSizes, bubbleZOrder, uiStateReady]);
+  }, [bubblePositions, bubbleSizes, bubbleZOrder, sageIntegrationEnabled, uiStateReady]);
   useEffect(() => {
     setBubblePositions((prev) => {
       let changed = false;
@@ -787,10 +793,6 @@ export default function App() {
     setOrdersDirty(true);
   }
 
-  function handleOrderCheckboxChange(index, field, checked) {
-    updateOrderAt(index, { [field]: checked });
-  }
-
   function updateOrderByKey(key, patch) {
     if (!key) return;
     setOrders((prev) => {
@@ -817,6 +819,22 @@ export default function App() {
   }
   function handleOrderCheckboxChange(referenceKey, field, checked) {
     updateOrderByKey(referenceKey, { [field]: checked });
+  }
+  function handleOrderSageTrigger(referenceKey) {
+    updateOrderByKey(referenceKey, { sage_trigger: true });
+  }
+
+  function handleOrdersUpdatedExternally(list) {
+    const normalized = Array.isArray(list) ? list : [];
+    setSageReadyOrders(normalized.filter((o) => o && o.sage_trigger));
+    if (ordersDirty) {
+      console.log("[orders] external update skipped (local edits present)");
+      return;
+    }
+    setOrders(normalized);
+    ordersLastSavedRef.current = JSON.stringify(normalized);
+    setOrdersInitialized(true);
+    setOrdersDirty(false);
   }
 
   async function handleSaveOrders() {
@@ -1021,11 +1039,57 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (!api?.watchOrders || !api?.onOrdersUpdated) {
+      if (sageIntegrationEnabled) {
+        setSageWatchError("Orders watching is unavailable in this environment.");
+      }
+      return;
+    }
+
+    let cancelled = false;
+    let offOrdersUpdated = null;
+
+    if (!sageIntegrationEnabled) {
+      setSageReadyOrders([]);
+      setSageWatchError("");
+      api.watchOrders(false).catch(() => {});
+      return;
+    }
+
+    setSageWatchError("");
+    offOrdersUpdated = api.onOrdersUpdated((arr) => handleOrdersUpdatedExternally(arr));
+
+    async function bootstrapWatch() {
+      try {
+        await api.watchOrders(true);
+        const latest = await api.readOrders();
+        if (!cancelled) {
+          handleOrdersUpdatedExternally(latest);
+        }
+      } catch (e) {
+        console.error("[orders] watch error", e);
+        if (!cancelled) setSageWatchError(e?.message || "Failed to watch orders file.");
+      }
+    }
+    bootstrapWatch();
+
+    return () => {
+      cancelled = true;
+      if (offOrdersUpdated) offOrdersUpdated();
+      api.watchOrders(false).catch(() => {});
+    };
+  }, [sageIntegrationEnabled, ordersDirty]);
+
+  useEffect(() => {
     const needsOrders = currentView === "order-management" || currentView === "ref-to-inv";
     if (needsOrders && !ordersInitialized && !ordersLoading) {
       loadOrders();
     }
   }, [currentView, ordersInitialized, ordersLoading]);
+
+  useEffect(() => {
+    setSageReadyOrders((orders || []).filter((o) => o && o.sage_trigger));
+  }, [orders]);
 
   const filteredOrders = useMemo(() => {
     const q = ordersSearch.trim().toLowerCase();
@@ -1137,6 +1201,10 @@ export default function App() {
             outstandingRunning={outstandingRunning}
             outstandingStatus={outstandingStatus}
             outstandingError={outstandingError}
+            sageIntegrationEnabled={sageIntegrationEnabled}
+            setSageIntegrationEnabled={setSageIntegrationEnabled}
+            sageReadyOrders={sageReadyOrders}
+            sageWatchError={sageWatchError}
           />
         ) : isStockFlowView ? (
           <StockFlowView
@@ -1199,6 +1267,7 @@ export default function App() {
             filteredOrders={filteredOrders}
             handleOrderCheckboxChange={handleOrderCheckboxChange}
             handleOrderFieldChange={handleOrderFieldChange}
+            onMarkForSage={handleOrderSageTrigger}
             hasSearch={hasSearch}
           />
         ) : (
