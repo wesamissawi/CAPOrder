@@ -21,6 +21,7 @@ function applyDefaults(order = {}) {
     ...order,
     source: "bestbuy",
     warehouse: order.warehouse || "BestBuy",
+    sage_source: "BES505",
     seller: order.seller || "BestBuy",
     detailClicked: order.detailClicked ?? false,
     detailStored: order.detailStored ?? true,

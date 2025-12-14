@@ -654,9 +654,14 @@ async function getTransbecOrders(options = {}) {
       if (!key) continue;
       if (!mergedMap.has(key)) mergedMap.set(key, o);
     }
-    const mergedOrders = Array.from(mergedMap.values()).map((o) =>
-      standardizeOrderForSage({ ...o, source: "transbec" })
-    );
+      const mergedOrders = Array.from(mergedMap.values()).map((o) =>
+        standardizeOrderForSage({
+          ...o,
+          source: "transbec",
+          sage_source: "TRA505",
+          source_invoice: o.source_invoice || "",
+        })
+      );
 
     const products = aggregateProducts(mergedOrders);
     statusLog.push(`Aggregated ${products.length} unique products from order line items.`);

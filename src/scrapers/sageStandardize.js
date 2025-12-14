@@ -26,16 +26,17 @@ function normalizeLineItem(item = {}) {
 }
 
 function standardizeOrderForSage(order = {}) {
-  const invoice = (order.invoiceNum || order.source_invoice || "").toString().trim();
-  const reference = (invoice || order.reference || "").toString().trim();
+  const invoice = (order.invoiceNum || "").toString().trim();
+  const reference = (order.source_invoice || order.reference || "").toString().trim();
   const warehouse = (order.warehouse || order.seller || order.source || "").toString().trim();
+  const sage_source = (order.sage_source || order.source || warehouse || "").toString().trim();
   return {
     ...order,
     warehouse: warehouse || order.warehouse || "",
     source: order.source || warehouse || order.seller || "",
     sageDate: order.sageDate || order.sage_date || "",
     sage_reference: reference,
-    sage_source: warehouse || order.source || "",
+    sage_source,
     sage_lineItems: Array.isArray(order.lineItems)
       ? order.lineItems.map((li) => normalizeLineItem(li || {}))
       : [],

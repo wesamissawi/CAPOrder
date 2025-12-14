@@ -17,8 +17,18 @@ export default function OrderManagementView({
   handleOrderCheckboxChange,
   handleOrderFieldChange,
   onMarkForSage,
+  onMarkComplete,
   hasSearch,
 }) {
+  const filters = [
+    { value: "all", label: "All" },
+    { value: "not-picked", label: "Not Picked Up" },
+    { value: "not-arrived", label: "Not Arrived" },
+    { value: "not-entered-sage", label: "Not Entered in Sage" },
+    { value: "totals-not-verified", label: "Totals Not Verified" },
+    { value: "no-invoice", label: "No Invoice #" },
+  ];
+
   return (
     <>
       <section>
@@ -42,15 +52,25 @@ export default function OrderManagementView({
                 placeholder="Search orders..."
                 className="w-full sm:w-56 border rounded-xl px-3 py-2 text-sm bg-white"
               />
-              <select
-                className="w-full sm:w-40 border rounded-xl px-3 py-2 text-sm bg-white"
-                value={ordersPickupFilter}
-                onChange={(e) => setOrdersPickupFilter(e.target.value)}
-              >
-                <option value="all">All</option>
-                <option value="not-picked">Not picked up</option>
-                <option value="picked">Picked up</option>
-              </select>
+              <div className="flex flex-wrap gap-2">
+                {filters.map((filter) => {
+                  const isActive = ordersPickupFilter === filter.value;
+                  return (
+                    <button
+                      key={filter.value}
+                      type="button"
+                      onClick={() => setOrdersPickupFilter(filter.value)}
+                      className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold border transition ${
+                        isActive
+                          ? "bg-indigo-600 text-white border-indigo-600 shadow-sm"
+                          : "bg-white text-slate-700 border-slate-200 hover:bg-indigo-50"
+                      }`}
+                    >
+                      {filter.label}
+                    </button>
+                  );
+                })}
+              </div>
               {ordersDirty && !ordersLoading && (
                 <span className="text-xs px-3 py-1 rounded-full bg-amber-100 text-amber-700 border border-amber-200">
                   Unsaved changes
@@ -126,23 +146,42 @@ export default function OrderManagementView({
                       </button>
                     </div>
                   </div>
-                  <div className="mt-3 flex flex-col gap-2 text-sm">
-                      {[
-                        { label: "Picked Up", field: "pickedUp" },
-                        { label: "Arrived", field: "inStore" },
-                        { label: "Entered in Sage", field: "invoiceSageUpdate" },
-                        { label: "Value Check", field: "invoiceValueCheck" },
-                      ].map((meta) => (
-                        <label key={meta.field} className="flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 bg-white/60">
+                  <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                    {[
+                      { label: "Picked Up", field: "pickedUp" },
+                      { label: "Arrived", field: "inStore" },
+                      { label: "Entered in Sage", field: "enteredInSage" },
+                      { label: "Value Check", field: "totalVerified" },
+                    ].map((meta) => {
+                      const checked = Boolean(order[meta.field]);
+                      return (
+                        <label
+                          key={meta.field}
+                          className={`flex items-center gap-2 rounded-xl border px-3 py-2 transition ${
+                            checked
+                              ? "bg-indigo-50 border-indigo-200"
+                              : "bg-white/60 border-slate-200"
+                          }`}
+                        >
                           <input
                             type="checkbox"
-                            checked={Boolean(order[meta.field])}
+                            checked={checked}
                             onChange={(e) => handleOrderCheckboxChange(refKey, meta.field, e.target.checked)}
                           />
                           <span className="text-slate-700 text-sm">{meta.label}</span>
                         </label>
-                      ))}
-                    </div>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-2">
+                    <button
+                      type="button"
+                      onClick={() => onMarkComplete(refKey)}
+                      className="px-3 py-2 rounded-xl text-sm font-semibold border bg-emerald-600 text-white hover:bg-emerald-700"
+                    >
+                      Mark Complete
+                    </button>
+                  </div>
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     <div className="flex flex-col gap-1">
                       <span className="text-xs uppercase tracking-wide text-slate-400">Invoice #</span>
@@ -170,7 +209,10 @@ export default function OrderManagementView({
                         <div className="space-y-1">
                           {order.lineItems.map((item, liIdx) => {
                             const qty = item.quantity ?? "";
-                            const part = item.partNumber || item.partLineCode || "Item";
+                            const part =
+                              item.partLineCode || item.partNumber
+                                ? `${item.partLineCode || ""} ${item.partNumber || ""}`.trim()
+                                : "Item";
                             const cost = item.costPrice ?? item.extended ?? "";
                             return (
                               <div

@@ -3,6 +3,7 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
+const { spawn } = require('child_process');
 const { getWorldOrders } = require('./src/scrapers/worldScraper');
 const { getTransbecOrders } = require('./src/scrapers/transbecScraper');
 const { getProforceOrders } = require('./src/scrapers/proforceScraper');
@@ -37,6 +38,22 @@ const BESTBUY_STORAGE_STATE = path.join(BESTBUY_DATA_DIR, 'bestbuy_storage_state
 const CBK_DATA_DIR = path.join(app.getPath('userData'), 'cbk');
 const CBK_STORAGE_STATE = path.join(CBK_DATA_DIR, 'cbk_storage_state.json');
 
+const SAGE_AHK_SCRIPT = path.join(__dirname, 'ahk', 'sage_purchaser.ahk');
+const AHK_EXECUTABLE = process.env.AHK_EXE || process.env.AUTOHOTKEY_PATH || 'AutoHotkey64.exe';
+const SAGE_TEMP_ORDER = path.join(app.getPath('userData'), 'orders.sage.tmp.json');
+
+function backupFile(srcPath, suffix = '.bak') {
+  try {
+    if (!fs.existsSync(srcPath)) return;
+    const dir = path.dirname(srcPath);
+    const base = path.basename(srcPath);
+    const target = path.join(dir, `${base}${suffix}`);
+    fs.copyFileSync(srcPath, target);
+  } catch (e) {
+    console.warn('[backup] failed', srcPath, e);
+  }
+}
+
 
 
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
@@ -51,6 +68,10 @@ let dataFileOverride = null;
 let ordersFileOverride = null;
 let watcher = null;
 let ordersWatcher = null;
+let sageIntegrationActive = false;
+let sageProcessing = false;
+let sagePendingRun = false;
+const sageProcessingRefs = new Set();
 
 function readConfig() {
   try { if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')); } catch {}
@@ -90,6 +111,7 @@ function readOrders() {
   return readItemsAt(getOrdersFile());
 }
 function writeOrdersAt(file, orders) {
+  backupFile(file);
   ensureDataFileAt(file);
   fs.writeFileSync(file, JSON.stringify(orders ?? [], null, 2), 'utf-8');
 }
@@ -177,12 +199,228 @@ function startOrdersWatching(win) {
       win.webContents.send('orders:updated', arr);
       console.log('[main] watch -> orders:updated', Array.isArray(arr) ? arr.length : 0);
     }
+    if (sageIntegrationActive)
+      scheduleSageProcessing();
   });
 }
 
 function stopOrdersWatching() {
   try { if (ordersWatcher) ordersWatcher.close(); } catch {}
   ordersWatcher = null;
+}
+
+function normalizeOrderRef(order) {
+  if (!order) return "";
+  const ref = order.sage_reference || order.reference || order.__row || "";
+  return String(ref || "").trim().toUpperCase();
+}
+
+function extractJournalLine(stdoutRaw) {
+  const stdout = (stdoutRaw || "").toString();
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((ln) => (ln || "").trim())
+    .filter(Boolean);
+  if (!lines.length) return "";
+  const lastLine = lines[lines.length - 1];
+  return lastLine.replace(/^\[[^\]]*\]\s*/, "");
+}
+
+function getVendorName(order) {
+  if (!order) return "";
+  return (
+    (order.sage_source || "").trim() ||
+    (order.warehouse || "").trim() ||
+    (order.seller || "").trim()
+  );
+}
+
+function writeTempOrder(order) {
+  try {
+    fs.writeFileSync(SAGE_TEMP_ORDER, JSON.stringify(order || {}, null, 2), 'utf-8');
+    return SAGE_TEMP_ORDER;
+  } catch (e) {
+    console.error('[sage] failed to write temp order', e);
+    return null;
+  }
+}
+
+function runSagePurchase(order) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(SAGE_AHK_SCRIPT)) {
+      return resolve({ ok: false, error: 'AHK script not found', code: 'missing-script' });
+    }
+
+    backupFile(getOrdersFile(), '.pre-sage.bak');
+
+    const orderPath = writeTempOrder(order);
+    if (!orderPath) {
+      return resolve({ ok: false, error: 'Failed to write temp order file', code: 'temp-write-failed' });
+    }
+
+    const args = [
+      SAGE_AHK_SCRIPT,
+      orderPath,
+      order?.sage_reference || order?.reference || "",
+      getVendorName(order) || "",
+      getOrdersFile(),
+    ];
+
+    let stdout = "";
+    let stderr = "";
+    let finished = false;
+
+    const complete = (payload) => {
+      if (finished) return;
+      finished = true;
+      resolve(payload);
+    };
+
+    const child = spawn(AHK_EXECUTABLE, args, { windowsHide: true });
+    child.stdout.on('data', (d) => {
+      const chunk = d.toString();
+      stdout += chunk;
+      console.log('[sage] AHK stdout chunk:', chunk.trim());
+    });
+    child.stderr.on('data', (d) => {
+      const chunk = d.toString();
+      stderr += chunk;
+      console.error('[sage] AHK stderr chunk:', chunk.trim());
+    });
+    child.on('error', (err) => {
+      console.error('[sage] spawn error', err);
+      complete({ ok: false, code: 'spawn-error', error: err, stdout, stderr });
+    });
+    child.on('close', (code) => {
+      const ok = code === 0;
+      const parsedJournal = extractJournalLine(stdout);
+      console.log('[sage] AHK finished', {
+        code,
+        ok,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        parsedJournal,
+      });
+      complete({ ok, code, stdout, stderr, journalEntry: parsedJournal });
+    });
+  });
+}
+
+function applySageResult(refKey, res = {}, fallbackOrder = null) {
+  const orders = readOrders();
+  const list = Array.isArray(orders) ? orders : [];
+
+  const key = (refKey || "").toString().trim().toUpperCase();
+  if (!key) return;
+
+  const journalEntry =
+    extractJournalLine(res.stdout || "") ||
+    (res.journalEntry || "").toString().trim() ||
+    "";
+  const nowIso = new Date().toISOString();
+
+  let changed = false;
+  let found = false;
+  const updated = list.map((o) => {
+    if (!o) return o;
+    const cand = (o.sage_reference || o.reference || o.__row || "").toString().trim().toUpperCase();
+    if (!cand || cand !== key) return o;
+
+    changed = true;
+    found = true;
+    return {
+      ...o,
+      journalEntry: journalEntry || o.journalEntry || o.journal_entry || "",
+      journal_entry: journalEntry || o.journal_entry || o.journalEntry || "",
+      enteredInSage: true,
+      invoiceSageUpdate: true,
+      sage_trigger: false,
+      sage_processed_at: nowIso,
+    };
+  });
+
+  if (!found && fallbackOrder) {
+    const patch = {
+      journalEntry: journalEntry || fallbackOrder.journalEntry || fallbackOrder.journal_entry || "",
+      journal_entry: journalEntry || fallbackOrder.journal_entry || fallbackOrder.journalEntry || "",
+      enteredInSage: true,
+      invoiceSageUpdate: true,
+      sage_trigger: false,
+      sage_processed_at: nowIso,
+    };
+    const merged = { ...fallbackOrder, ...patch };
+    updated.push(merged);
+    changed = true;
+  }
+
+  if (changed) writeOrders(updated);
+}
+
+async function processSageOrdersQueue() {
+  if (!sageIntegrationActive) return;
+  if (sageProcessing) {
+    sagePendingRun = true;
+    return;
+  }
+
+  sageProcessing = true;
+  try {
+    const orders = readOrders();
+    const targets = [];
+    (orders || []).forEach((order) => {
+      const refKey = normalizeOrderRef(order);
+      if (!refKey) return;
+      if (!order?.sage_trigger) return;
+      if (order?.enteredInSage) return;
+      if (sageProcessingRefs.has(refKey)) return;
+      sageProcessingRefs.add(refKey);
+      targets.push({ refKey, order });
+    });
+
+    for (const { refKey, order } of targets) {
+      console.log("[sage] starting AHK for", refKey);
+      const res = await runSagePurchase(order);
+      if (!res?.ok) {
+        console.error("[sage] AHK run failed for", refKey, res?.error || res?.stderr || res?.code, {
+          stdout: (res?.stdout || "").toString().trim(),
+          stderr: (res?.stderr || "").toString().trim(),
+        });
+      } else {
+        console.log(
+          "[sage] AHK success for",
+          refKey,
+          "stdout:",
+            (res.stdout || "").toString().trim()
+          );
+          applySageResult(refKey, res, order);
+        }
+        sageProcessingRefs.delete(refKey);
+      }
+    } catch (e) {
+      console.error("[sage] queue error", e);
+  } finally {
+    sageProcessing = false;
+    if (sagePendingRun && sageIntegrationActive) {
+      sagePendingRun = false;
+      setTimeout(() => processSageOrdersQueue(), 200);
+    } else {
+      sagePendingRun = false;
+    }
+  }
+}
+
+function scheduleSageProcessing() {
+  if (!sageIntegrationActive) return;
+  if (sageProcessing) {
+    sagePendingRun = true;
+    return;
+  }
+  processSageOrdersQueue();
+}
+
+function resetSageQueue() {
+  sageProcessingRefs.clear();
+  sagePendingRun = false;
 }
 
 function cleanExpiredLocks(items) {
@@ -334,11 +572,15 @@ ipcMain.handle('orders:read', () => readOrders());
 ipcMain.handle('orders:get-path', () => ({ path: getOrdersFile() }));
 ipcMain.handle('orders:watch', (_evt, enable = true) => {
   try {
+    sageIntegrationActive = enable !== false;
+
     if (enable === false) {
+      resetSageQueue();
       stopOrdersWatching();
       return { ok: true, watching: false };
     }
     startOrdersWatching(win);
+    scheduleSageProcessing();
     return { ok: true, watching: true, path: getOrdersFile() };
   } catch (e) {
     console.error('[orders:watch]', e);
@@ -355,6 +597,8 @@ ipcMain.handle('orders:write', (_evt, orders) => {
   } catch (e) {
     console.error('[orders:write] sync outstanding failed', e);
   }
+  if (sageIntegrationActive)
+    scheduleSageProcessing();
   return { ok: true };
 });
 ipcMain.handle('orders:add-to-outstanding', () => {

@@ -395,7 +395,12 @@ async function getProforceOrders(options = {}) {
       }
     }
     const mergedOrders = Array.from(mergedMap.values()).map((o) =>
-      standardizeOrderForSage({ ...o, source: "proforce", warehouse: o.warehouse || "Proforce" })
+      standardizeOrderForSage({
+        ...o,
+        source: "proforce",
+        warehouse: o.warehouse || "Proforce",
+        sage_source: "PRO505",
+      })
     );
 
     saveJson(ordersJsonPath, mergedOrders);

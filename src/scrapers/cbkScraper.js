@@ -16,6 +16,7 @@ function applyCbkDefaults(order = {}) {
     ...order,
     source: "cbk",
     warehouse: order.warehouse || "CBK",
+    sage_source: "CBK505",
     seller: order.seller || "CBK",
     detailClicked: order.detailClicked ?? false,
     detailStored: order.detailStored ?? true,

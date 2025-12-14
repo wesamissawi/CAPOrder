@@ -1,8 +1,7 @@
-#Include %A_ScriptDir%\ahk\lib\enterSagePurchases.ahk
+#Include %A_ScriptDir%\lib\enterSagePurchases.ahk
 
-; Convenience wrapper so the script can be run from the project root.
-; Usage:
-;   autohotkey.exe enterSagePurchases.ahk "C:\path\order-or-orders.json" "REF123" "VendorCode" "C:\path\orders.json"
+; Allow running the purchase flow directly:
+;   autohotkey.exe sage_purchaser.ahk "C:\path\order-or-orders.json" "REF123" "VendorCode" "C:\path\orders.json"
 if (A_LineFile = A_ScriptFullPath) {
     ordersPath := ""
     orderRef   := ""

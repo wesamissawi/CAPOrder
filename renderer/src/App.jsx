@@ -805,7 +805,8 @@ export default function App() {
         const rowMatch = o.__row && String(o.__row) === String(key);
         if (!refMatch && !rowMatch) return o;
         changed = true;
-        return { ...o, ...(patch || {}) };
+        const patchVal = typeof patch === "function" ? patch(o) : patch || {};
+        return { ...o, ...(patchVal || {}) };
       });
       if (changed) setOrdersDirty(true);
       return next;
@@ -818,7 +819,26 @@ export default function App() {
     updateOrderByKey(referenceKey, { source_invoice: value });
   }
   function handleOrderCheckboxChange(referenceKey, field, checked) {
-    updateOrderByKey(referenceKey, { [field]: checked });
+    if (field === "inStore") {
+      // Marking as arrived should also mark as picked up.
+      updateOrderByKey(referenceKey, { inStore: checked, pickedUp: checked || false });
+    } else {
+      updateOrderByKey(referenceKey, { [field]: checked });
+    }
+  }
+  function handleMarkComplete(referenceKey) {
+    updateOrderByKey(referenceKey, (order) => {
+      const hasInvoice = Boolean((order?.source_invoice || "").toString().trim());
+      return {
+        pickedUp: true,
+        hasInvoiceNum: true,
+        totalVerified: true,
+        enteredInSage: true,
+        inStore: true,
+        source_invoice: hasInvoice ? order.source_invoice : "manual",
+        status: "complete",
+      };
+    });
   }
   function handleOrderSageTrigger(referenceKey) {
     updateOrderByKey(referenceKey, { sage_trigger: true });
@@ -1109,12 +1129,25 @@ export default function App() {
             if (val === undefined || val === null) return false;
             return String(val).toLowerCase().includes(q);
           });
-        });
+    });
 
     const pickupFiltered = filtered.filter((order) => {
-      if (ordersPickupFilter === "picked") return Boolean(order.pickedUp);
-      if (ordersPickupFilter === "not-picked") return !order.pickedUp;
-      return true;
+      switch (ordersPickupFilter) {
+        case "not-picked":
+          return !order.pickedUp;
+        case "not-arrived":
+          return !order.inStore;
+        case "not-entered-sage":
+          return !order.enteredInSage;
+        case "totals-not-verified":
+          return order.enteredInSage && !order.totalVerified;
+        case "no-invoice": {
+          const inv = (order.source_invoice || "").toString().trim();
+          return order.enteredInSage && !inv;
+        }
+        default:
+          return true;
+      }
     });
 
     // sort by orderDate descending (newest first), fallback to orderDateRaw string
@@ -1268,6 +1301,7 @@ export default function App() {
             handleOrderCheckboxChange={handleOrderCheckboxChange}
             handleOrderFieldChange={handleOrderFieldChange}
             onMarkForSage={handleOrderSageTrigger}
+            onMarkComplete={handleMarkComplete}
             hasSearch={hasSearch}
           />
         ) : (
