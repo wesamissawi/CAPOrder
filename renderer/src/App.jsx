@@ -8,6 +8,7 @@ import OrderManagementView from "./views/OrderManagementView";
 import RefToInvView from "./views/RefToInvView";
 import PaymentManagementView from "./views/PaymentManagementView";
 import ReturnsManagementView from "./views/ReturnsManagementView";
+import ManageStockView from "./views/ManageStockView";
 import {
   DEFAULT_BUBBLES,
   normalizeItems,
@@ -26,6 +27,7 @@ const DELETE_DESTINATIONS = ["New Stock", "Shelf", "Cash Sales", "Returns"];
 const VIEWS = [
   { id: "dashboard", label: "Dashboard" },
   { id: "stock-flow", label: "Stock Flow" },
+  { id: "manage-stock", label: "Manage Stock" },
   { id: "returns-management", label: "Returns Management" },
   { id: "order-management", label: "Order Management" },
   { id: "ref-to-inv", label: "Ref to Inv" },
@@ -1270,6 +1272,13 @@ export default function App() {
             onStartBubbleMove={handleStartBubbleMove}
             onStartBubbleResize={handleStartBubbleResize}
             onActivateBubble={handleActivateBubble}
+          />
+        ) : currentView === "manage-stock" ? (
+          <ManageStockView
+            items={items}
+            bubbles={bubbles}
+            onEditItem={handleStartEdit}
+            onUpdateItem={updateItemByKey}
           />
         ) : currentView === "returns-management" ? (
           <ReturnsManagementView

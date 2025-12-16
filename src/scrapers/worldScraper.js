@@ -525,7 +525,7 @@ async function getWorldOrders(options = {}) {
     const standardizedOrders = mergedOrders.map((o) =>
       standardizeOrderForSage({
         ...o,
-        source_invoice: o.source_invoice || "",
+        source_invoice: "",
         source: "world",
         warehouse: o.warehouse || o.seller || o.orderedBy || "World",
         sage_source: "WOR505",
