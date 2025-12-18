@@ -66,7 +66,7 @@ console.log('[main] preload path =', PRELOAD, 'exists?', fs.existsSync(PRELOAD))
 // ---- data helpers ----
 let dataFileOverride = null;
 let ordersFileOverride = null;
-let watcher = null;
+let itemsWatchers = [];
 let ordersWatcher = null;
 let sageIntegrationActive = false;
 let sageProcessing = false;
@@ -80,10 +80,45 @@ function readConfig() {
 function writeConfig(cfg) {
   try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8'); } catch (e) { console.error('[config write]', e); }
 }
+function ensureConfigFile() {
+  if (fs.existsSync(CONFIG_FILE)) return;
+  writeConfig({ userConfig: {} });
+}
+function getUserConfigRaw() {
+  const cfg = readConfig();
+  const userConfig = cfg?.userConfig;
+  return userConfig && typeof userConfig === 'object' && !Array.isArray(userConfig) ? userConfig : {};
+}
+function getEnvOverrides(userConfig) {
+  if (app.isPackaged) return {};
+  const overrides = {};
+  Object.keys(userConfig || {}).forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(process.env || {}, key)) {
+      overrides[key] = process.env[key];
+    }
+  });
+  return overrides;
+}
+function getUserConfigEffective() {
+  const raw = getUserConfigRaw();
+  if (app.isPackaged) return raw;
+  const overrides = getEnvOverrides(raw);
+  if (!Object.keys(overrides).length) return raw;
+  return { ...raw, ...overrides };
+}
 function getDataFile() {
   return dataFileOverride || DATA_FILE_DEFAULT;
 }
+function getQueueDir() {
+  return path.dirname(getDataFile());
+}
+function getQueueFile(queue) {
+  if (queue === 'SAGE_AR') return path.join(getQueueDir(), 'sage_ar_items.json');
+  if (queue === 'CASH_SALE') return path.join(getQueueDir(), 'cash_sales_items.json');
+  return getDataFile();
+}
 function ensureDataFileAt(file) {
+  ensureDir(path.dirname(file));
   if (!fs.existsSync(file)) fs.writeFileSync(file, '[]', 'utf-8');
 }
 function readItemsAt(file) {
@@ -99,16 +134,106 @@ function readItemsAt(file) {
 }
 function writeItemsAt(file, items) {
   ensureDataFileAt(file);
-  fs.writeFileSync(file, JSON.stringify(items ?? [], null, 2), 'utf-8');
+  writeJsonAtomic(file, JSON.stringify(items ?? [], null, 2));
 }
-function readItems() { return readItemsAt(getDataFile()); }
-function writeItems(items) { return writeItemsAt(getDataFile(), items); }
+function readQueueItems(queue) {
+  const file = getQueueFile(queue);
+  const items = readItemsAt(file);
+  return (items || []).map((it) => ({
+    ...it,
+    accountingPath: queue,
+  }));
+}
+function readItems() {
+  return [
+    ...readQueueItems('OUTSTANDING'),
+    ...readQueueItems('SAGE_AR'),
+    ...readQueueItems('CASH_SALE'),
+  ];
+}
+
+function readAllQueueItems() {
+  const queues = ['OUTSTANDING', 'SAGE_AR', 'CASH_SALE'];
+  const byQueue = {};
+  queues.forEach((queue) => {
+    const file = getQueueFile(queue);
+    byQueue[queue] = readItemsAt(file);
+  });
+  return byQueue;
+}
+function splitItemsByQueue(items) {
+  const buckets = {
+    OUTSTANDING: [],
+    SAGE_AR: [],
+    CASH_SALE: [],
+  };
+  (items || []).forEach((it) => {
+    const queue = it?.accountingPath || 'OUTSTANDING';
+    if (queue === 'SAGE_AR') buckets.SAGE_AR.push(it);
+    else if (queue === 'CASH_SALE') buckets.CASH_SALE.push(it);
+    else buckets.OUTSTANDING.push(it);
+  });
+  return buckets;
+}
+function writeItems(items) {
+  const queues = ['OUTSTANDING', 'SAGE_AR', 'CASH_SALE'];
+
+  // 1) Read current state of all queues
+  const currentByQueue = readAllQueueItems();
+
+  // 2) Build uid -> item map from current items
+  const map = new Map();
+  queues.forEach((queue) => {
+    (currentByQueue[queue] || []).forEach((it) => {
+      if (!it) return;
+      const uid = it.uid || randomUUID();
+      map.set(uid, { ...it, uid });
+    });
+  });
+
+  // 3) Apply incoming items (overwrite by uid)
+  const incomingUids = new Set();
+  (items || []).forEach((it) => {
+    if (!it) return;
+    const uid = it.uid || randomUUID();
+    incomingUids.add(uid);
+    map.set(uid, { ...it, uid });
+  });
+
+  // 3b) Remove items that are no longer present (honor deletions)
+  Array.from(map.keys()).forEach((uid) => {
+    if (!incomingUids.has(uid)) {
+      map.delete(uid);
+    }
+  });
+
+  // 4) Split merged list back into queues
+  const mergedList = Array.from(map.values());
+  const buckets = splitItemsByQueue(mergedList);
+
+  // 5) Atomically write each queue file if changed
+  queues.forEach((queue) => {
+    const file = getQueueFile(queue);
+    const current = currentByQueue[queue] || [];
+    const next = buckets[queue];
+    const a = JSON.stringify(current ?? []);
+    const b = JSON.stringify(next ?? []);
+    if (a !== b) writeItemsAt(file, next);
+  });
+}
 
 function getOrdersFile() {
   return ordersFileOverride || ORDERS_FILE_DEFAULT;
 }
 function readOrders() {
   return readItemsAt(getOrdersFile());
+}
+function ensureArchiveFileAt(file) {
+  ensureDir(path.dirname(file));
+  if (!fs.existsSync(file)) fs.writeFileSync(file, '[]', 'utf-8');
+}
+function getArchiveFile() {
+  return path.join(getQueueDir(), 'archived_bubbles.json');
 }
 function writeOrdersAt(file, orders) {
   backupFile(file);
@@ -122,11 +247,46 @@ function ensureDir(dirPath) {
   try { fs.mkdirSync(dirPath, { recursive: true }); } catch {}
 }
 
+function writeJsonAtomic(filePath, jsonString) {
+  const dir = path.dirname(filePath);
+  ensureDir(dir);
+  const tmp = path.join(dir, `${path.basename(filePath)}.tmp.${process.pid}.${Date.now()}`);
+  fs.writeFileSync(tmp, jsonString, 'utf-8');
+  try {
+    fs.renameSync(tmp, filePath);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    throw e;
+  }
+}
+
+function readArchivedEntries() {
+  const file = getArchiveFile();
+  ensureArchiveFileAt(file);
+  try {
+    const raw = fs.readFileSync(file, 'utf-8');
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) {
+    console.error('[archive] read failed', e);
+    return [];
+  }
+}
+
+function writeArchivedEntries(entries) {
+  const file = getArchiveFile();
+  ensureArchiveFileAt(file);
+  backupFile(file);
+  writeJsonAtomic(file, JSON.stringify(entries ?? [], null, 2));
+}
+
 function toMoneyString(val) {
   if (val === null || val === undefined || val === '') return '';
-  const num = Number(val);
+  const normalized = String(val).replace(/[^\d.-]/g, '').trim();
+  if (!normalized) return '';
+  const num = Number(normalized);
   if (Number.isFinite(num)) return num.toFixed(2);
-  return String(val);
+  return normalized;
 }
 
 function toDDMMYYYY(order) {
@@ -156,6 +316,7 @@ function makeOutstandingFromLine(order, line) {
   const inv = (order?.source_invoice || order?.invoiceNum || '').trim();
   return {
     uid: randomUUID(),
+    accountingPath: 'OUTSTANDING',
     allocated_for: toMoneyString(line?.extended ?? line?.costPrice ?? order?.total ?? order?.totalRaw ?? ''),
     allocated_to: 'New Stock',
     cost: toMoneyString(costVal),
@@ -177,15 +338,25 @@ function makeOutstandingFromLine(order, line) {
 }
 
 function startWatching(win) {
-  const file = getDataFile();
-  try { if (watcher) watcher.close(); } catch {}
-  ensureDataFileAt(file);
-  watcher = fs.watch(file, { persistent: false }, () => {
-    const arr = readItems();
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('items:updated', arr);
-      console.log('[main] watch -> items:updated', arr.length);
-    }
+  const files = [
+    getQueueFile('OUTSTANDING'),
+    getQueueFile('SAGE_AR'),
+    getQueueFile('CASH_SALE'),
+  ];
+  itemsWatchers.forEach((w) => {
+    try { w.close(); } catch {}
+  });
+  itemsWatchers = [];
+  files.forEach((file) => {
+    ensureDataFileAt(file);
+    const w = fs.watch(file, { persistent: false }, () => {
+      const arr = readItems();
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('items:updated', arr);
+        console.log('[main] watch -> items:updated', arr.length);
+      }
+    });
+    itemsWatchers.push(w);
   });
 }
 
@@ -447,6 +618,7 @@ let boundsSaveTimeout = null;
 
 async function createWindow() {
   // restore any saved custom data file path
+  ensureConfigFile();
   const cfg = readConfig();
   if (cfg.dataFile && typeof cfg.dataFile === 'string') {
     dataFileOverride = cfg.dataFile;
@@ -532,7 +704,6 @@ app.on('activate', () => {
 ipcMain.handle('items:read', () => readItems());
 // ipcMain.handle('items:write', (_evt, items) => { writeItems(items); return { ok: true }; });
 ipcMain.handle('items:write', (_evt, items) => {
-  const file = getDataFile();
   const current = readItems();                // existing array
   const a = JSON.stringify(current);
   const b = JSON.stringify(items ?? []);
@@ -797,6 +968,113 @@ ipcMain.handle('ui-state:write', (_evt, state) => {
   writeUIState(state && typeof state === 'object' ? state : {});
   return { ok: true };
 });
+
+ipcMain.handle('config:read', () => {
+  try {
+    ensureConfigFile();
+    const raw = getUserConfigRaw();
+    const effective = getUserConfigEffective();
+    const overrides = getEnvOverrides(raw);
+    return { ok: true, config: effective, raw, overrides, path: CONFIG_FILE };
+  } catch (e) {
+    console.error('[config:read]', e);
+    return { ok: false, error: e?.message || 'Failed to read config.' };
+  }
+});
+ipcMain.handle('config:write', (_evt, nextConfig) => {
+  try {
+    ensureConfigFile();
+    if (!nextConfig || typeof nextConfig !== 'object' || Array.isArray(nextConfig)) {
+      return { ok: false, error: 'Config must be an object.' };
+    }
+    const cfg = readConfig();
+    cfg.userConfig = nextConfig;
+    writeConfig(cfg);
+    return { ok: true };
+  } catch (e) {
+    console.error('[config:write]', e);
+    return { ok: false, error: e?.message || 'Failed to write config.' };
+  }
+});
+
+ipcMain.handle('archive:save-bubble', (_evt, payload) => {
+  try {
+    const { bubble, meta, items } = payload || {};
+    if (!bubble || !bubble.id) return { ok: false, error: 'Missing bubble info' };
+    const archivedAt = new Date().toISOString();
+    const entry = {
+      id: bubble.id,
+      bubble: { ...bubble },
+      meta: { ...(meta || {}), accountingPath: 'ARCHIVED', archivedAt },
+      accountingPath: 'ARCHIVED',
+      archivedAt,
+      items: Array.isArray(items) ? items : [],
+    };
+    const existing = readArchivedEntries();
+    existing.push(entry);
+    writeArchivedEntries(existing);
+    return { ok: true, archivedAt, path: getArchiveFile() };
+  } catch (e) {
+    console.error('[archive:save-bubble]', e);
+    return { ok: false, error: e?.message || 'Failed to archive bubble' };
+  }
+});
+
+ipcMain.handle('archive:search', (_evt, query) => {
+  const normalize = (val) => (val ?? '').toString().trim().toLowerCase();
+  try {
+    const term = normalize(query?.term || query?.q);
+    const bubbleTerm = normalize(query?.bubbleName || query?.customerName);
+    if (!term && !bubbleTerm) return { ok: true, results: [], empty: true };
+
+    const entries = readArchivedEntries();
+    const results = [];
+
+    for (const entry of entries) {
+      const bubbleName = entry?.bubble?.name || entry?.bubbleName || '';
+      const customer = entry?.meta?.customer || entry?.meta?.customerName || '';
+      const archivedAt = entry?.archivedAt || entry?.meta?.archivedAt || '';
+      const bubbleMatches = bubbleTerm
+        ? [bubbleName, customer].some((val) => normalize(val).includes(bubbleTerm))
+        : true;
+      if (!bubbleMatches && !term) continue;
+
+      const items = Array.isArray(entry?.items) ? entry.items : [];
+      const matchedItems = items
+        .filter((it) => {
+          if (!term) return true;
+          const code = normalize(it?.itemcode || it?.partNumber || it?.partLineCode);
+          const desc = normalize(it?.notes1 || '') + ' ' + normalize(it?.notes2 || '') + ' ' + normalize(it?.description || '');
+          return code.includes(term) || desc.includes(term);
+        })
+        .map((it) => ({
+          itemcode: it?.itemcode || it?.partNumber || '',
+          description: it?.notes1 || it?.description || '',
+          notes2: it?.notes2 || '',
+          quantity: it?.quantity,
+          allocated_for: it?.allocated_for,
+          cost: it?.cost,
+          reference_num: it?.reference_num,
+        }));
+
+      if (!matchedItems.length) continue;
+      results.push({
+        bubbleId: entry?.id || entry?.bubble?.id || '',
+        bubbleName: bubbleName || 'Archived Bubble',
+        archivedAt,
+        items: matchedItems,
+      });
+    }
+
+    results.sort((a, b) => String(b.archivedAt || '').localeCompare(String(a.archivedAt || '')));
+    return { ok: true, results };
+  } catch (e) {
+    console.error('[archive:search]', e);
+    return { ok: false, error: e?.message || 'Failed to search archive' };
+  }
+});
+
+ipcMain.handle('archive:get-path', () => ({ ok: true, path: getArchiveFile() }));
 
 
 // Acquire a 20s lock on a specific item

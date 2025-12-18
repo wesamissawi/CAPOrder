@@ -1,10 +1,14 @@
 // src/scrapers/sageStandardize.js
 // Utility to normalize orders/line items into a Sage-friendly shape across scrapers.
 
+function cleanMoneyString(val) {
+  if (val === null || val === undefined) return "";
+  return String(val).replace(/[^\d.-]/g, "").trim();
+}
+
 function toNumber(val) {
   if (val === null || val === undefined) return null;
-  const str = String(val);
-  const n = parseFloat(str.replace(/[^\d.-]/g, ""));
+  const n = parseFloat(cleanMoneyString(val));
   return Number.isFinite(n) ? n : null;
 }
 
@@ -15,11 +19,11 @@ function normalizeLineItem(item = {}) {
     ...item,
     partLineCode: item.partLineCode || item.brand || item.line || "",
     partNumber: item.partNumber || item.part || item.sku || "",
-    costPrice: costRaw,
+    costPrice: cleanMoneyString(costRaw),
     costPriceValue: item.costPriceValue ?? toNumber(costRaw),
     partDescription: item.partDescription || item.description || item.notes || "",
     quantity: item.quantity ?? item.qty ?? item.count ?? "",
-    extended: extendedRaw,
+    extended: cleanMoneyString(extendedRaw),
     extendedValue: item.extendedValue ?? toNumber(extendedRaw),
     core: Boolean(item.core),
   };

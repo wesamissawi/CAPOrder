@@ -31,6 +31,7 @@ export function normalizeItems(arr) {
       allocatedToRaw === "Stock" ? "Shelf" : allocatedToRaw;
     return {
       uid: it.uid,
+      accountingPath: it.accountingPath || "OUTSTANDING",
       allocated_for: it.allocated_for ?? "",
       allocated_to: allocatedTo,
       cost: String(it.cost ?? ""),

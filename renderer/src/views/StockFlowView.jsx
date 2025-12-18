@@ -32,6 +32,10 @@ export default function StockFlowView({
   onStartBubbleMove,
   onStartBubbleResize,
   onActivateBubble,
+  onMoveBubbleToSage,
+  onMoveBubbleToCashSales,
+  archivableBubbleIds,
+  onArchiveBubble,
 }) {
   return (
     <>
@@ -83,6 +87,7 @@ export default function StockFlowView({
               orderIndex !== undefined && orderIndex >= 0
                 ? zIndexBase + orderIndex
                 : zIndexBase + index;
+            const canArchive = !!archivableBubbleIds?.has(b.id);
             return (
               <div
                 key={b.id}
@@ -118,6 +123,10 @@ export default function StockFlowView({
                   onStartBubbleResize={onStartBubbleResize}
                   onActivateBubble={() => onActivateBubble(bubbleKey)}
                   widthPixels={width}
+                  onMoveToSage={onMoveBubbleToSage}
+                  onMoveToCashSales={onMoveBubbleToCashSales}
+                  canArchive={canArchive}
+                  onArchiveBubble={onArchiveBubble}
                 />
               </div>
             );

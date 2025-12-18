@@ -42,8 +42,12 @@ export default function BubbleColumn({
   onStartBubbleMove,
   onStartBubbleResize,
   onActivateBubble,
+  onMoveToSage,
+  onMoveToCashSales,
   isDefaultBubble = false,
   widthPixels = 360,
+  canArchive = false,
+  onArchiveBubble,
 
   onFieldFocus,
   onFieldBlur,
@@ -83,7 +87,17 @@ export default function BubbleColumn({
   const bubbleTax = bubbleSubtotal * 0.13;
   const bubbleTotal = bubbleSubtotal + bubbleTax;
   const showSummary = !isDefaultBubble;
-  const hasAdvancedActions = onConsolidateItems || (allowDelete && deleteOptions.length > 0);
+  const moveActionsAllowed =
+    !(
+      isDefaultBubble &&
+      ["cash sales", "shelf", "returns"].includes((name || "").toLowerCase())
+    );
+  const hasAdvancedActions =
+    onConsolidateItems ||
+    (moveActionsAllowed && onMoveToSage) ||
+    (moveActionsAllowed && onMoveToCashSales) ||
+    (canArchive && onArchiveBubble) ||
+    (allowDelete && deleteOptions.length > 0);
 
   const updateSplitDraft = (uid, patch) => {
     setSplitDrafts((prev) => {
@@ -494,6 +508,36 @@ export default function BubbleColumn({
                   onClick={() => onConsolidateItems?.(name)}
                 >
                   Consolidate duplicate items
+                </button>
+              )}
+              {moveActionsAllowed && onMoveToSage && (
+                <button
+                  type="button"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-slate-700 font-semibold hover:bg-slate-50"
+                  onClick={() => onMoveToSage?.(id)}
+                  title="Move entire bubble to Sage AR queue"
+                >
+                  Move to: Sage AR (Enter into Sage as-is)
+                </button>
+              )}
+              {moveActionsAllowed && onMoveToCashSales && (
+                <button
+                  type="button"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-slate-700 font-semibold hover:bg-slate-50"
+                  onClick={() => onMoveToCashSales?.(id)}
+                  title="Move entire bubble to Cash Sales"
+                >
+                  Move to: Cash Sales
+                </button>
+              )}
+              {canArchive && onArchiveBubble && (
+                <button
+                  type="button"
+                  className="w-full rounded-lg border border-red-200 px-3 py-2 text-red-700 font-semibold hover:bg-red-50"
+                  onClick={() => onArchiveBubble?.(id)}
+                  title="Archive this bubble and its items"
+                >
+                  Archive Bubble
                 </button>
               )}
               {allowDelete && deleteOptions.length > 0 && (

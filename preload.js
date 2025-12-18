@@ -29,6 +29,8 @@ contextBridge.exposeInMainWorld('api', {
 
   readUIState: () => ipcRenderer.invoke('ui-state:read'),
   writeUIState: (state) => ipcRenderer.invoke('ui-state:write', state),
+  readConfig: () => ipcRenderer.invoke('config:read'),
+  writeConfig: (config) => ipcRenderer.invoke('config:write', config),
   readOrders: () => ipcRenderer.invoke('orders:read'),
   writeOrders: (orders) => ipcRenderer.invoke('orders:write', orders),
   watchOrders: (enable) => ipcRenderer.invoke('orders:watch', enable),
@@ -44,4 +46,7 @@ contextBridge.exposeInMainWorld('api', {
   fetchCbkOrders: () => ipcRenderer.invoke('orders:fetch-cbk'),
   fetchBestBuyOrders: () => ipcRenderer.invoke('orders:fetch-bestbuy'),
   addOrdersToOutstanding: () => ipcRenderer.invoke('orders:add-to-outstanding'),
+  archiveBubble: (payload) => ipcRenderer.invoke('archive:save-bubble', payload),
+  searchArchive: (query) => ipcRenderer.invoke('archive:search', query),
+  getArchivePath: () => ipcRenderer.invoke('archive:get-path'),
 });

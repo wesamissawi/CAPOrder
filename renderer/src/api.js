@@ -26,6 +26,11 @@ const fallbackApi = {
   fetchCbkOrders: async () => ({ ok: false }),
   fetchBestBuyOrders: async () => ({ ok: false }),
   addOrdersToOutstanding: async () => ({ ok: false }),
+  archiveBubble: async () => ({ ok: false }),
+  searchArchive: async () => ({ ok: false, results: [] }),
+  getArchivePath: async () => ({ path: "(not in Electron)" }),
+  readConfig: async () => ({ ok: false, config: {}, raw: {}, overrides: {} }),
+  writeConfig: async () => ({ ok: false }),
 };
 
 const api = window.api ?? fallbackApi;

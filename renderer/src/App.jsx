@@ -9,6 +9,8 @@ import RefToInvView from "./views/RefToInvView";
 import PaymentManagementView from "./views/PaymentManagementView";
 import ReturnsManagementView from "./views/ReturnsManagementView";
 import ManageStockView from "./views/ManageStockView";
+import ArchiveSearchView from "./views/ArchiveSearchView";
+import SettingsView from "./views/SettingsView";
 import {
   DEFAULT_BUBBLES,
   normalizeItems,
@@ -22,15 +24,26 @@ import {
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
 const DELETE_DESTINATIONS = ["New Stock", "Shelf", "Cash Sales", "Returns"];
 
+const ACCOUNTING_PATHS = {
+  OUTSTANDING: "OUTSTANDING",
+  SAGE_AR: "SAGE_AR",
+  CASH_SALE: "CASH_SALE",
+  ARCHIVED: "ARCHIVED",
+};
+
 
 
 const VIEWS = [
   { id: "dashboard", label: "Dashboard" },
   { id: "stock-flow", label: "Stock Flow" },
+  { id: "sage-ar-queue", label: "Sage AR Queue" },
+  { id: "cash-sale-flow", label: "Cash Sales" },
   { id: "manage-stock", label: "Manage Stock" },
   { id: "returns-management", label: "Returns Management" },
   { id: "order-management", label: "Order Management" },
   { id: "ref-to-inv", label: "Ref to Inv" },
+  { id: "archive-search", label: "Archive" },
+  { id: "settings", label: "Settings" },
   { id: "payment-management", label: "Payment Management" },
 ];
 
@@ -63,6 +76,8 @@ export default function App() {
   const [sageIntegrationEnabled, setSageIntegrationEnabled] = useState(false);
   const [sageReadyOrders, setSageReadyOrders] = useState([]);
   const [sageWatchError, setSageWatchError] = useState("");
+  const [printExtraLinesByBubble, setPrintExtraLinesByBubble] = useState({});
+  const [bubbleMeta, setBubbleMeta] = useState({});
   const [worldOrdersRunning, setWorldOrdersRunning] = useState(false);
   const [worldOrdersStatus, setWorldOrdersStatus] = useState("");
   const [worldOrdersError, setWorldOrdersError] = useState("");
@@ -81,6 +96,12 @@ export default function App() {
   const [outstandingRunning, setOutstandingRunning] = useState(false);
   const [outstandingStatus, setOutstandingStatus] = useState("");
   const [outstandingError, setOutstandingError] = useState("");
+  const [archiveSearchTerm, setArchiveSearchTerm] = useState("");
+  const [archiveBubbleSearch, setArchiveBubbleSearch] = useState("");
+  const [archiveResults, setArchiveResults] = useState([]);
+  const [archiveSearching, setArchiveSearching] = useState(false);
+  const [archiveError, setArchiveError] = useState("");
+  const [archivePath, setArchivePath] = useState("");
   const ordersLastSavedRef = useRef("");
 
   const [editingItemUid, setEditingItemUid] = useState(null);
@@ -235,8 +256,13 @@ export default function App() {
     const base = newBubbleName.trim() || "New Bubble";
     const names = new Set(bubbles.map((b) => b.name));
     const finalName = uniqueName(base, names);
-    const nb = { id: makeUid(), name: finalName, notes: "" };
+    const id = makeUid();
+    const nb = { id, name: finalName, notes: "" };
     setBubbles((p) => [...p, nb]);
+    setBubbleMeta((prev) => ({
+      ...prev,
+      [id]: { ...(prev[id] || {}), accountingPath: ACCOUNTING_PATHS.OUTSTANDING },
+    }));
     setNewBubbleName("");
   }
 
@@ -282,9 +308,50 @@ export default function App() {
     timeFilterMinutes,
   ]);
 
-  const itemsByBubble = useMemo(
-    () => groupItemsByBubble(filteredItems, bubbles),
-    [filteredItems, bubbles]
+  const bubbleAccountingPathByName = useMemo(() => {
+    const map = new Map();
+    items.forEach((it) => {
+      const name = (it.allocated_to || "").trim();
+      if (!name) return;
+      const path = it.accountingPath || ACCOUNTING_PATHS.OUTSTANDING;
+      if (!map.has(name)) map.set(name, path);
+    });
+    return map;
+  }, [items]);
+  const archivableBubbleIds = useMemo(() => {
+    const set = new Set();
+    bubbles.forEach((b) => {
+      const path = bubbleAccountingPathByName.get(b.name);
+      if (path === ACCOUNTING_PATHS.SAGE_AR || path === ACCOUNTING_PATHS.CASH_SALE) {
+        set.add(b.id);
+      }
+    });
+    return set;
+  }, [bubbles, bubbleAccountingPathByName]);
+  const visibleAccountingPath = useMemo(() => {
+    if (currentView === "stock-flow") return ACCOUNTING_PATHS.OUTSTANDING;
+    if (currentView === "sage-ar-queue") return ACCOUNTING_PATHS.SAGE_AR;
+    if (currentView === "cash-sale-flow") return ACCOUNTING_PATHS.CASH_SALE;
+    return null;
+  }, [currentView]);
+  const bubblesForView = useMemo(() => {
+    if (!visibleAccountingPath) return bubbles;
+    return bubbles.filter((b) => {
+      const path =
+        bubbleAccountingPathByName.get(b.name) || ACCOUNTING_PATHS.OUTSTANDING;
+      return path === visibleAccountingPath;
+    });
+  }, [bubbles, bubbleAccountingPathByName, visibleAccountingPath]);
+  const filteredItemsForView = useMemo(() => {
+    if (!visibleAccountingPath) return filteredItems;
+    return filteredItems.filter((it) => {
+      const path = it.accountingPath || ACCOUNTING_PATHS.OUTSTANDING;
+      return path === visibleAccountingPath;
+    });
+  }, [filteredItems, visibleAccountingPath]);
+  const itemsByBubbleForView = useMemo(
+    () => groupItemsByBubble(filteredItemsForView, bubblesForView),
+    [filteredItemsForView, bubblesForView]
   );
   const returnsByWarehouse = useMemo(() => {
     const groups = new Map();
@@ -327,6 +394,15 @@ export default function App() {
         if (typeof state.sageIntegrationEnabled === "boolean") {
           setSageIntegrationEnabled(state.sageIntegrationEnabled);
         }
+        if (
+          state.printExtraLinesByBubble &&
+          typeof state.printExtraLinesByBubble === "object"
+        ) {
+          setPrintExtraLinesByBubble(state.printExtraLinesByBubble);
+        }
+        if (state.bubbleMeta && typeof state.bubbleMeta === "object") {
+          setBubbleMeta((prev) => ({ ...(state.bubbleMeta || {}), ...prev }));
+        }
       } catch (e) {
         console.warn("[ui-state] read failed", e);
       } finally {
@@ -338,13 +414,68 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!api?.getArchivePath) return;
+    api
+      .getArchivePath()
+      .then((res) => {
+        if (!cancelled && res?.path) setArchivePath(res.path);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   useEffect(() => {
     if (!uiStateReady || !api?.writeUIState) return;
     api
-      .writeUIState({ bubblePositions, bubbleSizes, bubbleZOrder, sageIntegrationEnabled })
+      .writeUIState({
+        bubblePositions,
+        bubbleSizes,
+        bubbleZOrder,
+        sageIntegrationEnabled,
+        printExtraLinesByBubble,
+        bubbleMeta,
+      })
       .catch((e) => console.warn("[ui-state] write failed", e));
-  }, [bubblePositions, bubbleSizes, bubbleZOrder, sageIntegrationEnabled, uiStateReady]);
+  }, [
+    bubblePositions,
+    bubbleSizes,
+    bubbleZOrder,
+    sageIntegrationEnabled,
+    printExtraLinesByBubble,
+    bubbleMeta,
+    uiStateReady,
+  ]);
+
+  function persistUIState(nextBubbleMeta) {
+    if (!uiStateReady || !api?.writeUIState) return;
+    api
+      .writeUIState({
+        bubblePositions,
+        bubbleSizes,
+        bubbleZOrder,
+        sageIntegrationEnabled,
+        printExtraLinesByBubble,
+        bubbleMeta: nextBubbleMeta || bubbleMeta,
+      })
+      .catch((e) => console.warn("[ui-state] write failed", e));
+  }
   useEffect(() => {
+    setBubbleMeta((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      bubbles.forEach((b) => {
+        const meta = next[b.id] || {};
+        if (!meta.accountingPath) {
+          next[b.id] = { ...meta, accountingPath: ACCOUNTING_PATHS.OUTSTANDING };
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
     setBubblePositions((prev) => {
       let changed = false;
       const next = { ...prev };
@@ -390,6 +521,10 @@ export default function App() {
     if (!printBubble) return [];
     return filteredItems.filter((it) => it.allocated_to === printBubble.name);
   }, [filteredItems, printBubble]);
+  const printExtraLines = useMemo(() => {
+    if (!printBubble) return [];
+    return printExtraLinesByBubble[printBubble.id] || [];
+  }, [printBubble, printExtraLinesByBubble]);
 
   useEffect(() => {
     function handlePointerMove(e) {
@@ -591,7 +726,14 @@ export default function App() {
   function handleReturnItemToNewStock(uid) {
     setItems((prev) => {
       const next = prev.map((it) =>
-        it.uid === uid ? { ...it, allocated_to: "New Stock", last_moved_at: new Date().toISOString() } : it
+        it.uid === uid
+          ? {
+              ...it,
+              allocated_to: "New Stock",
+              accountingPath: ACCOUNTING_PATHS.OUTSTANDING,
+              last_moved_at: new Date().toISOString(),
+            }
+          : it
       );
       ensureBubblesForItems(next, setBubbles);
       return next;
@@ -607,10 +749,133 @@ export default function App() {
     });
   }
 
+  function handleMoveBubbleAccounting(bubbleId, targetPath) {
+    if (!bubbleId || !targetPath) return;
+    const bubble = bubbles.find((b) => b.id === bubbleId);
+    const nameKey = bubble?.name;
+    const now = new Date().toISOString();
+    const meta = bubbleMeta[bubbleId] || bubbleMeta[nameKey] || {};
+    const nextMeta = {
+      ...meta,
+      accountingPath: targetPath,
+    };
+    if (targetPath === ACCOUNTING_PATHS.SAGE_AR) {
+      nextMeta.queuedForSageAt = now;
+    } else if (targetPath === ACCOUNTING_PATHS.CASH_SALE) {
+      nextMeta.movedToCashSalesAt = now;
+    }
+    const nextBubbleMeta = {
+      ...bubbleMeta,
+      ...(nameKey ? { [nameKey]: nextMeta } : {}),
+      [bubbleId]: nextMeta,
+    };
+    setBubbleMeta(nextBubbleMeta);
+    persistUIState(nextBubbleMeta);
+    if (bubble?.name) {
+      const updatedItems = items.map((it) =>
+        it.allocated_to === bubble.name
+          ? { ...it, accountingPath: targetPath, last_moved_at: now }
+          : it
+      );
+      setItems(updatedItems);
+      lastSavedRef.current = JSON.stringify(updatedItems);
+      api.writeItems(updatedItems);
+    }
+  }
+
+  async function handleArchiveBubble(bubbleId) {
+    const bubble = bubbles.find((b) => b.id === bubbleId);
+    if (!bubble) return;
+    const bubbleItems = items.filter((it) => it.allocated_to === bubble.name);
+    const path = bubbleItems[0]?.accountingPath || ACCOUNTING_PATHS.OUTSTANDING;
+    if (path !== ACCOUNTING_PATHS.SAGE_AR && path !== ACCOUNTING_PATHS.CASH_SALE) {
+      alert("Archive is only available for Sage AR Queue or Cash Sales bubbles.");
+      return;
+    }
+    const confirmed =
+      typeof window === "undefined"
+        ? true
+        : window.confirm(
+            `Archive "${bubble.name}" and ${bubbleItems.length} item(s)? They will be removed from active views and saved to the archive.`
+          );
+    if (!confirmed) return;
+    try {
+      const res = await api.archiveBubble({
+        bubble,
+        meta: bubbleMeta[bubbleId] || bubbleMeta[bubble.name] || {},
+        items: bubbleItems,
+      });
+      if (!res?.ok) throw new Error(res?.error || "Failed to archive bubble.");
+      const archivedAt = res.archivedAt || new Date().toISOString();
+      const remainingItems = items.filter((it) => it.allocated_to !== bubble.name);
+      setItems(remainingItems);
+      lastSavedRef.current = JSON.stringify(remainingItems);
+      await api.writeItems(remainingItems);
+      setBubbles((prev) => prev.filter((b) => b.id !== bubbleId));
+      setBubbleMeta((prev) => ({
+        ...prev,
+        [bubbleId]: { ...(prev[bubbleId] || {}), accountingPath: ACCOUNTING_PATHS.ARCHIVED, archivedAt },
+      }));
+      setBubbleZOrder((prev) => prev.filter((k) => k !== bubble.name && k !== bubble.id));
+      setBubblePositions((prev) => {
+        const next = { ...prev };
+        delete next[bubble.name];
+        delete next[bubble.id];
+        return next;
+      });
+      setBubbleSizes((prev) => {
+        const next = { ...prev };
+        delete next[bubble.name];
+        delete next[bubble.id];
+        return next;
+      });
+      setActiveBubbleKey((prev) => (prev === bubbleId || prev === bubble.name ? null : prev));
+    } catch (e) {
+      console.error("[archive] failed", e);
+      alert(e?.message || "Failed to archive bubble.");
+    }
+  }
+
   function handleOpenPrint(bubble) {
     if (!bubble || DEFAULT_BUBBLE_NAMES.has(bubble.name)) return;
     setPrintBubbleId(bubble.id);
     setPrintGeneratedAt(new Date());
+  }
+
+  function handleAddExtraLine() {
+    if (!printBubble) return;
+    setPrintExtraLinesByBubble((prev) => {
+      const current = prev[printBubble.id] || [];
+      const nextLine = {
+        id: makeUid(),
+        description: "",
+        quantity: 1,
+        unitPrice: "",
+        taxable: true,
+        partLineCode: "",
+      };
+      return { ...prev, [printBubble.id]: [...current, nextLine] };
+    });
+  }
+
+  function handleUpdateExtraLine(lineId, patch) {
+    if (!printBubble) return;
+    setPrintExtraLinesByBubble((prev) => {
+      const current = prev[printBubble.id] || [];
+      const next = current.map((line) =>
+        line.id === lineId ? { ...line, ...patch } : line
+      );
+      return { ...prev, [printBubble.id]: next };
+    });
+  }
+
+  function handleRemoveExtraLine(lineId) {
+    if (!printBubble) return;
+    setPrintExtraLinesByBubble((prev) => {
+      const current = prev[printBubble.id] || [];
+      const next = current.filter((line) => line.id !== lineId);
+      return { ...prev, [printBubble.id]: next };
+    });
   }
 
   function handleClosePrint() {
@@ -619,12 +884,15 @@ export default function App() {
   }
 
   function handleConfirmPrint() {
-    if (!printBubble || printItems.length === 0) return;
+    if (!printBubble || (printItems.length === 0 && printExtraLines.length === 0))
+      return;
     const todayStr = new Date().toLocaleDateString("en-CA");
-    const ids = new Set(printItems.map((it) => it.uid));
-    setItems((prev) =>
-      prev.map((it) => (ids.has(it.uid) ? { ...it, sold_date: todayStr } : it))
-    );
+    if (printItems.length) {
+      const ids = new Set(printItems.map((it) => it.uid));
+      setItems((prev) =>
+        prev.map((it) => (ids.has(it.uid) ? { ...it, sold_date: todayStr } : it))
+      );
+    }
     setPrintGeneratedAt(new Date());
     setTimeout(() => {
       if (!printPreviewRef.current) return;
@@ -1060,6 +1328,31 @@ export default function App() {
     }
   }
 
+  async function handleArchiveSearch() {
+    const hasTerm = archiveSearchTerm.trim() || archiveBubbleSearch.trim();
+    if (!hasTerm) {
+      setArchiveError("Enter a part/description or bubble/customer name to search.");
+      setArchiveResults([]);
+      return;
+    }
+    try {
+      setArchiveError("");
+      setArchiveSearching(true);
+      const res = await api.searchArchive({
+        term: archiveSearchTerm,
+        bubbleName: archiveBubbleSearch,
+      });
+      if (!res?.ok) throw new Error(res?.error || "Archive search failed.");
+      setArchiveResults(res.results || []);
+    } catch (e) {
+      console.error("[archive search]", e);
+      setArchiveError(e?.message || "Failed to search archive.");
+      setArchiveResults([]);
+    } finally {
+      setArchiveSearching(false);
+    }
+  }
+
   useEffect(() => {
     if (!api?.watchOrders || !api?.onOrdersUpdated) {
       if (sageIntegrationEnabled) {
@@ -1167,7 +1460,10 @@ export default function App() {
 
 
   const currentViewMeta = VIEWS.find((v) => v.id === currentView);
-  const isStockFlowView = currentView === "stock-flow";
+  const isBubbleFlowView =
+    currentView === "stock-flow" ||
+    currentView === "sage-ar-queue" ||
+    currentView === "cash-sale-flow";
 
   return (
     <div className="min-h-screen w-full bg-gradient-to-br from-fuchsia-100 via-sky-100 to-emerald-100">
@@ -1241,21 +1537,21 @@ export default function App() {
             sageReadyOrders={sageReadyOrders}
             sageWatchError={sageWatchError}
           />
-        ) : isStockFlowView ? (
+        ) : isBubbleFlowView ? (
           <StockFlowView
             newBubbleName={newBubbleName}
             setNewBubbleName={setNewBubbleName}
             handleFieldFocus={handleFieldFocus}
             handleFieldBlur={handleFieldBlur}
             addBubble={addBubble}
-            bubbles={bubbles}
+            bubbles={bubblesForView}
             bubblePositions={bubblePositions}
             bubbleSizes={bubbleSizes}
             bubbleZOrder={bubbleZOrder}
             activeBubbleKey={activeBubbleKey}
             workspaceRef={workspaceRef}
             printBubble={printBubble}
-            itemsByBubble={itemsByBubble}
+            itemsByBubble={itemsByBubbleForView}
             expanded={expanded}
             toggleExpand={toggleExpand}
             onDragStartItem={onDragStartItem}
@@ -1272,6 +1568,14 @@ export default function App() {
             onStartBubbleMove={handleStartBubbleMove}
             onStartBubbleResize={handleStartBubbleResize}
             onActivateBubble={handleActivateBubble}
+            onMoveBubbleToSage={(bubbleId) =>
+              handleMoveBubbleAccounting(bubbleId, ACCOUNTING_PATHS.SAGE_AR)
+            }
+            onMoveBubbleToCashSales={(bubbleId) =>
+              handleMoveBubbleAccounting(bubbleId, ACCOUNTING_PATHS.CASH_SALE)
+            }
+            archivableBubbleIds={archivableBubbleIds}
+            onArchiveBubble={handleArchiveBubble}
           />
         ) : currentView === "manage-stock" ? (
           <ManageStockView
@@ -1313,13 +1617,27 @@ export default function App() {
             onMarkComplete={handleMarkComplete}
             hasSearch={hasSearch}
           />
+        ) : currentView === "archive-search" ? (
+          <ArchiveSearchView
+            searchTerm={archiveSearchTerm}
+            setSearchTerm={setArchiveSearchTerm}
+            bubbleName={archiveBubbleSearch}
+            setBubbleName={setArchiveBubbleSearch}
+            onSearch={handleArchiveSearch}
+            searching={archiveSearching}
+            results={archiveResults}
+            error={archiveError}
+            archivePath={archivePath}
+          />
+        ) : currentView === "settings" ? (
+          <SettingsView />
         ) : (
           <PaymentManagementView currentViewMeta={currentViewMeta} />
         )}
       </div>
       {printBubble && (
         <div className="fixed inset-0 z-[5000] bg-slate-900/60 flex items-center justify-center px-4">
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl p-6 flex flex-col gap-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-7xl p-6 flex flex-col gap-4">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-semibold text-slate-800">
                 Print Preview - {printBubble.name}
@@ -1331,6 +1649,9 @@ export default function App() {
                 x
               </button>
             </div>
+            <p className="text-sm text-slate-500">
+              Bubble items stay read-only while printing. Use extra lines to add print-only charges or notes.
+            </p>
             <div className="flex justify-end gap-3">
               <button
                 className="px-4 py-2 rounded-full border border-slate-300 text-slate-700"
@@ -1345,16 +1666,112 @@ export default function App() {
                 Print
               </button>
             </div>
-            <div
-              ref={printPreviewRef}
-              className="max-h-[70vh] overflow-auto rounded-2xl border border-slate-200 bg-slate-50 p-4"
-            >
-              <InvoicePreview
-                bubbleName={printBubble.name}
-                bubbleNotes={printBubble.notes}
-                items={printItems}
-                generatedDate={printGeneratedAt || new Date()}
-              />
+            <div className="grid gap-4 lg:grid-cols-[420px,1fr]">
+              <div className="max-h-[80vh] overflow-auto rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-800">
+                      Extra lines (print-only)
+                    </div>
+                    <p className="text-xs text-slate-500">
+                      Stored on this bubble so they show up next time you print.
+                    </p>
+                  </div>
+                  <button
+                    className="px-3 py-1 rounded-full border border-slate-300 text-sm font-semibold text-slate-700 hover:bg-white"
+                    onClick={handleAddExtraLine}
+                  >
+                    Add line
+                  </button>
+                </div>
+                {printExtraLines.length === 0 ? (
+                  <div className="mt-3 rounded-xl border border-dashed border-slate-300 bg-white/80 p-3 text-xs text-slate-500">
+                    No extra lines yet. Click “Add line” to include fees, notes, or shipping that
+                    should only appear on the printout.
+                  </div>
+                ) : (
+                  <div className="mt-3 space-y-3">
+                    {printExtraLines.map((line) => (
+                      <div
+                        key={line.id}
+                        className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm"
+                      >
+                        <div className="flex items-start gap-2">
+                          <input
+                            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                            placeholder="Description"
+                            value={line.description || ""}
+                            onChange={(e) =>
+                              handleUpdateExtraLine(line.id, { description: e.target.value })
+                            }
+                          />
+                          <button
+                            className="text-xs text-slate-500 hover:text-red-600"
+                            onClick={() => handleRemoveExtraLine(line.id)}
+                            title="Remove line"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                          <input
+                            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                            placeholder="Part/Line code"
+                            value={line.partLineCode || ""}
+                            onChange={(e) =>
+                              handleUpdateExtraLine(line.id, { partLineCode: e.target.value })
+                            }
+                          />
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                            placeholder="Qty"
+                            value={line.quantity ?? ""}
+                            onChange={(e) =>
+                              handleUpdateExtraLine(line.id, { quantity: e.target.value })
+                            }
+                          />
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                            placeholder="Price"
+                            value={line.unitPrice ?? ""}
+                            onChange={(e) =>
+                              handleUpdateExtraLine(line.id, { unitPrice: e.target.value })
+                            }
+                          />
+                          <label className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700">
+                            <input
+                              type="checkbox"
+                              checked={line.taxable ?? true}
+                              onChange={(e) =>
+                                handleUpdateExtraLine(line.id, { taxable: e.target.checked })
+                              }
+                            />
+                            Taxable
+                          </label>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div
+                ref={printPreviewRef}
+                className="max-h-[80vh] overflow-auto rounded-2xl border border-slate-200 bg-slate-50 p-4"
+              >
+                <InvoicePreview
+                  bubbleName={printBubble.name}
+                  bubbleNotes={printBubble.notes}
+                  items={printItems}
+                  extraLines={printExtraLines}
+                  generatedDate={printGeneratedAt || new Date()}
+                />
+              </div>
             </div>
           </div>
         </div>
