@@ -18,8 +18,14 @@
     "build:renderer": "cd renderer && npm run build",
     "build": "npm run build:renderer",
     "start": "electron .",
-    "dist": "electron-builder -w",
-    "dist:publish": "electron-builder -w --publish always"
+    "dist": "npm run build:renderer && electron-builder -w",
+    "dist:publish": "npm run build:renderer && electron-builder -w --publish always"
+  },
+  "build": {
+    "files": [
+      "**/*",
+      "renderer/dist/**/*"
+    ]
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.10.2",
