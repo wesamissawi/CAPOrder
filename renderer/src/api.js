@@ -34,6 +34,7 @@ const fallbackApi = {
   getAppConfig: async () => ({ ok: false }),
   setAppConfig: async () => ({ ok: false }),
   chooseSharedFolderDialog: async () => ({ ok: false }),
+  getResolvedBusinessPaths: async () => ({ ok: false }),
   getResolvedPathsSummary: async () => ({ ok: false }),
   validateSharedFolderWritable: async () => ({ ok: false }),
   migrateBusinessFilesToShared: async () => ({ ok: false }),

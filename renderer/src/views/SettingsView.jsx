@@ -21,7 +21,7 @@ function PathRow({ label, value, onChange, readOnly, onBrowse, helper, status })
             className="px-3 py-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-700 hover:bg-white"
             onClick={onBrowse}
           >
-            Browse…
+            Browse...
           </button>
         ) : (
           <button
@@ -48,11 +48,34 @@ export default function SettingsView() {
   const [migrateMode, setMigrateMode] = useState("copy");
   const [migrateResults, setMigrateResults] = useState([]);
 
+  const fileEntries = useMemo(() => {
+    if (!summary?.files) return [];
+    const labels = {
+      orders_json: "orders.json",
+      orders_json_bak: "orders.json.bak",
+      outstanding_items: "outstanding_items.json",
+      sage_ar_items: "sage_ar_items.json",
+      cash_sales_items: "cash_sales_items.json",
+      archived_bubbles: "archived_bubbles.json",
+      archived_bubbles_bak: "archived_bubbles.json.bak",
+    };
+    return Object.entries(labels).map(([key, label]) => {
+      const info = summary.files[key] || {};
+      return { key, label, path: info.path || "", exists: Boolean(info.exists) };
+    });
+  }, [summary]);
+
   const sharedStatus = useMemo(() => {
     if (!sharedPath) return <span className="text-xs text-amber-600 font-semibold">Not set</span>;
-    if (validate.ok) return <span className="text-xs text-emerald-600 font-semibold">Writable</span>;
-    return <span className="text-xs text-red-600 font-semibold">{validate.error || "Invalid"}</span>;
-  }, [sharedPath, validate]);
+    if (summary?.sharedConfigured && summary?.sharedExists === false) {
+      return <span className="text-xs text-red-600 font-semibold">Missing / Invalid</span>;
+    }
+    if (validate.ok) return <span className="text-xs text-emerald-600 font-semibold">OK (writable)</span>;
+    if (validate.error && validate.error !== "Not checked") {
+      return <span className="text-xs text-amber-600 font-semibold">{validate.error}</span>;
+    }
+    return <span className="text-xs text-slate-500 font-semibold">Not checked</span>;
+  }, [sharedPath, validate, summary]);
 
   async function load() {
     setError("");
@@ -66,6 +89,8 @@ export default function SettingsView() {
       await refreshSummary();
       if (res.config?.sharedDataDir) {
         await handleValidate(res.config.sharedDataDir);
+      } else {
+        setValidate({ ok: false, error: "Not set" });
       }
     } catch (e) {
       setError(e?.message || "Failed to load settings.");
@@ -73,8 +98,14 @@ export default function SettingsView() {
   }
 
   async function refreshSummary() {
-    const res = await api.getResolvedPathsSummary();
-    if (res?.ok) setSummary(res.summary);
+    try {
+      const res =
+        (await api.getResolvedBusinessPaths?.()) ||
+        (await api.getResolvedPathsSummary?.());
+      if (res?.ok) setSummary(res.summary);
+    } catch (e) {
+      console.warn("[settings] failed to refresh summary", e);
+    }
   }
 
   async function handleValidate(pathStr) {
@@ -82,8 +113,16 @@ export default function SettingsView() {
       setValidate({ ok: false, error: "Not set" });
       return;
     }
-    const res = await api.validateSharedFolderWritable(pathStr);
-    setValidate(res.ok ? { ok: true } : { ok: false, error: res.error });
+    try {
+      const res = await api.validateSharedFolderWritable(pathStr);
+      const next = res.ok ? { ok: true } : { ok: false, error: res.error || "Not writable" };
+      setValidate(next);
+      if (res.ok) {
+        await refreshSummary();
+      }
+    } catch (e) {
+      setValidate({ ok: false, error: e?.message || "Validation failed" });
+    }
   }
 
   async function handleSave() {
@@ -110,11 +149,13 @@ export default function SettingsView() {
   async function handleMigrate() {
     setError("");
     setStatus("");
+    setMigrateResults([]);
     try {
       const res = await api.migrateBusinessFilesToShared({ mode: migrateMode });
       if (!res?.ok) throw new Error(res?.error || "Migration failed.");
       setMigrateResults(res.results || []);
-      setStatus(`Migration complete (${migrateMode}).`);
+      const dest = res.sharedDir || sharedPath || "shared folder";
+      setStatus(`Migration complete (${migrateMode}) -> ${dest}.`);
       await refreshSummary();
     } catch (e) {
       setError(e?.message || "Migration failed.");
@@ -176,8 +217,39 @@ export default function SettingsView() {
               Shared folder not set. Choose a network/local folder to enable shared data.
             </div>
           )}
+          {summary?.sharedConfigured && summary.sharedExists === false && (
+            <div className="text-sm text-red-600">
+              Shared folder is missing or unavailable. Pick a reachable network/local folder and save the settings.
+            </div>
+          )}
           {error && <div className="text-sm text-red-600">{error}</div>}
           {status && <div className="text-sm text-emerald-600">{status}</div>}
+          {fileEntries.length > 0 && (
+            <div className="space-y-2">
+              <div className="text-xs uppercase tracking-wide text-slate-500">Business file locations</div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {fileEntries.map((entry) => (
+                  <div key={entry.key} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                    <div className="text-xs font-semibold text-slate-700">{entry.label}</div>
+                    <div className="text-[11px] font-mono break-all text-slate-600">
+                      {entry.path || "Not resolved"}
+                    </div>
+                    <div
+                      className={`text-xs font-semibold ${entry.exists ? "text-emerald-600" : "text-red-600"}`}
+                    >
+                      {entry.exists ? "Exists" : "Missing"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {summary?.queueDir && (
+                <div className="text-[11px] text-slate-500">
+                  Queue folder (orders + outstanding):{" "}
+                  <span className="font-mono break-all text-slate-700">{summary.queueDir}</span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </Card>
 
