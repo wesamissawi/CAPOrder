@@ -427,7 +427,7 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
     } else {
         journal_tax := journal_entry . "    $" . inv_total
         ; Emit result to stdout for Electron to consume; do not touch orders.json here.
-        MsgBox, 64, AHK Result, Sending back:`n%journal_tax%
+        ; MsgBox, 64, AHK Result, Sending back:`n%journal_tax%
         FileAppend, %journal_tax%`n, *
         Send {Enter}
         Sleep, 500

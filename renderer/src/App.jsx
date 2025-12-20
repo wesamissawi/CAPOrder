@@ -1086,7 +1086,7 @@ export default function App() {
     updateOrderByKey(referenceKey, { [field]: value });
   }
   function handleOrderInvoiceChange(referenceKey, value) {
-    updateOrderByKey(referenceKey, { source_invoice: value });
+    updateOrderByKey(referenceKey, { source_invoice: value, sage_reference: value });
   }
   function handleOrderCheckboxChange(referenceKey, field, checked) {
     if (field === "inStore") {
