@@ -15,33 +15,39 @@ const isDev = !app.isPackaged;
 const LOCK_DURATION_MS = 20000; // 20 seconds
 
 
-// ---- data paths ----
-// const base = "\\\\GIRLSBOYS\\ushare\\Ghost PO\\Order_Items";
-// const DATA_FILE_DEFAULT = path.join(base, "outstanding_items.json");
+// ---- path + config helpers ----
+const INSTANCE_DIR = app.getPath('userData');
+const APP_CONFIG_FILE = path.join(INSTANCE_DIR, 'app_config.json'); // stores sharedDataDir
+const CONFIG_FILE = path.join(INSTANCE_DIR, 'config.json'); // window bounds + legacy userConfig
+const UI_STATE_FILE = path.join(INSTANCE_DIR, 'ui_state.json');
+const PRELOAD = path.resolve(__dirname, 'preload.js');
 
-const DATA_FILE_DEFAULT = path.join(app.getPath('userData'), 'outstanding_items.json');
-
-
-// const base2 = "\\\\GIRLSBOYS\\ushare\\Ghost PO\\Orders";
-// const ORDERS_FILE_DEFAULT = path.join(base2, 'allOrders.json');
-
-const ORDERS_FILE_DEFAULT = path.join(app.getPath('userData'), 'orders.json');
-const WORLD_DATA_DIR = path.join(app.getPath('userData'), 'world');
+// Vendor/session data must stay instance-local
+const WORLD_DATA_DIR = path.join(INSTANCE_DIR, 'world');
 const WORLD_STORAGE_STATE = path.join(WORLD_DATA_DIR, 'world_storage_state.json');
-const TRANSBEC_DATA_DIR = path.join(app.getPath('userData'), 'transbec');
+const TRANSBEC_DATA_DIR = path.join(INSTANCE_DIR, 'transbec');
 const TRANSBEC_STORAGE_STATE = path.join(TRANSBEC_DATA_DIR, 'transbec_storage_state.json');
 const TRANSBEC_PRODUCTS_PATH = path.join(TRANSBEC_DATA_DIR, 'transbec_products.json');
-const PROFORCE_DATA_DIR = path.join(app.getPath('userData'), 'proforce');
+const PROFORCE_DATA_DIR = path.join(INSTANCE_DIR, 'proforce');
 const PROFORCE_STORAGE_STATE = path.join(PROFORCE_DATA_DIR, 'proforce_storage_state.json');
-const BESTBUY_DATA_DIR = path.join(app.getPath('userData'), 'bestbuy');
+const BESTBUY_DATA_DIR = path.join(INSTANCE_DIR, 'bestbuy');
 const BESTBUY_STORAGE_STATE = path.join(BESTBUY_DATA_DIR, 'bestbuy_storage_state.json');
-const CBK_DATA_DIR = path.join(app.getPath('userData'), 'cbk');
+const CBK_DATA_DIR = path.join(INSTANCE_DIR, 'cbk');
 const CBK_STORAGE_STATE = path.join(CBK_DATA_DIR, 'cbk_storage_state.json');
 
 const SAGE_AHK_SCRIPT = path.join(__dirname, 'ahk', 'sage_purchaser.ahk');
 const AHK_EXECUTABLE = process.env.AHK_EXE || process.env.AUTOHOTKEY_PATH || 'AutoHotkey64.exe';
-const SAGE_TEMP_ORDER = path.join(app.getPath('userData'), 'orders.sage.tmp.json');
+const SAGE_TEMP_ORDER = path.join(INSTANCE_DIR, 'orders.sage.tmp.json');
 
+const BUSINESS_FILES = [
+  'orders.json',
+  'orders.json.bak',
+  'outstanding_items.json',
+  'sage_ar_items.json',
+  'cash_sales_items.json',
+  'archived_bubbles.json',
+  'archived_bubbles.json.bak',
+];
 function backupFile(srcPath, suffix = '.bak') {
   try {
     if (!fs.existsSync(srcPath)) return;
@@ -55,10 +61,6 @@ function backupFile(srcPath, suffix = '.bak') {
 }
 
 
-
-const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
-const UI_STATE_FILE = path.join(app.getPath('userData'), 'ui_state.json');
-const PRELOAD = path.resolve(__dirname, 'preload.js');
 
 // ---- log preload path exists ----
 console.log('[main] preload path =', PRELOAD, 'exists?', fs.existsSync(PRELOAD));
@@ -84,6 +86,40 @@ function ensureConfigFile() {
   if (fs.existsSync(CONFIG_FILE)) return;
   writeConfig({ userConfig: {} });
 }
+function ensureAppConfigFile() {
+  try { ensureDir(path.dirname(APP_CONFIG_FILE)); } catch {}
+  if (fs.existsSync(APP_CONFIG_FILE)) return;
+  fs.writeFileSync(APP_CONFIG_FILE, JSON.stringify({ sharedDataDir: '' }, null, 2), 'utf-8');
+}
+function readAppConfig() {
+  try {
+    ensureAppConfigFile();
+    const raw = fs.readFileSync(APP_CONFIG_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : { sharedDataDir: '' };
+  } catch (e) {
+    console.error('[appConfig read]', e);
+    return { sharedDataDir: '' };
+  }
+}
+function writeAppConfig(cfg) {
+  try {
+    ensureAppConfigFile();
+    const base = readAppConfig();
+    const next = { ...base, ...(cfg || {}) };
+    fs.writeFileSync(APP_CONFIG_FILE, JSON.stringify(next, null, 2), 'utf-8');
+    return next;
+  } catch (e) {
+    console.error('[appConfig write]', e);
+    throw e;
+  }
+}
+function getSharedDataDir() {
+  const cfg = readAppConfig();
+  const dir = (cfg.sharedDataDir || '').trim();
+  if (dir) return dir;
+  return INSTANCE_DIR; // fallback to local instance if not configured
+}
 function getUserConfigRaw() {
   const cfg = readConfig();
   const userConfig = cfg?.userConfig;
@@ -106,8 +142,84 @@ function getUserConfigEffective() {
   if (!Object.keys(overrides).length) return raw;
   return { ...raw, ...overrides };
 }
+
+function ensureBusinessFiles() {
+  const dir = getSharedDataDir();
+  ensureDir(dir);
+  BUSINESS_FILES.forEach((name) => {
+    const file = path.join(dir, name);
+    if (name.endsWith('.bak')) {
+      ensureDir(path.dirname(file));
+    } else {
+      ensureDataFileAt(file);
+    }
+  });
+}
+
+function getResolvedPathsSummary() {
+  const sharedDir = getSharedDataDir();
+  const instanceDir = INSTANCE_DIR;
+  const files = {};
+  BUSINESS_FILES.forEach((name) => {
+    const p = path.join(sharedDir, name);
+    files[name] = { path: p, exists: fs.existsSync(p) };
+  });
+  return { sharedDir, instanceDir, files };
+}
+
+function validateWritable(targetDir) {
+  try {
+    const testFile = path.join(targetDir, `.write-test-${process.pid}-${Date.now()}`);
+    ensureDir(targetDir);
+    fs.writeFileSync(testFile, 'ok');
+    fs.unlinkSync(testFile);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e?.message || 'Not writable' };
+  }
+}
+
+function migrateBusinessFilesToShared(mode = 'copy') {
+  const sharedDir = getSharedDataDir();
+  const instanceDir = INSTANCE_DIR;
+  if (!sharedDir || sharedDir === instanceDir) {
+    return { ok: false, error: 'Shared folder not configured.' };
+  }
+  ensureDir(sharedDir);
+
+  const results = [];
+  BUSINESS_FILES.forEach((name) => {
+    const src = path.join(instanceDir, name);
+    const dest = path.join(sharedDir, name);
+    if (!fs.existsSync(src)) {
+      results.push({ name, action: 'skip', reason: 'missing source' });
+      return;
+    }
+    if (src === dest) {
+      results.push({ name, action: 'skip', reason: 'already in shared' });
+      return;
+    }
+    if (fs.existsSync(dest)) {
+      results.push({ name, action: 'skip', reason: 'dest exists' });
+      return;
+    }
+    try {
+      ensureDir(path.dirname(dest));
+      if (mode === 'move') {
+        fs.renameSync(src, dest);
+        results.push({ name, action: 'moved', from: src, to: dest });
+      } else {
+        fs.copyFileSync(src, dest);
+        results.push({ name, action: 'copied', from: src, to: dest });
+      }
+    } catch (e) {
+      results.push({ name, action: 'error', error: e?.message || 'failed' });
+    }
+  });
+  return { ok: true, sharedDir, results };
+}
 function getDataFile() {
-  return dataFileOverride || DATA_FILE_DEFAULT;
+  return dataFileOverride || path.join(getSharedDataDir(), 'outstanding_items.json');
 }
 function getQueueDir() {
   return path.dirname(getDataFile());
@@ -223,7 +335,7 @@ function writeItems(items) {
 }
 
 function getOrdersFile() {
-  return ordersFileOverride || ORDERS_FILE_DEFAULT;
+  return ordersFileOverride || path.join(getSharedDataDir(), 'orders.json');
 }
 function readOrders() {
   return readItemsAt(getOrdersFile());
@@ -233,12 +345,12 @@ function ensureArchiveFileAt(file) {
   if (!fs.existsSync(file)) fs.writeFileSync(file, '[]', 'utf-8');
 }
 function getArchiveFile() {
-  return path.join(getQueueDir(), 'archived_bubbles.json');
+  return path.join(getSharedDataDir(), 'archived_bubbles.json');
 }
 function writeOrdersAt(file, orders) {
   backupFile(file);
   ensureDataFileAt(file);
-  fs.writeFileSync(file, JSON.stringify(orders ?? [], null, 2), 'utf-8');
+  writeJsonAtomic(file, JSON.stringify(orders ?? [], null, 2));
 }
 function writeOrders(orders) {
   return writeOrdersAt(getOrdersFile(), orders);
@@ -619,6 +731,8 @@ let boundsSaveTimeout = null;
 async function createWindow() {
   // restore any saved custom data file path
   ensureConfigFile();
+  ensureAppConfigFile();
+  ensureBusinessFiles();
   const cfg = readConfig();
   if (cfg.dataFile && typeof cfg.dataFile === 'string') {
     dataFileOverride = cfg.dataFile;
@@ -691,7 +805,10 @@ async function createWindow() {
   });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  ensureBusinessFiles();
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
@@ -967,6 +1084,72 @@ ipcMain.handle('ui-state:read', () => ({ ok: true, state: readUIState() }));
 ipcMain.handle('ui-state:write', (_evt, state) => {
   writeUIState(state && typeof state === 'object' ? state : {});
   return { ok: true };
+});
+
+ipcMain.handle('app-config:get', () => {
+  try {
+    const cfg = readAppConfig();
+    const sharedDir = getSharedDataDir();
+    const instanceDir = INSTANCE_DIR;
+    ensureBusinessFiles();
+    return { ok: true, config: { ...cfg, instanceDataDir: instanceDir, sharedDataDir: sharedDir }, path: APP_CONFIG_FILE };
+  } catch (e) {
+    console.error('[app-config:get]', e);
+    return { ok: false, error: e?.message || 'Failed to read app config.' };
+  }
+});
+
+ipcMain.handle('app-config:set', (_evt, partial) => {
+  try {
+    if (!partial || typeof partial !== 'object' || Array.isArray(partial)) {
+      return { ok: false, error: 'Invalid config payload' };
+    }
+    const next = writeAppConfig(partial);
+    ensureBusinessFiles();
+    // restart watchers to pick up new shared dir
+    startWatching(win);
+    startOrdersWatching(win);
+    return { ok: true, config: { ...next, instanceDataDir: INSTANCE_DIR, sharedDataDir: getSharedDataDir() }, path: APP_CONFIG_FILE };
+  } catch (e) {
+    console.error('[app-config:set]', e);
+    return { ok: false, error: e?.message || 'Failed to write app config.' };
+  }
+});
+
+ipcMain.handle('app-config:choose-shared', async () => {
+  const res = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
+  if (res.canceled || !res.filePaths?.[0]) return { ok: false, canceled: true };
+  const chosen = res.filePaths[0];
+  return { ok: true, path: chosen };
+});
+
+ipcMain.handle('app-config:paths-summary', () => {
+  try {
+    ensureBusinessFiles();
+    return { ok: true, summary: getResolvedPathsSummary() };
+  } catch (e) {
+    return { ok: false, error: e?.message || 'Failed to summarize paths.' };
+  }
+});
+
+ipcMain.handle('app-config:validate-shared', (_evt, dirPath) => {
+  if (!dirPath) return { ok: false, error: 'Path required' };
+  const res = validateWritable(dirPath);
+  return res.ok ? { ok: true } : res;
+});
+
+ipcMain.handle('app-config:migrate-business', (_evt, payload) => {
+  try {
+    const mode = payload?.mode === 'move' ? 'move' : 'copy';
+    const res = migrateBusinessFilesToShared(mode);
+    ensureBusinessFiles();
+    startWatching(win);
+    startOrdersWatching(win);
+    return res;
+  } catch (e) {
+    console.error('[app-config:migrate-business]', e);
+    return { ok: false, error: e?.message || 'Failed to migrate files.' };
+  }
 });
 
 ipcMain.handle('config:read', () => {
