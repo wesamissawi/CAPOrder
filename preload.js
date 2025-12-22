@@ -56,4 +56,5 @@ contextBridge.exposeInMainWorld('api', {
   archiveBubble: (payload) => ipcRenderer.invoke('archive:save-bubble', payload),
   searchArchive: (query) => ipcRenderer.invoke('archive:search', query),
   getArchivePath: () => ipcRenderer.invoke('archive:get-path'),
+  getAppVersion: () => ipcRenderer.invoke('app:get-version'),
 });

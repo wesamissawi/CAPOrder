@@ -29,6 +29,7 @@ const fallbackApi = {
   archiveBubble: async () => ({ ok: false }),
   searchArchive: async () => ({ ok: false, results: [] }),
   getArchivePath: async () => ({ path: "(not in Electron)" }),
+  getAppVersion: async () => ({ ok: false }),
   readConfig: async () => ({ ok: false, config: {}, raw: {}, overrides: {} }),
   writeConfig: async () => ({ ok: false }),
   getAppConfig: async () => ({ ok: false }),

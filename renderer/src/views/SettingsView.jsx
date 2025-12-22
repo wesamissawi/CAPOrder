@@ -47,6 +47,9 @@ export default function SettingsView() {
   const [validate, setValidate] = useState({ ok: false, error: "Not checked" });
   const [migrateMode, setMigrateMode] = useState("copy");
   const [migrateResults, setMigrateResults] = useState([]);
+  const [appVersion, setAppVersion] = useState("");
+  const [appName, setAppName] = useState("");
+  const [isPackaged, setIsPackaged] = useState(false);
 
   const fileEntries = useMemo(() => {
     if (!summary?.files) return [];
@@ -91,6 +94,12 @@ export default function SettingsView() {
         await handleValidate(res.config.sharedDataDir);
       } else {
         setValidate({ ok: false, error: "Not set" });
+      }
+      const ver = await api.getAppVersion?.();
+      if (ver?.ok) {
+        setAppVersion(ver.version || "");
+        setAppName(ver.name || "");
+        setIsPackaged(Boolean(ver.isPackaged));
       }
     } catch (e) {
       setError(e?.message || "Failed to load settings.");
@@ -177,6 +186,11 @@ export default function SettingsView() {
             </p>
             {configPath && (
               <p className="text-xs text-slate-400 mt-1">Config file: {configPath}</p>
+            )}
+            {appVersion && (
+              <p className="text-xs text-slate-400 mt-1">
+                Version: {appName || "App"} {appVersion} ({isPackaged ? "packaged" : "dev"})
+              </p>
             )}
           </div>
           <div className="flex gap-2">

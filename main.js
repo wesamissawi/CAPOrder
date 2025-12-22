@@ -1317,6 +1317,19 @@ ipcMain.handle('app-config:migrate-business', (_evt, payload) => {
   }
 });
 
+ipcMain.handle('app:get-version', () => {
+  try {
+    return {
+      ok: true,
+      version: app.getVersion(),
+      name: app.getName ? app.getName() : 'CAPOrder',
+      isPackaged: app.isPackaged,
+    };
+  } catch (e) {
+    return { ok: false, error: e?.message || 'Failed to read app version.' };
+  }
+});
+
 ipcMain.handle('config:read', () => {
   try {
     ensureConfigFile();
