@@ -61,4 +61,11 @@ contextBridge.exposeInMainWorld('api', {
   setAhkExePath: (pathStr) => ipcRenderer.invoke('ahk:set-path', pathStr),
   chooseAhkExePath: () => ipcRenderer.invoke('ahk:choose-path'),
   validateAhkExePath: (pathStr) => ipcRenderer.invoke('ahk:validate-path', pathStr),
+  checkForUpdates: () => ipcRenderer.invoke('updates:check'),
+  restartToUpdate: () => ipcRenderer.invoke('updates:restart'),
+  onUpdateStatus: (cb) => {
+    const listener = (_e, data) => cb?.(data);
+    ipcRenderer.on('updates:status', listener);
+    return () => ipcRenderer.removeListener('updates:status', listener);
+  },
 });

@@ -1,5 +1,6 @@
 // main.js
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
@@ -68,6 +69,7 @@ const SAGE_AHK_SCRIPT = app.isPackaged
   : path.join(__dirname, 'ahk', 'sage_purchaser.ahk');
 
 let dataFileOverride = null;
+let autoUpdaterInitialized = false;
 
 function normalizeAppConfig(raw = {}) {
   const sharedDataDir = typeof raw.sharedDataDir === 'string' ? raw.sharedDataDir.trim() : '';
@@ -614,6 +616,46 @@ function stopOrdersWatching() {
   ordersWatcher = null;
 }
 
+function sendUpdateStatus(payload = {}) {
+  try {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('updates:status', { ...payload, timestamp: new Date().toISOString() });
+    }
+  } catch (e) {
+    console.error('[updates] failed to send status', e);
+  }
+}
+
+function setupAutoUpdater() {
+  if (autoUpdaterInitialized) return;
+  autoUpdaterInitialized = true;
+  if (!app.isPackaged) return;
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = false;
+
+  autoUpdater.on('checking-for-update', () => sendUpdateStatus({ status: 'checking' }));
+  autoUpdater.on('update-available', (info) =>
+    sendUpdateStatus({ status: 'update-available', version: info?.version || info?.releaseName })
+  );
+  autoUpdater.on('update-not-available', (info) =>
+    sendUpdateStatus({ status: 'update-not-available', version: info?.version || info?.releaseName })
+  );
+  autoUpdater.on('download-progress', (progress) =>
+    sendUpdateStatus({ status: 'downloading', percent: Math.round(progress?.percent ?? 0) })
+  );
+  autoUpdater.on('update-downloaded', (info) =>
+    sendUpdateStatus({
+      status: 'downloaded',
+      version: info?.version || info?.releaseName,
+      releaseName: info?.releaseName,
+    })
+  );
+  autoUpdater.on('error', (err) =>
+    sendUpdateStatus({ status: 'error', error: err?.message || 'Update error' })
+  );
+}
+
 function normalizeOrderRef(order) {
   if (!order) return "";
   const ref = order.sage_reference || order.reference || order.__row || "";
@@ -931,6 +973,8 @@ async function createWindow() {
       sandbox: false,              // TEMP for easier debugging; set true later
     },
   });
+
+  setupAutoUpdater();
 
   // lifecycle logs
   win.webContents.on('did-finish-load', () => {
@@ -1389,6 +1433,37 @@ ipcMain.handle('ahk:validate-path', (_evt, pathStr) => {
   } catch (e) {
     console.error('[ahk:validate-path]', e);
     return { ok: false, error: e?.message || 'Failed to validate AHK path.' };
+  }
+});
+
+ipcMain.handle('updates:check', async () => {
+  if (!app.isPackaged) {
+    const msg = 'Update checks are only available in packaged builds.';
+    sendUpdateStatus({ status: 'error', error: msg });
+    return { ok: false, error: msg };
+  }
+  try {
+    sendUpdateStatus({ status: 'checking' });
+    await autoUpdater.checkForUpdates();
+    return { ok: true };
+  } catch (e) {
+    const msg = e?.message || 'Failed to check for updates.';
+    console.error('[updates:check]', e);
+    sendUpdateStatus({ status: 'error', error: msg });
+    return { ok: false, error: msg };
+  }
+});
+
+ipcMain.handle('updates:restart', () => {
+  try {
+    if (!app.isPackaged) return { ok: false, error: 'Updates are only available in packaged builds.' };
+    autoUpdater.quitAndInstall(false, true);
+    return { ok: true };
+  } catch (e) {
+    const msg = e?.message || 'Failed to restart for update.';
+    console.error('[updates:restart]', e);
+    sendUpdateStatus({ status: 'error', error: msg });
+    return { ok: false, error: msg };
   }
 });
 

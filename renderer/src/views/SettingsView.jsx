@@ -50,6 +50,10 @@ export default function SettingsView() {
   const [ahkPath, setAhkPath] = useState("");
   const [ahkValid, setAhkValid] = useState(false);
   const [ahkStatus, setAhkStatus] = useState("Not set");
+  const [updateStatus, setUpdateStatus] = useState("idle");
+  const [updateMessage, setUpdateMessage] = useState("");
+  const [updateVersion, setUpdateVersion] = useState("");
+  const [lastChecked, setLastChecked] = useState("");
   const [appVersion, setAppVersion] = useState("");
   const [appName, setAppName] = useState("");
   const [isPackaged, setIsPackaged] = useState(false);
@@ -203,8 +207,68 @@ export default function SettingsView() {
     }
   }
 
+  async function handleCheckForUpdates() {
+    try {
+      setUpdateStatus("checking");
+      setUpdateMessage("Checking for updates...");
+      const res = await api.checkForUpdates?.();
+      if (!res?.ok && res?.error) {
+        setUpdateStatus("error");
+        setUpdateMessage(res.error);
+      }
+    } catch (e) {
+      setUpdateStatus("error");
+      setUpdateMessage(e?.message || "Failed to check for updates.");
+    }
+  }
+
+  async function handleRestartToUpdate() {
+    try {
+      await api.restartToUpdate?.();
+    } catch (e) {
+      setUpdateStatus("error");
+      setUpdateMessage(e?.message || "Failed to restart to update.");
+    }
+  }
+
   useEffect(() => {
     load();
+    const offUpdates = api.onUpdateStatus?.((payload) => {
+      const status = payload?.status || "";
+      setUpdateStatus(status);
+      if (payload?.version) setUpdateVersion(payload.version);
+      if (payload?.timestamp && status === "checking") setLastChecked(payload.timestamp);
+      switch (status) {
+        case "checking":
+          setUpdateMessage("Checking for updates...");
+          if (payload?.timestamp) setLastChecked(payload.timestamp);
+          break;
+        case "update-available":
+          setUpdateMessage(`Update available${payload?.version ? ` (${payload.version})` : ""}`);
+          break;
+        case "update-not-available":
+          setUpdateMessage("Up to date");
+          setLastChecked(payload?.timestamp || new Date().toISOString());
+          break;
+        case "downloading":
+          setUpdateMessage(`Downloading${payload?.percent ? ` ${payload.percent}%` : "..."}`);
+          break;
+        case "downloaded":
+          setUpdateMessage(
+            `Update downloaded${payload?.version ? ` (${payload.version})` : ""}. Restart to apply.`
+          );
+          setLastChecked(payload?.timestamp || new Date().toISOString());
+          break;
+        case "error":
+          setUpdateMessage(payload?.error || "Update error.");
+          break;
+        default:
+          break;
+      }
+    });
+    return () => {
+      offUpdates && offUpdates();
+    };
   }, []);
 
   return (
@@ -381,6 +445,47 @@ export default function SettingsView() {
               Shared folder: {summary.sharedDir} | Instance: {summary.instanceDir}
             </div>
           )}
+        </div>
+      </Card>
+
+      <Card>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-semibold text-slate-800">Application Updates</h2>
+              <p className="text-sm text-slate-500">Manually check for updates to this application.</p>
+            </div>
+            <div className="text-xs text-slate-500">
+              {lastChecked ? `Last checked: ${new Date(lastChecked).toLocaleString()}` : "Not checked yet"}
+            </div>
+          </div>
+          <div className="flex items-center gap-3 flex-wrap">
+            <button
+              type="button"
+              onClick={handleCheckForUpdates}
+              disabled={updateStatus === "checking" || updateStatus === "downloading"}
+              className="px-4 py-2 rounded-full bg-indigo-600 text-white text-sm font-semibold disabled:opacity-50"
+            >
+              {updateStatus === "checking"
+                ? "Checking..."
+                : updateStatus === "downloading"
+                ? "Downloading..."
+                : "Check for Updates"}
+            </button>
+            <div className="text-sm text-slate-700">
+              {updateMessage || "Updates have not been checked yet."}
+              {updateVersion ? ` (Latest: ${updateVersion})` : ""}
+            </div>
+            {updateStatus === "downloaded" && (
+              <button
+                type="button"
+                onClick={handleRestartToUpdate}
+                className="px-4 py-2 rounded-full bg-emerald-600 text-white text-sm font-semibold"
+              >
+                Restart to Update
+              </button>
+            )}
+          </div>
         </div>
       </Card>
     </div>
