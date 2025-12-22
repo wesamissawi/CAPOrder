@@ -1114,6 +1114,16 @@ export default function App() {
     updateOrderByKey(referenceKey, { sage_trigger: true });
   }
 
+  function handleSageIntegrationToggleClick() {
+    const timestamp = new Date().toISOString();
+    const readyCount = Array.isArray(sageReadyOrders) ? sageReadyOrders.length : 0;
+    console.log("[sage-ui] Run Sage / AHK button clicked", {
+      timestamp,
+      sageReadyCount: readyCount,
+    });
+    setSageIntegrationEnabled((v) => !v);
+  }
+
   function handleOrdersUpdatedExternally(list) {
     const normalized = Array.isArray(list) ? list : [];
     setSageReadyOrders(normalized.filter((o) => o && o.sage_trigger));
@@ -1533,7 +1543,7 @@ export default function App() {
             outstandingStatus={outstandingStatus}
             outstandingError={outstandingError}
             sageIntegrationEnabled={sageIntegrationEnabled}
-            setSageIntegrationEnabled={setSageIntegrationEnabled}
+            setSageIntegrationEnabled={handleSageIntegrationToggleClick}
             sageReadyOrders={sageReadyOrders}
             sageWatchError={sageWatchError}
           />

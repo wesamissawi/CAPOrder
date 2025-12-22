@@ -645,7 +645,8 @@ function runSagePurchase(order) {
       return resolve({ ok: false, error: 'AHK script not found', code: 'missing-script' });
     }
 
-    backupFile(getOrdersFile(), '.pre-sage.bak');
+    const ordersFilePath = getOrdersFile();
+    backupFile(ordersFilePath, '.pre-sage.bak');
 
     const orderPath = writeTempOrder(order);
     if (!orderPath) {
@@ -657,8 +658,24 @@ function runSagePurchase(order) {
       orderPath,
       order?.sage_reference || order?.reference || "",
       getVendorName(order) || "",
-      getOrdersFile(),
+      ordersFilePath,
     ];
+
+    const resolvedExecutable = path.isAbsolute(AHK_EXECUTABLE)
+      ? AHK_EXECUTABLE
+      : path.resolve(AHK_EXECUTABLE);
+
+    console.log('[sage] preparing to spawn AHK', {
+      timestamp: new Date().toISOString(),
+      appIsPackaged: app.isPackaged,
+      ordersFilePath,
+      tempOrderPath: orderPath,
+      ahkScriptPath: path.resolve(SAGE_AHK_SCRIPT),
+      ahkExecutable: AHK_EXECUTABLE,
+      resolvedAhkExecutable: resolvedExecutable,
+      spawnArgs: args,
+      spawnCommand: [resolvedExecutable, ...args].join(' '),
+    });
 
     let stdout = "";
     let stderr = "";
@@ -671,6 +688,14 @@ function runSagePurchase(order) {
     };
 
     const child = spawn(AHK_EXECUTABLE, args, { windowsHide: true });
+    console.log('[sage] AHK spawn initiated', {
+      pid: child?.pid,
+      command: AHK_EXECUTABLE,
+      args,
+    });
+    child.on('spawn', () => {
+      console.log('[sage] AHK process launched successfully', { pid: child.pid });
+    });
     child.stdout.on('data', (d) => {
       const chunk = d.toString();
       stdout += chunk;
@@ -683,6 +708,11 @@ function runSagePurchase(order) {
     });
     child.on('error', (err) => {
       console.error('[sage] spawn error', err);
+      console.error('[sage] AHK process failed to launch', {
+        error: err,
+        command: AHK_EXECUTABLE,
+        args,
+      });
       complete({ ok: false, code: 'spawn-error', error: err, stdout, stderr });
     });
     child.on('close', (code) => {
@@ -694,6 +724,10 @@ function runSagePurchase(order) {
         stdout: stdout.trim(),
         stderr: stderr.trim(),
         parsedJournal,
+      });
+      console.log(ok ? '[sage] AHK process launch+run completed successfully' : '[sage] AHK process finished with errors', {
+        code,
+        ok,
       });
       complete({ ok, code, stdout, stderr, journalEntry: parsedJournal });
     });
