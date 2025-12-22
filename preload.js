@@ -57,4 +57,8 @@ contextBridge.exposeInMainWorld('api', {
   searchArchive: (query) => ipcRenderer.invoke('archive:search', query),
   getArchivePath: () => ipcRenderer.invoke('archive:get-path'),
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
+  getAhkExePath: () => ipcRenderer.invoke('ahk:get-path'),
+  setAhkExePath: (pathStr) => ipcRenderer.invoke('ahk:set-path', pathStr),
+  chooseAhkExePath: () => ipcRenderer.invoke('ahk:choose-path'),
+  validateAhkExePath: (pathStr) => ipcRenderer.invoke('ahk:validate-path', pathStr),
 });

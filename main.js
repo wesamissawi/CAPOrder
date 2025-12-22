@@ -62,15 +62,17 @@ const VENDOR_PATHS = {
 
 const PRELOAD = path.resolve(__dirname, 'preload.js');
 
-const SAGE_AHK_SCRIPT = path.join(__dirname, 'ahk', 'sage_purchaser.ahk');
-const AHK_EXECUTABLE = process.env.AHK_EXE || process.env.AUTOHOTKEY_PATH || 'AutoHotkey64.exe';
 const SAGE_TEMP_ORDER = INSTANCE_PATHS.sageTempOrder;
+const SAGE_AHK_SCRIPT = app.isPackaged
+  ? path.join(process.resourcesPath, 'ahk', 'sage_purchaser.ahk')
+  : path.join(__dirname, 'ahk', 'sage_purchaser.ahk');
 
 let dataFileOverride = null;
 
 function normalizeAppConfig(raw = {}) {
   const sharedDataDir = typeof raw.sharedDataDir === 'string' ? raw.sharedDataDir.trim() : '';
-  return { sharedDataDir, instanceDataDir: INSTANCE_DIR };
+  const ahkExePath = typeof raw.ahkExePath === 'string' ? raw.ahkExePath.trim() : '';
+  return { sharedDataDir, ahkExePath, instanceDataDir: INSTANCE_DIR };
 }
 function ensureAppConfigFile() {
   try { ensureDir(path.dirname(INSTANCE_PATHS.appConfig)); } catch {}
@@ -110,6 +112,15 @@ function getSharedDirInfo() {
 }
 function getSharedDataDir() {
   return getSharedDirInfo().sharedDir;
+}
+function getAhkExePath() {
+  const cfg = readAppConfig();
+  return (cfg.ahkExePath || '').trim();
+}
+function validateAhkExePath(targetPath) {
+  const candidate = (targetPath || '').trim();
+  const exists = Boolean(candidate) && fs.existsSync(candidate);
+  return { ok: true, exists, path: candidate };
 }
 function resolveBusinessPaths() {
   const { sharedDir, sharedConfigured } = getSharedDirInfo();
@@ -642,7 +653,14 @@ function writeTempOrder(order) {
 function runSagePurchase(order) {
   return new Promise((resolve) => {
     if (!fs.existsSync(SAGE_AHK_SCRIPT)) {
-      return resolve({ ok: false, error: 'AHK script not found', code: 'missing-script' });
+      console.error('[sage] AHK script not found', { path: SAGE_AHK_SCRIPT });
+      return resolve({
+        ok: false,
+        error: 'AHK script not found',
+        code: 'ahk-script-missing',
+        reason: 'ahk-script-missing',
+        path: SAGE_AHK_SCRIPT,
+      });
     }
 
     const ordersFilePath = getOrdersFile();
@@ -653,6 +671,23 @@ function runSagePurchase(order) {
       return resolve({ ok: false, error: 'Failed to write temp order file', code: 'temp-write-failed' });
     }
 
+    const ahkExecutable = getAhkExePath();
+    const resolvedExecutable = ahkExecutable ? path.resolve(ahkExecutable) : '';
+    const ahkExists = Boolean(ahkExecutable) && fs.existsSync(ahkExecutable);
+
+    if (!ahkExecutable || !ahkExists) {
+      console.error('[sage] AHK executable path missing or invalid', {
+        ahkExecutable,
+        resolvedExecutable,
+      });
+      return resolve({
+        ok: false,
+        code: ahkExecutable ? 'ahk-path-invalid' : 'ahk-path-not-set',
+        reason: ahkExecutable ? 'ahk-path-invalid' : 'ahk-path-not-set',
+        error: 'AutoHotkey executable path is not configured or not found.',
+      });
+    }
+
     const args = [
       SAGE_AHK_SCRIPT,
       orderPath,
@@ -661,17 +696,13 @@ function runSagePurchase(order) {
       ordersFilePath,
     ];
 
-    const resolvedExecutable = path.isAbsolute(AHK_EXECUTABLE)
-      ? AHK_EXECUTABLE
-      : path.resolve(AHK_EXECUTABLE);
-
     console.log('[sage] preparing to spawn AHK', {
       timestamp: new Date().toISOString(),
       appIsPackaged: app.isPackaged,
       ordersFilePath,
       tempOrderPath: orderPath,
       ahkScriptPath: path.resolve(SAGE_AHK_SCRIPT),
-      ahkExecutable: AHK_EXECUTABLE,
+      ahkExecutable,
       resolvedAhkExecutable: resolvedExecutable,
       spawnArgs: args,
       spawnCommand: [resolvedExecutable, ...args].join(' '),
@@ -687,10 +718,10 @@ function runSagePurchase(order) {
       resolve(payload);
     };
 
-    const child = spawn(AHK_EXECUTABLE, args, { windowsHide: true });
+    const child = spawn(resolvedExecutable, args, { windowsHide: true });
     console.log('[sage] AHK spawn initiated', {
       pid: child?.pid,
-      command: AHK_EXECUTABLE,
+      command: resolvedExecutable,
       args,
     });
     child.on('spawn', () => {
@@ -710,8 +741,9 @@ function runSagePurchase(order) {
       console.error('[sage] spawn error', err);
       console.error('[sage] AHK process failed to launch', {
         error: err,
-        command: AHK_EXECUTABLE,
+        command: resolvedExecutable,
         args,
+        ahkExecutable,
       });
       complete({ ok: false, code: 'spawn-error', error: err, stdout, stderr });
     });
@@ -1314,6 +1346,49 @@ ipcMain.handle('app-config:migrate-business', (_evt, payload) => {
   } catch (e) {
     console.error('[app-config:migrate-business]', e);
     return { ok: false, error: e?.message || 'Failed to migrate files.' };
+  }
+});
+
+ipcMain.handle('ahk:get-path', () => {
+  try {
+    const pathStr = getAhkExePath();
+    return { ok: true, path: pathStr, exists: Boolean(pathStr) && fs.existsSync(pathStr) };
+  } catch (e) {
+    console.error('[ahk:get-path]', e);
+    return { ok: false, error: e?.message || 'Failed to read AHK path.' };
+  }
+});
+ipcMain.handle('ahk:set-path', (_evt, pathStr) => {
+  try {
+    const next = writeAppConfig({ ahkExePath: typeof pathStr === 'string' ? pathStr.trim() : '' });
+    const exists = Boolean(next.ahkExePath) && fs.existsSync(next.ahkExePath);
+    return { ok: true, path: next.ahkExePath, exists };
+  } catch (e) {
+    console.error('[ahk:set-path]', e);
+    return { ok: false, error: e?.message || 'Failed to save AHK path.' };
+  }
+});
+ipcMain.handle('ahk:choose-path', async () => {
+  try {
+    const res = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: 'Executable', extensions: ['exe'] }],
+    });
+    if (res.canceled || !res.filePaths?.[0]) return { ok: false, canceled: true };
+    const chosen = res.filePaths[0];
+    return { ok: true, path: chosen };
+  } catch (e) {
+    console.error('[ahk:choose-path]', e);
+    return { ok: false, error: e?.message || 'Failed to choose AHK path.' };
+  }
+});
+ipcMain.handle('ahk:validate-path', (_evt, pathStr) => {
+  try {
+    const res = validateAhkExePath(pathStr);
+    return { ok: true, exists: res.exists, path: res.path };
+  } catch (e) {
+    console.error('[ahk:validate-path]', e);
+    return { ok: false, error: e?.message || 'Failed to validate AHK path.' };
   }
 });
 

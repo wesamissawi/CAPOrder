@@ -47,6 +47,9 @@ export default function SettingsView() {
   const [validate, setValidate] = useState({ ok: false, error: "Not checked" });
   const [migrateMode, setMigrateMode] = useState("copy");
   const [migrateResults, setMigrateResults] = useState([]);
+  const [ahkPath, setAhkPath] = useState("");
+  const [ahkValid, setAhkValid] = useState(false);
+  const [ahkStatus, setAhkStatus] = useState("Not set");
   const [appVersion, setAppVersion] = useState("");
   const [appName, setAppName] = useState("");
   const [isPackaged, setIsPackaged] = useState(false);
@@ -80,6 +83,22 @@ export default function SettingsView() {
     return <span className="text-xs text-slate-500 font-semibold">Not checked</span>;
   }, [sharedPath, validate, summary]);
 
+  async function refreshAhkStatus(pathStr) {
+    try {
+      const res = await api.validateAhkExePath?.(pathStr);
+      const exists = Boolean(res?.exists);
+      setAhkValid(exists);
+      if (!pathStr) {
+        setAhkStatus("Not set");
+      } else {
+        setAhkStatus(exists ? "OK (found)" : "Missing / Invalid");
+      }
+    } catch (e) {
+      setAhkValid(false);
+      setAhkStatus("Validation failed");
+    }
+  }
+
   async function load() {
     setError("");
     try {
@@ -88,6 +107,9 @@ export default function SettingsView() {
       setSharedPath(res.config?.sharedDataDir || "");
       setInstancePath(res.config?.instanceDataDir || "");
       setConfigPath(res.path || "");
+      const incomingAhk = res.config?.ahkExePath || "";
+      setAhkPath(incomingAhk);
+      await refreshAhkStatus(incomingAhk);
       setStatus("");
       await refreshSummary();
       if (res.config?.sharedDataDir) {
@@ -138,7 +160,9 @@ export default function SettingsView() {
     setError("");
     setStatus("");
     try {
-      const res = await api.setAppConfig({ sharedDataDir: sharedPath });
+      const trimmedAhk = (ahkPath || "").trim();
+      setAhkPath(trimmedAhk);
+      const res = await api.setAppConfig({ sharedDataDir: sharedPath, ahkExePath: trimmedAhk });
       if (!res?.ok) throw new Error(res?.error || "Failed to save app config.");
       setStatus("Saved.");
       await load();
@@ -152,6 +176,14 @@ export default function SettingsView() {
     if (res?.ok && res.path) {
       setSharedPath(res.path);
       await handleValidate(res.path);
+    }
+  }
+
+  async function handleBrowseAhk() {
+    const res = await api.chooseAhkExePath?.();
+    if (res?.ok && res.path) {
+      setAhkPath(res.path);
+      await refreshAhkStatus(res.path);
     }
   }
 
@@ -205,6 +237,42 @@ export default function SettingsView() {
               onClick={handleSave}
             >
               Save
+            </button>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-semibold text-slate-800">AutoHotkey Configuration</h2>
+              <p className="text-sm text-slate-500">
+                AutoHotkey must be installed separately. Select AutoHotkey64.exe.
+              </p>
+            </div>
+            <span
+              className={`text-xs font-semibold ${
+                ahkValid ? "text-emerald-600" : ahkPath ? "text-red-600" : "text-amber-600"
+              }`}
+            >
+              {ahkStatus}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            <input
+              className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono"
+              value={ahkPath}
+              onChange={(e) => setAhkPath(e.target.value)}
+              onBlur={(e) => refreshAhkStatus(e.target.value)}
+              placeholder="C:\\Program Files\\AutoHotkey\\AutoHotkey64.exe"
+            />
+            <button
+              type="button"
+              className="px-3 py-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-700 hover:bg-white"
+              onClick={handleBrowseAhk}
+            >
+              Browse...
             </button>
           </div>
         </div>
