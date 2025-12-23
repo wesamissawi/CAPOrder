@@ -9,6 +9,12 @@ const WORLD_LOGIN_URL = "https://www.iautoparts.biz/pronto/entrepot/WAW";
 const FRAME_BODY_NAME = "fraBody";
 const DEFAULT_HEADLESS = process.env.WORLD_HEADLESS === "true" ? true : false;
 
+/**
+ * Build absolute file paths for storage state and output JSON.
+ * Ensures parent folders exist so later writes do not fail.
+ * @param {Object} [options] - Optional overrides for paths and base directory.
+ * @returns {{storageStatePath: string, ordersJsonPath: string}}
+ */
 function resolvePaths(options = {}) {
   const baseDir = options.storageDir || path.join(__dirname, "..");
   const storageStatePath =
@@ -19,6 +25,12 @@ function resolvePaths(options = {}) {
   return { storageStatePath, ordersJsonPath };
 }
 
+/**
+ * Grab the main body frame where most content lives, polling until it appears.
+ * @param {import('playwright').Page} page - The Playwright page with frames.
+ * @param {number} [timeoutMs=20000] - How long to poll before failing.
+ * @returns {Promise<import('playwright').Frame>}
+ */
 async function getBodyFrame(page, timeoutMs = 20000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -40,6 +52,12 @@ async function getBodyFrame(page, timeoutMs = 20000) {
   );
 }
 
+/**
+ * Return the header frame that holds navigation tabs.
+ * @param {import('playwright').Page} page
+ * @param {number} [timeoutMs=15000]
+ * @returns {Promise<import('playwright').Frame>}
+ */
 async function getHeaderFrame(page, timeoutMs = 15000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -52,6 +70,10 @@ async function getHeaderFrame(page, timeoutMs = 15000) {
 }
 
 // Helper: ensure we have login credentials
+/**
+ * Read username/password from env and fail fast if missing.
+ * @returns {{user: string, pass: string}}
+ */
 function getCredentials() {
   const user = process.env.WORLD_USER;
   const pass = process.env.WORLD_PASS;
@@ -64,6 +86,12 @@ function getCredentials() {
 }
 
 // Create a browser context, with stored session if available
+/**
+ * Spawn a browser context, restoring cookies/storage if a saved file exists.
+ * @param {import('playwright').Browser} browser
+ * @param {string} storageStatePath - Path to Playwright storage JSON.
+ * @returns {Promise<import('playwright').BrowserContext>}
+ */
 async function createContextWithStorage(browser, storageStatePath) {
   if (fs.existsSync(storageStatePath)) {
     return await browser.newContext({ storageState: storageStatePath });
@@ -72,6 +100,13 @@ async function createContextWithStorage(browser, storageStatePath) {
 }
 
 // Login if necessary and save session
+/**
+ * Load the login page, reuse stored session when possible, otherwise submit credentials.
+ * Persists storage state after navigating past login.
+ * @param {import('playwright').Page} page
+ * @param {string} storageStatePath - Where to save updated session data.
+ * @returns {Promise<{loggedIn: boolean, usedStoredSession: boolean, loginPerformed: boolean}>}
+ */
 async function ensureLoggedIn(page, storageStatePath) {
   const { user, pass } = getCredentials();
 
@@ -132,6 +167,11 @@ async function ensureLoggedIn(page, storageStatePath) {
   return { loggedIn: true, usedStoredSession: false, loginPerformed: true };
 }
 
+/**
+ * Jump to the Orders tab from the header frame and wait for the list grid.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<import('playwright').Frame>} - The body frame showing the orders list.
+ */
 async function navigateToOrdersTab(page) {
   // Click the "Orders" tab in the header frame and wait for orders list to render in body
   const headerFrame = await getHeaderFrame(page);
@@ -150,6 +190,12 @@ async function navigateToOrdersTab(page) {
   return bodyFrame;
 }
 
+/**
+ * Click a specific order by reference and scrape its detail lines.
+ * @param {import('playwright').Page} page
+ * @param {string} reference - Order reference to match in the grid.
+ * @returns {Promise<{ok: boolean, detail?: object, reason?: string, error?: string, skipped?: boolean}>}
+ */
 async function fetchOrderDetailsFromList(page, reference) {
   if (!reference) return { ok: false, skipped: true, reason: "no-reference" };
   await page.waitForLoadState("domcontentloaded").catch(() => {});
@@ -157,6 +203,7 @@ async function fetchOrderDetailsFromList(page, reference) {
 
   const navPromise = page.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => null);
 
+  // Run DOM logic inside the frame: find the row matching the reference and click its link.
   const clickRes = await bodyFrame.evaluate((ref) => {
     const ORDER = (ref || "").trim();
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
@@ -265,6 +312,7 @@ async function fetchOrderDetailsFromList(page, reference) {
           lineItems.push(entry);
           lastLine = entry;
         } else if (lastLine) {
+          // Core rows do not repeat numbers; attach to the preceding part.
           const costPriceRaw = norm(cells[4]?.innerText || "");
           const val = num(costPriceRaw);
           if (val === 0) continue; // skip zero-value core
@@ -327,6 +375,11 @@ async function fetchOrderDetailsFromList(page, reference) {
 }
 
 // Navigate to orders page and scrape
+/**
+ * Load the orders grid and extract summary rows (no detail line items).
+ * @param {import('playwright').Page} page
+ * @returns {Promise<Array<Object>>}
+ */
 async function scrapeWorldOrders(page) {
   const bodyFrame = await navigateToOrdersTab(page);
 
@@ -425,11 +478,21 @@ async function scrapeWorldOrders(page) {
 }
 
 // Save scraped orders into JSON file
+/**
+ * Persist orders to disk in a pretty JSON structure.
+ * @param {Array<Object>} orders
+ * @param {string} ordersJsonPath
+ */
 function saveOrdersToJson(orders, ordersJsonPath) {
   fs.writeFileSync(ordersJsonPath, JSON.stringify(orders, null, 2), "utf8");
 }
 
 // MAIN ENTRY: call this from Electron main via IPC
+/**
+ * End-to-end runner: logs in, scrapes orders, fetches missing details, standardizes, and writes JSON.
+ * @param {Object} [options] - Tuning knobs (paths, headless, delays, existing orders).
+ * @returns {Promise<{ok: boolean, count?: number, error?: string, path?: string, statusLog?: string[]}>}
+ */
 async function getWorldOrders(options = {}) {
   const { storageStatePath, ordersJsonPath } = resolvePaths(options);
   const headless = options.headless ?? DEFAULT_HEADLESS;
