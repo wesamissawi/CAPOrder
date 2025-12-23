@@ -40,6 +40,8 @@ function PathRow({ label, value, onChange, readOnly, onBrowse, helper, status })
 export default function SettingsView() {
   const [sharedPath, setSharedPath] = useState("");
   const [instancePath, setInstancePath] = useState("");
+  const [sharedBubblePath, setSharedBubblePath] = useState("");
+  const [sharedBubbleExists, setSharedBubbleExists] = useState(false);
   const [configPath, setConfigPath] = useState("");
   const [summary, setSummary] = useState(null);
   const [error, setError] = useState("");
@@ -116,6 +118,19 @@ export default function SettingsView() {
       await refreshAhkStatus(incomingAhk);
       setStatus("");
       await refreshSummary();
+      try {
+        const bubbleRes = await api.readSharedBubbleData?.();
+        if (bubbleRes?.path) {
+          setSharedBubblePath(bubbleRes.path);
+          setSharedBubbleExists(Boolean(bubbleRes.exists) || false);
+        } else {
+          setSharedBubblePath("");
+          setSharedBubbleExists(false);
+        }
+      } catch (e) {
+        setSharedBubblePath("");
+        setSharedBubbleExists(false);
+      }
       if (res.config?.sharedDataDir) {
         await handleValidate(res.config.sharedDataDir);
       } else {
@@ -387,6 +402,19 @@ export default function SettingsView() {
                     </div>
                   </div>
                 ))}
+                {sharedBubblePath && (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 sm:col-span-2">
+                    <div className="text-xs font-semibold text-slate-700">Bubble notes & extras (shared)</div>
+                    <div className="text-[11px] font-mono break-all text-slate-600">{sharedBubblePath}</div>
+                    <div
+                      className={`text-xs font-semibold ${
+                        sharedBubbleExists ? "text-emerald-600" : "text-red-600"
+                      }`}
+                    >
+                      {sharedBubbleExists ? "Exists" : "Missing"}
+                    </div>
+                  </div>
+                )}
               </div>
               {summary?.queueDir && (
                 <div className="text-[11px] text-slate-500">

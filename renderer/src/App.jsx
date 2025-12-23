@@ -110,7 +110,6 @@ export default function App() {
   const [printGeneratedAt, setPrintGeneratedAt] = useState(null);
 
   const editingItemUidRef = useRef(null);
-  const sharedBubbleDataLoadedRef = useRef(false);
   const pendingItemsRefreshRef = useRef(false);
   const printPreviewRef = useRef(null);
   const workspaceRef = useRef(null);
@@ -253,8 +252,8 @@ export default function App() {
   }
 
   function persistSharedBubbleSnapshot(bubbleId, overrides = {}) {
-    if (!api?.writeSharedBubbleData || !bubbleId) return;
-    const bubble = bubbles.find((b) => b.id === bubbleId);
+    if (!api?.writeSharedBubbleData || (!bubbleId && !overrides?.name)) return;
+    const bubble = bubbles.find((b) => b.id === bubbleId) || bubbles.find((b) => b.name === overrides?.name);
     const hasNotes = Object.prototype.hasOwnProperty.call(overrides, "notes");
     const hasExtras = Object.prototype.hasOwnProperty.call(overrides, "extraLines");
     const nextNotes = hasNotes ? overrides.notes : bubble?.notes || "";
@@ -269,6 +268,36 @@ export default function App() {
         extraLines: nextExtras,
       })
       .catch((e) => console.warn("[shared-bubble] write failed", e));
+  }
+
+  function applySharedBubbleData(shared = {}) {
+    const byId = new Map();
+    const byName = new Map();
+    Object.keys(shared).forEach((key) => {
+      const entry = shared[key] || {};
+      const id = entry.id || key;
+      const name = (entry.name || "").trim().toLowerCase();
+      if (id) byId.set(id, entry);
+      if (name) byName.set(name, entry);
+    });
+
+    const extras = {};
+    setBubbles((prev) =>
+      prev.map((b) => {
+        const entry =
+          byId.get(b.id) ||
+          byName.get((b.name || "").trim().toLowerCase());
+        if (!entry) return b;
+        if (Array.isArray(entry.extraLines)) {
+          extras[b.id] = entry.extraLines;
+        }
+        if (typeof entry.notes === "string" && entry.notes !== b.notes) {
+          return { ...b, notes: entry.notes };
+        }
+        return b;
+      })
+    );
+    setPrintExtraLinesByBubble(extras);
   }
 
 
@@ -290,7 +319,12 @@ export default function App() {
     setBubbles((prev) =>
       prev.map((b) => (b.id === id ? { ...b, notes } : b))
     );
-    persistSharedBubbleSnapshot(id, { notes });
+  }
+
+  function handleBubbleNotesBlur(id) {
+    const bubble = bubbles.find((b) => b.id === id);
+    if (!bubble) return;
+    persistSharedBubbleSnapshot(id, { notes: bubble.notes || "" });
   }
 
   const filteredItems = useMemo(() => {
@@ -444,34 +478,24 @@ export default function App() {
         const res = await api.readSharedBubbleData();
         if (cancelled) return;
         const shared = res?.data?.bubbles || {};
-        const nextExtras = {};
-        Object.keys(shared).forEach((id) => {
-          if (Array.isArray(shared[id]?.extraLines)) {
-            nextExtras[id] = shared[id].extraLines;
-          }
-        });
-        if (Object.keys(nextExtras).length) {
-          setPrintExtraLinesByBubble((prev) => ({ ...nextExtras, ...prev }));
-        }
-        setBubbles((prev) =>
-          prev.map((b) => {
-            const sharedEntry = shared[b.id];
-            if (sharedEntry && typeof sharedEntry.notes === "string") {
-              return { ...b, notes: sharedEntry.notes };
-            }
-            return b;
-          })
-        );
+        applySharedBubbleData(shared);
       } catch (e) {
         console.warn("[shared-bubble] read failed", e);
-      } finally {
-        sharedBubbleDataLoadedRef.current = true;
       }
     }
     loadSharedBubbleData();
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    if (!api?.onBubbleSharedUpdated) return;
+    const off = api.onBubbleSharedUpdated((payload) => {
+      const shared = payload?.bubbles || {};
+      applySharedBubbleData(shared);
+    });
+    return () => off && off();
   }, []);
 
   useEffect(() => {
@@ -785,6 +809,9 @@ export default function App() {
     persistUIState(cleanedBubbleMeta);
     if (api?.deleteSharedBubbleData) {
       api.deleteSharedBubbleData(bubbleId).catch((e) => console.warn("[shared-bubble] delete failed", e));
+      if (bubble?.name) {
+        api.deleteSharedBubbleData(bubble.name).catch(() => {});
+      }
     }
   }
 
@@ -945,7 +972,6 @@ export default function App() {
         partLineCode: "",
       };
       const nextLines = [...current, nextLine];
-      persistSharedBubbleSnapshot(printBubble.id, { extraLines: nextLines });
       return { ...prev, [printBubble.id]: nextLines };
     });
   }
@@ -957,7 +983,6 @@ export default function App() {
       const next = current.map((line) =>
         line.id === lineId ? { ...line, ...patch } : line
       );
-      persistSharedBubbleSnapshot(printBubble.id, { extraLines: next });
       return { ...prev, [printBubble.id]: next };
     });
   }
@@ -967,12 +992,14 @@ export default function App() {
     setPrintExtraLinesByBubble((prev) => {
       const current = prev[printBubble.id] || [];
       const next = current.filter((line) => line.id !== lineId);
-      persistSharedBubbleSnapshot(printBubble.id, { extraLines: next });
       return { ...prev, [printBubble.id]: next };
     });
   }
 
   function handleClosePrint() {
+    if (printBubble) {
+      persistSharedBubbleSnapshot(printBubble.id, { extraLines: printExtraLinesByBubble[printBubble.id] || [] });
+    }
     setPrintBubbleId(null);
     setPrintGeneratedAt(null);
   }
@@ -988,6 +1015,7 @@ export default function App() {
       );
     }
     setPrintGeneratedAt(new Date());
+    persistSharedBubbleSnapshot(printBubble.id, { extraLines: printExtraLinesByBubble[printBubble.id] || [] });
     setTimeout(() => {
       if (!printPreviewRef.current) return;
       const contents = printPreviewRef.current.innerHTML;
@@ -1662,6 +1690,7 @@ export default function App() {
             onDropOnBubble={onDropOnBubble}
             onUpdateItem={updateItemByKey}
             onUpdateBubbleNotes={updateBubbleNotes}
+            onBubbleNotesBlur={handleBubbleNotesBlur}
             onRequestPrint={handleOpenPrint}
             onEditItem={handleStartEdit}
             onSplitItem={handleSplitItem}

@@ -35,6 +35,7 @@ export default function BubbleColumn({
   onDropOnBubble,
   onUpdateItem,
   onUpdateBubbleNotes,
+  onBubbleNotesBlur,
   onSplitItem,
   onConsolidateItems,
   onDeleteBubble,
@@ -219,7 +220,10 @@ export default function BubbleColumn({
         value={notes}
         onChange={(e) => onUpdateBubbleNotes(id, e.target.value)}
         onFocus={onFieldFocus}
-        onBlur={onFieldBlur}
+        onBlur={(e) => {
+          onFieldBlur?.(e);
+          onBubbleNotesBlur?.(id);
+        }}
       />
 
       <div className="grid grid-cols-1 gap-3">

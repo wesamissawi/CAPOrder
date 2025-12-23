@@ -22,6 +22,7 @@ export default function StockFlowView({
   onDropOnBubble,
   onUpdateItem,
   onUpdateBubbleNotes,
+  onBubbleNotesBlur,
   onRequestPrint,
   onEditItem,
   onSplitItem,
@@ -132,6 +133,7 @@ export default function StockFlowView({
                   onDropOnBubble={onDropOnBubble}
                   onUpdateItem={onUpdateItem}
                   onUpdateBubbleNotes={onUpdateBubbleNotes}
+                  onBubbleNotesBlur={onBubbleNotesBlur}
                   onFieldFocus={handleFieldFocus}
                   onFieldBlur={handleFieldBlur}
                   showPrintAction={!defaultBubbleNames.has(b.name)}

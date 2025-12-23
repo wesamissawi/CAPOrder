@@ -15,6 +15,11 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('items:updated', listener);
     return () => ipcRenderer.removeListener('items:updated', listener);
   },
+  onBubbleSharedUpdated: (cb) => {
+    const listener = (_e, data) => cb(data);
+    ipcRenderer.on('bubble-shared:updated', listener);
+    return () => ipcRenderer.removeListener('bubble-shared:updated', listener);
+  },
 
   // file utilities
   getDataPath: () => ipcRenderer.invoke('items:get-path'),

@@ -300,6 +300,7 @@ let sageIntegrationActive = false;
 let sageProcessing = false;
 let sagePendingRun = false;
 const sageProcessingRefs = new Set();
+let bubbleSharedWatcher = null;
 
 function readConfig() {
   try { if (fs.existsSync(INSTANCE_PATHS.windowConfig)) return JSON.parse(fs.readFileSync(INSTANCE_PATHS.windowConfig, 'utf-8')); } catch {}
@@ -654,6 +655,18 @@ function startWatching(win) {
       }
     });
     itemsWatchers.push(w);
+  });
+}
+
+function startBubbleSharedWatching(win) {
+  try { if (bubbleSharedWatcher) bubbleSharedWatcher.close(); } catch {}
+  const target = ensureSharedBubbleFile();
+  bubbleSharedWatcher = fs.watch(target, { persistent: false }, () => {
+    const data = readSharedBubbleData();
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('bubble-shared:updated', data);
+      console.log('[main] watch -> bubble-shared:updated');
+    }
   });
 }
 
@@ -1065,6 +1078,7 @@ async function createWindow() {
 
   console.log('[main] data file =', getDataFile());
   startWatching(win);
+  startBubbleSharedWatching(win);
 
   const scheduleSaveBounds = () => {
     if (boundsSaveTimeout) clearTimeout(boundsSaveTimeout);
@@ -1383,7 +1397,8 @@ ipcMain.handle('ui-state:write', (_evt, state) => {
 ipcMain.handle('bubble-shared:read', () => {
   try {
     const data = readSharedBubbleData();
-    return { ok: true, data, path: getSharedBubbleDataPath() };
+    const pathStr = getSharedBubbleDataPath();
+    return { ok: true, data, path: pathStr, exists: fs.existsSync(pathStr) };
   } catch (e) {
     console.error('[bubble-shared:read]', e);
     return { ok: false, error: e?.message || 'Failed to read shared bubble data.' };
@@ -1391,7 +1406,7 @@ ipcMain.handle('bubble-shared:read', () => {
 });
 ipcMain.handle('bubble-shared:write', (_evt, payload) => {
   try {
-    const bubbleId = payload?.bubbleId;
+    const bubbleId = payload?.bubbleId || payload?.id || payload?.name;
     const name = typeof payload?.name === 'string' ? payload.name : '';
     const notes = typeof payload?.notes === 'string' ? payload.notes : '';
     const extraLines = Array.isArray(payload?.extraLines) ? payload.extraLines : [];
@@ -1432,6 +1447,7 @@ ipcMain.handle('app-config:set', (_evt, partial) => {
     // restart watchers to pick up new shared dir
     startWatching(win);
     startOrdersWatching(win);
+    startBubbleSharedWatching(win);
     const { sharedDir, sharedConfigured } = getSharedDirInfo();
     return { ok: true, config: { ...next, sharedDataDir: sharedDir, instanceDataDir: INSTANCE_DIR }, sharedConfigured, path: INSTANCE_PATHS.appConfig };
   } catch (e) {
