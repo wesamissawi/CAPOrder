@@ -1,5 +1,5 @@
 // main.js
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, screen } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
@@ -35,6 +35,7 @@ const INSTANCE_PATHS = {
   uiState: path.join(INSTANCE_DIR, 'ui_state.json'),
   sageTempOrder: path.join(INSTANCE_DIR, 'orders.sage.tmp.json'),
 };
+const SHARED_BUBBLE_FILE = 'bubble_shared.json';
 
 // Vendor/session data must stay instance-local
 const VENDOR_PATHS = {
@@ -493,6 +494,66 @@ function writeJsonAtomic(filePath, jsonString) {
   } catch (e) {
     try { fs.unlinkSync(tmp); } catch {}
     throw e;
+  }
+}
+
+function getSharedBubbleDataPath() {
+  const { sharedDir } = getSharedDirInfo();
+  return path.join(sharedDir, SHARED_BUBBLE_FILE);
+}
+
+function ensureSharedBubbleFile() {
+  const target = getSharedBubbleDataPath();
+  ensureDir(path.dirname(target));
+  if (!fs.existsSync(target)) {
+    fs.writeFileSync(target, JSON.stringify({ bubbles: {} }, null, 2), 'utf-8');
+  }
+  return target;
+}
+
+function readSharedBubbleData() {
+  try {
+    const target = ensureSharedBubbleFile();
+    const raw = fs.readFileSync(target, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+  } catch (e) {
+    console.error('[shared-bubble read]', e);
+  }
+  return { bubbles: {} };
+}
+
+function writeSharedBubbleData(bubbleId, payload) {
+  if (!bubbleId) return { ok: false, error: 'bubbleId required' };
+  try {
+    const target = ensureSharedBubbleFile();
+    const current = readSharedBubbleData();
+    const bubbles = current.bubbles && typeof current.bubbles === 'object' ? { ...current.bubbles } : {};
+    const next = {
+      ...(payload || {}),
+      id: bubbleId,
+    };
+    bubbles[bubbleId] = next;
+    writeJsonAtomic(target, JSON.stringify({ bubbles }, null, 2));
+    return { ok: true, path: target, data: { bubbles } };
+  } catch (e) {
+    console.error('[shared-bubble write]', e);
+    return { ok: false, error: e?.message || 'Failed to write shared bubble data' };
+  }
+}
+
+function deleteSharedBubbleData(bubbleId) {
+  if (!bubbleId) return { ok: false, error: 'bubbleId required' };
+  try {
+    const target = ensureSharedBubbleFile();
+    const current = readSharedBubbleData();
+    const bubbles = current.bubbles && typeof current.bubbles === 'object' ? { ...current.bubbles } : {};
+    delete bubbles[bubbleId];
+    writeJsonAtomic(target, JSON.stringify({ bubbles }, null, 2));
+    return { ok: true, path: target };
+  } catch (e) {
+    console.error('[shared-bubble delete]', e);
+    return { ok: false, error: e?.message || 'Failed to delete shared bubble data' };
   }
 }
 
@@ -957,10 +1018,11 @@ async function createWindow() {
     dataFileOverride = cfg.dataFile;
   }
   const windowBounds = cfg.windowBounds || {};
-  const defaultWidth = Number(windowBounds.width) || 1280;
-  const defaultHeight = Number(windowBounds.height) || 900;
-  const defaultX = Number.isFinite(windowBounds.x) ? windowBounds.x : undefined;
-  const defaultY = Number.isFinite(windowBounds.y) ? windowBounds.y : undefined;
+  const displayBounds = screen.getPrimaryDisplay()?.workArea || {};
+  const defaultWidth = Number(displayBounds.width) || Number(windowBounds.width) || 1280;
+  const defaultHeight = Number(displayBounds.height) || Number(windowBounds.height) || 900;
+  const defaultX = Number.isFinite(displayBounds.x) ? displayBounds.x : (Number.isFinite(windowBounds.x) ? windowBounds.x : undefined);
+  const defaultY = Number.isFinite(displayBounds.y) ? displayBounds.y : (Number.isFinite(windowBounds.y) ? windowBounds.y : undefined);
   win = new BrowserWindow({
     width: defaultWidth,
     height: defaultHeight,
@@ -973,6 +1035,7 @@ async function createWindow() {
       sandbox: false,              // TEMP for easier debugging; set true later
     },
   });
+  win.maximize();
 
   setupAutoUpdater();
 
@@ -1316,6 +1379,35 @@ ipcMain.handle('ui-state:read', () => ({ ok: true, state: readUIState() }));
 ipcMain.handle('ui-state:write', (_evt, state) => {
   writeUIState(state && typeof state === 'object' ? state : {});
   return { ok: true };
+});
+ipcMain.handle('bubble-shared:read', () => {
+  try {
+    const data = readSharedBubbleData();
+    return { ok: true, data, path: getSharedBubbleDataPath() };
+  } catch (e) {
+    console.error('[bubble-shared:read]', e);
+    return { ok: false, error: e?.message || 'Failed to read shared bubble data.' };
+  }
+});
+ipcMain.handle('bubble-shared:write', (_evt, payload) => {
+  try {
+    const bubbleId = payload?.bubbleId;
+    const name = typeof payload?.name === 'string' ? payload.name : '';
+    const notes = typeof payload?.notes === 'string' ? payload.notes : '';
+    const extraLines = Array.isArray(payload?.extraLines) ? payload.extraLines : [];
+    return writeSharedBubbleData(bubbleId, { id: bubbleId, name, notes, extraLines });
+  } catch (e) {
+    console.error('[bubble-shared:write]', e);
+    return { ok: false, error: e?.message || 'Failed to write shared bubble data.' };
+  }
+});
+ipcMain.handle('bubble-shared:delete', (_evt, bubbleId) => {
+  try {
+    return deleteSharedBubbleData(bubbleId);
+  } catch (e) {
+    console.error('[bubble-shared:delete]', e);
+    return { ok: false, error: e?.message || 'Failed to delete shared bubble data.' };
+  }
 });
 
 ipcMain.handle('app-config:get', () => {

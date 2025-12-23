@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 import Card from "../components/Card";
 import BubbleColumn from "../components/BubbleColumn";
 
@@ -37,6 +37,24 @@ export default function StockFlowView({
   archivableBubbleIds,
   onArchiveBubble,
 }) {
+  const workspaceSize = useMemo(() => {
+    let maxX = 0;
+    let maxY = 0;
+    bubbles.forEach((b, index) => {
+      const key = b.name || b.id;
+      const pos = bubblePositions[key] || { x: 0, y: index * 340 };
+      const width = bubbleSizes[key] || 360;
+      maxX = Math.max(maxX, pos.x + width);
+      maxY = Math.max(maxY, pos.y + 720);
+    });
+    const viewportWidth = typeof window !== "undefined" ? window.innerWidth : 0;
+    const viewportHeight = typeof window !== "undefined" ? window.innerHeight : 0;
+    return {
+      minWidth: Math.max(viewportWidth, maxX + 240),
+      minHeight: Math.max(viewportHeight, maxY + 240),
+    };
+  }, [bubbles, bubblePositions, bubbleSizes]);
+
   return (
     <>
       <section>
@@ -74,7 +92,12 @@ export default function StockFlowView({
       <section>
         <div
           ref={workspaceRef}
-          className={`relative min-h-[600px] transition-opacity ${printBubble ? "pointer-events-none opacity-30" : ""}`}
+          className={`relative transition-opacity ${printBubble ? "pointer-events-none opacity-30" : ""}`}
+          style={{
+            minWidth: workspaceSize.minWidth,
+            minHeight: workspaceSize.minHeight,
+            paddingBottom: "6rem",
+          }}
         >
           {bubbles.map((b, index) => {
             const bubbleKey = b.name || b.id;

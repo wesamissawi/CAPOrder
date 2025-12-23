@@ -110,6 +110,7 @@ export default function App() {
   const [printGeneratedAt, setPrintGeneratedAt] = useState(null);
 
   const editingItemUidRef = useRef(null);
+  const sharedBubbleDataLoadedRef = useRef(false);
   const pendingItemsRefreshRef = useRef(false);
   const printPreviewRef = useRef(null);
   const workspaceRef = useRef(null);
@@ -251,6 +252,25 @@ export default function App() {
     setExpanded((p) => ({ ...p, [uid]: !p[uid] }));
   }
 
+  function persistSharedBubbleSnapshot(bubbleId, overrides = {}) {
+    if (!api?.writeSharedBubbleData || !bubbleId) return;
+    const bubble = bubbles.find((b) => b.id === bubbleId);
+    const hasNotes = Object.prototype.hasOwnProperty.call(overrides, "notes");
+    const hasExtras = Object.prototype.hasOwnProperty.call(overrides, "extraLines");
+    const nextNotes = hasNotes ? overrides.notes : bubble?.notes || "";
+    const nextExtras = hasExtras
+      ? overrides.extraLines || []
+      : printExtraLinesByBubble[bubbleId] || [];
+    api
+      .writeSharedBubbleData({
+        bubbleId,
+        name: bubble?.name || "",
+        notes: nextNotes || "",
+        extraLines: nextExtras,
+      })
+      .catch((e) => console.warn("[shared-bubble] write failed", e));
+  }
+
 
   function addBubble() {
     const base = newBubbleName.trim() || "New Bubble";
@@ -270,6 +290,7 @@ export default function App() {
     setBubbles((prev) =>
       prev.map((b) => (b.id === id ? { ...b, notes } : b))
     );
+    persistSharedBubbleSnapshot(id, { notes });
   }
 
   const filteredItems = useMemo(() => {
@@ -410,6 +431,44 @@ export default function App() {
       }
     }
     loadUIState();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadSharedBubbleData() {
+      if (!api?.readSharedBubbleData) return;
+      try {
+        const res = await api.readSharedBubbleData();
+        if (cancelled) return;
+        const shared = res?.data?.bubbles || {};
+        const nextExtras = {};
+        Object.keys(shared).forEach((id) => {
+          if (Array.isArray(shared[id]?.extraLines)) {
+            nextExtras[id] = shared[id].extraLines;
+          }
+        });
+        if (Object.keys(nextExtras).length) {
+          setPrintExtraLinesByBubble((prev) => ({ ...nextExtras, ...prev }));
+        }
+        setBubbles((prev) =>
+          prev.map((b) => {
+            const sharedEntry = shared[b.id];
+            if (sharedEntry && typeof sharedEntry.notes === "string") {
+              return { ...b, notes: sharedEntry.notes };
+            }
+            return b;
+          })
+        );
+      } catch (e) {
+        console.warn("[shared-bubble] read failed", e);
+      } finally {
+        sharedBubbleDataLoadedRef.current = true;
+      }
+    }
+    loadSharedBubbleData();
     return () => {
       cancelled = true;
     };
@@ -696,6 +755,37 @@ export default function App() {
       ensureBubblesForItems(updatedItemsSnapshot, setBubbles);
     }
     setBubbles((prev) => prev.filter((b) => b.id !== bubbleId));
+
+    // Remove all traces of the bubble from UI state (positions, sizes, meta, z-order, print extras)
+    const cleanedBubbleMeta = { ...bubbleMeta };
+    delete cleanedBubbleMeta[bubbleId];
+    if (bubble.name) delete cleanedBubbleMeta[bubble.name];
+
+    const cleanedPositions = { ...bubblePositions };
+    delete cleanedPositions[bubbleId];
+    if (bubble.name) delete cleanedPositions[bubble.name];
+
+    const cleanedSizes = { ...bubbleSizes };
+    delete cleanedSizes[bubbleId];
+    if (bubble.name) delete cleanedSizes[bubble.name];
+
+    const cleanedZOrder = bubbleZOrder.filter(
+      (key) => key !== bubbleId && key !== bubble.name
+    );
+
+    const cleanedPrintExtras = { ...printExtraLinesByBubble };
+    delete cleanedPrintExtras[bubbleId];
+
+    setBubbleMeta(cleanedBubbleMeta);
+    setBubblePositions(cleanedPositions);
+    setBubbleSizes(cleanedSizes);
+    setBubbleZOrder(cleanedZOrder);
+    setPrintExtraLinesByBubble(cleanedPrintExtras);
+
+    persistUIState(cleanedBubbleMeta);
+    if (api?.deleteSharedBubbleData) {
+      api.deleteSharedBubbleData(bubbleId).catch((e) => console.warn("[shared-bubble] delete failed", e));
+    }
   }
 
   function handleStartBubbleMove(bubbleKey, clientX, clientY) {
@@ -854,7 +944,9 @@ export default function App() {
         taxable: true,
         partLineCode: "",
       };
-      return { ...prev, [printBubble.id]: [...current, nextLine] };
+      const nextLines = [...current, nextLine];
+      persistSharedBubbleSnapshot(printBubble.id, { extraLines: nextLines });
+      return { ...prev, [printBubble.id]: nextLines };
     });
   }
 
@@ -865,6 +957,7 @@ export default function App() {
       const next = current.map((line) =>
         line.id === lineId ? { ...line, ...patch } : line
       );
+      persistSharedBubbleSnapshot(printBubble.id, { extraLines: next });
       return { ...prev, [printBubble.id]: next };
     });
   }
@@ -874,6 +967,7 @@ export default function App() {
     setPrintExtraLinesByBubble((prev) => {
       const current = prev[printBubble.id] || [];
       const next = current.filter((line) => line.id !== lineId);
+      persistSharedBubbleSnapshot(printBubble.id, { extraLines: next });
       return { ...prev, [printBubble.id]: next };
     });
   }
@@ -1477,7 +1571,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen w-full bg-gradient-to-br from-fuchsia-100 via-sky-100 to-emerald-100">
-      <div className="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
+      <div className="w-full px-4 sm:px-6 lg:px-8 space-y-6">
         <header className="bg-white/80 rounded-3xl shadow border border-white/50">
           <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
