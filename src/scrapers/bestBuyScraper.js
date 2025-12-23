@@ -30,7 +30,7 @@ function applyDefaults(order = {}) {
     totalVerified: order.totalVerified ?? false,
     enteredInSage: order.enteredInSage ?? false,
     inStore: order.inStore ?? false,
-    source_invoice: invoice || "",
+    ...(invoice ? { source_invoice: invoice } : {}),
   });
 }
 

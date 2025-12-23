@@ -605,7 +605,7 @@ async function getTransbecOrders(options = {}) {
       orderedBy: o.orderedBy || "",
       orderDesc: "",
       detailUrl: o.href || o.modalUrl || "",
-      source_invoice: "",
+      ...(o.source_invoice ? { source_invoice: o.source_invoice } : {}),
       detailClicked: false,
       detailStored: false,
       pickedUp: false,
@@ -659,7 +659,7 @@ async function getTransbecOrders(options = {}) {
           ...o,
           source: "transbec",
           sage_source: "TRA505",
-          source_invoice: o.source_invoice || "",
+          ...(o.source_invoice ? { source_invoice: o.source_invoice } : {}),
         })
       );
 

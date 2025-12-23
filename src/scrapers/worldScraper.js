@@ -405,7 +405,6 @@ async function scrapeWorldOrders(page) {
         seller,
         orderDesc: descRaw,
         detailUrl: link?.getAttribute("href") || "",
-        source_invoice: "",
         // Booleans for downstream workflow
         detailClicked: false,
         detailStored: false,
@@ -429,9 +428,43 @@ function saveOrdersToJson(orders, ordersJsonPath) {
   fs.writeFileSync(ordersJsonPath, JSON.stringify(orders, null, 2), "utf8");
 }
 
+function loadExistingOrders(ordersJsonPath, existingOrdersOption) {
+  const normalizeRef = (ref) => (ref ? String(ref).trim().toUpperCase() : "");
+  const existingOrders = [];
+  const refMap = new Map();
+
+  const addIfNew = (order) => {
+    const key = normalizeRef(order?.reference);
+    if (!key || refMap.has(key)) return;
+    refMap.set(key, true);
+    existingOrders.push(order);
+  };
+
+  if (fs.existsSync(ordersJsonPath)) {
+    try {
+      const fromDisk = JSON.parse(fs.readFileSync(ordersJsonPath, "utf8"));
+      if (Array.isArray(fromDisk)) {
+        fromDisk.forEach(addIfNew);
+      }
+    } catch (err) {
+      console.warn(`[world] Could not read existing orders from ${ordersJsonPath}:`, err.message);
+    }
+  }
+
+  if (Array.isArray(existingOrdersOption)) {
+    existingOrdersOption.forEach(addIfNew);
+  }
+
+  return { existingOrders, refMap, normalizeRef };
+}
+
 // MAIN ENTRY: call this from Electron main via IPC
 async function getWorldOrders(options = {}) {
   const { storageStatePath, ordersJsonPath } = resolvePaths(options);
+  const { existingOrders, refMap, normalizeRef } = loadExistingOrders(
+    ordersJsonPath,
+    options.existingOrders
+  );
   const headless = options.headless ?? DEFAULT_HEADLESS;
   const statusLog = [];
   const stepWaitMs = options.stepWaitMs ?? 1500;
@@ -457,35 +490,44 @@ async function getWorldOrders(options = {}) {
     const scrapedOrders = await scrapeWorldOrders(page);
     statusLog.push(`Found ${scrapedOrders.length} orders on list page.`);
 
-    // Merge with existing orders (by reference, case-insensitive) without overwriting existing entries.
-    const existing = Array.isArray(options.existingOrders) ? options.existingOrders : [];
-    const byRef = new Map();
-    existing.forEach((o) => {
-      if (!o || !o.reference) return;
-      const key = String(o.reference).trim().toUpperCase();
-      if (key) byRef.set(key, o);
-    });
-
-    const newOnes = [];
+    const newOrders = [];
+    let skippedExisting = 0;
     for (const order of scrapedOrders) {
-      const key = order?.reference ? String(order.reference).trim().toUpperCase() : null;
-      if (key && byRef.has(key)) {
-        continue; // do not overwrite existing
+      const key = normalizeRef(order?.reference);
+      if (key && refMap.has(key)) {
+        skippedExisting += 1;
+        continue; // existing reference: leave stored copy untouched
       }
-      newOnes.push(order);
-      if (key) byRef.set(key, order);
+      newOrders.push(order);
+      if (key) refMap.set(key, true);
     }
 
-    // Append new orders; keep originals as-is
-    const mergedOrders = existing.concat(newOnes);
-    statusLog.push(`Appended ${newOnes.length} new orders. Total now ${mergedOrders.length}.`);
-
-    // Fetch details for any orders that do not yet have detailStored (new or existing)
-    let detailFetched = 0;
-    const detailCandidates = mergedOrders.filter((o) => o && o.detailStored !== true);
-    const detailTrue = mergedOrders.filter((o) => o && o.detailStored === true).length;
     statusLog.push(
-      `Detail candidates needing scrape: ${detailCandidates.length} (detailStored=true: ${detailTrue})`
+      `Existing preserved: ${existingOrders.length} (skipped ${skippedExisting} already in file).`
+    );
+    statusLog.push(`New orders to append: ${newOrders.length}.`);
+
+    if (newOrders.length === 0) {
+      statusLog.push("No new orders found; existing orders.json left unchanged.");
+      return {
+        ok: true,
+        count: existingOrders.length,
+        path: ordersJsonPath,
+        orders: existingOrders,
+        added: 0,
+        detailFetched: 0,
+        loginInfo,
+        headless,
+        statusLog,
+      };
+    }
+
+    // Fetch details only for brand-new orders; existing entries stay untouched
+    let detailFetched = 0;
+    const detailCandidates = newOrders.filter((o) => o && o.detailStored !== true);
+    const detailTrue = existingOrders.filter((o) => o && o.detailStored === true).length;
+    statusLog.push(
+      `Detail candidates needing scrape (new only): ${detailCandidates.length} (existing detailStored=true: ${detailTrue})`
     );
     if (detailCandidates.length) {
       const sampleRefs = detailCandidates
@@ -495,7 +537,7 @@ async function getWorldOrders(options = {}) {
       statusLog.push(`Detail refs (first 10): ${sampleRefs}`);
     }
     if (detailCandidates.length === 0) {
-      statusLog.push("No orders need detail fetch (all have detailStored=true).");
+      statusLog.push("No new orders need detail fetch.");
     }
     for (const order of detailCandidates) {
       const refLabel = order.reference || "(no ref)";
@@ -515,31 +557,32 @@ async function getWorldOrders(options = {}) {
         detailFetched += 1;
         statusLog.push(`✔ Detail scraped for ${refLabel} (${order.lineItems.length} lines)`);
       } else {
-        order.detailError = detailRes.error || detailRes.reason || "detail-fetch-failed";
-        statusLog.push(`✖ Detail failed for ${refLabel}: ${order.detailError}`);
+        // Do not mutate the order when detail fetch fails; just record status.
+        const errMsg = detailRes.error || detailRes.reason || "detail-fetch-failed";
+        statusLog.push(`✖ Detail skipped/failed for ${refLabel}: ${errMsg}`);
       }
       await page.waitForTimeout(stepWaitMs);
     }
     statusLog.push(`Detail fetch complete. ${detailFetched} detail pages scraped.`);
 
-    const standardizedOrders = mergedOrders.map((o) =>
+    const standardizedNewOrders = newOrders.map((o) =>
       standardizeOrderForSage({
         ...o,
-        source_invoice: "",
         source: "world",
         warehouse: o.warehouse || o.seller || o.orderedBy || "World",
         sage_source: "WOR505",
       })
     );
 
-    saveOrdersToJson(standardizedOrders, ordersJsonPath);
+    const finalOrders = existingOrders.concat(standardizedNewOrders);
+    saveOrdersToJson(finalOrders, ordersJsonPath);
 
     return {
       ok: true,
-      count: standardizedOrders.length,
+      count: finalOrders.length,
       path: ordersJsonPath,
-      orders: standardizedOrders,
-      added: newOnes.length,
+      orders: finalOrders,
+      added: standardizedNewOrders.length,
       detailFetched,
       loginInfo,
       headless,

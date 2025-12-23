@@ -25,7 +25,9 @@ function applyCbkDefaults(order = {}) {
     totalVerified: order.totalVerified ?? false,
     enteredInSage: order.enteredInSage ?? false,
     inStore: order.inStore ?? false,
-    source_invoice: reference || order.source_invoice || "",
+    ...(reference || order.source_invoice
+      ? { source_invoice: reference || order.source_invoice }
+      : {}),
   });
 }
 
