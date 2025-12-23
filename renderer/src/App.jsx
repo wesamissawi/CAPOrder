@@ -929,24 +929,39 @@ export default function App() {
       lastSavedRef.current = JSON.stringify(remainingItems);
       await api.writeItems(remainingItems);
       setBubbles((prev) => prev.filter((b) => b.id !== bubbleId));
-      setBubbleMeta((prev) => ({
-        ...prev,
-        [bubbleId]: { ...(prev[bubbleId] || {}), accountingPath: ACCOUNTING_PATHS.ARCHIVED, archivedAt },
-      }));
-      setBubbleZOrder((prev) => prev.filter((k) => k !== bubble.name && k !== bubble.id));
-      setBubblePositions((prev) => {
-        const next = { ...prev };
-        delete next[bubble.name];
-        delete next[bubble.id];
-        return next;
-      });
-      setBubbleSizes((prev) => {
-        const next = { ...prev };
-        delete next[bubble.name];
-        delete next[bubble.id];
-        return next;
-      });
+
+      const cleanedBubbleMeta = { ...bubbleMeta };
+      delete cleanedBubbleMeta[bubbleId];
+      if (bubble.name) delete cleanedBubbleMeta[bubble.name];
+
+      const cleanedPositions = { ...bubblePositions };
+      delete cleanedPositions[bubbleId];
+      if (bubble.name) delete cleanedPositions[bubble.name];
+
+      const cleanedSizes = { ...bubbleSizes };
+      delete cleanedSizes[bubbleId];
+      if (bubble.name) delete cleanedSizes[bubble.name];
+
+      const cleanedZOrder = bubbleZOrder.filter(
+        (key) => key !== bubbleId && key !== bubble.name
+      );
+
+      const cleanedPrintExtras = { ...printExtraLinesByBubble };
+      delete cleanedPrintExtras[bubbleId];
+
+      setBubbleMeta(cleanedBubbleMeta);
+      setBubblePositions(cleanedPositions);
+      setBubbleSizes(cleanedSizes);
+      setBubbleZOrder(cleanedZOrder);
+      setPrintExtraLinesByBubble(cleanedPrintExtras);
       setActiveBubbleKey((prev) => (prev === bubbleId || prev === bubble.name ? null : prev));
+      persistUIState(cleanedBubbleMeta);
+      if (api?.deleteSharedBubbleData) {
+        api.deleteSharedBubbleData(bubbleId).catch((e) => console.warn("[shared-bubble] delete failed", e));
+        if (bubble?.name) {
+          api.deleteSharedBubbleData(bubble.name).catch(() => {});
+        }
+      }
     } catch (e) {
       console.error("[archive] failed", e);
       alert(e?.message || "Failed to archive bubble.");
@@ -1680,6 +1695,7 @@ export default function App() {
             bubblePositions={bubblePositions}
             bubbleSizes={bubbleSizes}
             bubbleZOrder={bubbleZOrder}
+            extraLinesByBubble={printExtraLinesByBubble}
             activeBubbleKey={activeBubbleKey}
             workspaceRef={workspaceRef}
             printBubble={printBubble}

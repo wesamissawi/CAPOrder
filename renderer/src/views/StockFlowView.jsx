@@ -12,6 +12,7 @@ export default function StockFlowView({
   bubblePositions,
   bubbleSizes,
   bubbleZOrder,
+  extraLinesByBubble,
   activeBubbleKey,
   workspaceRef,
   printBubble,
@@ -134,6 +135,7 @@ export default function StockFlowView({
                   onUpdateItem={onUpdateItem}
                   onUpdateBubbleNotes={onUpdateBubbleNotes}
                   onBubbleNotesBlur={onBubbleNotesBlur}
+                  extraLines={extraLinesByBubble?.[b.id] || []}
                   onFieldFocus={handleFieldFocus}
                   onFieldBlur={handleFieldBlur}
                   showPrintAction={!defaultBubbleNames.has(b.name)}

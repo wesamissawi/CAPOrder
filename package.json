@@ -1,6 +1,6 @@
 {
   "name": "my-electron-app",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "OrderMgmtSystem",
   "keywords": [
     "CAP",
@@ -22,6 +22,7 @@
     "dist:publish": "npm run build:renderer && electron-builder -w --publish always"
   },
   "build": {
+    "win": { "icon": "assets/program_icon.ico" },
     "files": [
       "**/*",
       "renderer/dist/**/*"

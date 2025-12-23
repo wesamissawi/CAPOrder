@@ -36,6 +36,7 @@ export default function BubbleColumn({
   onUpdateItem,
   onUpdateBubbleNotes,
   onBubbleNotesBlur,
+  extraLines = [],
   onSplitItem,
   onConsolidateItems,
   onDeleteBubble,
@@ -79,14 +80,30 @@ export default function BubbleColumn({
     );
   }, [deleteOptions]);
 
-  const countLabel = list.length;
-  const bubbleSubtotal = list.reduce((sum, it) => {
+  const extraLineRows = Array.isArray(extraLines)
+    ? extraLines.map((line) => {
+        const qty = toNumber(line.quantity);
+        const price = toNumber(line.unitPrice);
+        return {
+          extension: qty * price,
+          taxable: line.taxable !== false,
+        };
+      })
+    : [];
+  const itemRows = list.map((it) => {
     const qty = toNumber(it.quantity);
     const price = toNumber(it.allocated_for);
-    return sum + qty * price;
-  }, 0);
-  const bubbleTax = bubbleSubtotal * 0.13;
+    return {
+      extension: qty * price,
+      taxable: true,
+    };
+  });
+  const rows = [...itemRows, ...extraLineRows];
+  const bubbleSubtotal = rows.reduce((sum, row) => sum + row.extension, 0);
+  const bubbleTax = rows.reduce((sum, row) => (row.taxable ? sum + row.extension : sum), 0) * 0.13;
   const bubbleTotal = bubbleSubtotal + bubbleTax;
+  const hiddenCount = extraLineRows.length;
+  const countLabelText = `${list.length} items${hiddenCount ? ` (${hiddenCount} hidden)` : ""}`;
   const showSummary = !isDefaultBubble;
   const moveActionsAllowed =
     !(
@@ -164,7 +181,7 @@ export default function BubbleColumn({
           <div className="w-3 h-3 rounded-full bg-indigo-400 animate-pulse" />
           <h2 className="text-xl font-semibold text-slate-800">{name}</h2>
           <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-200">
-            {countLabel} items
+            {countLabelText}
           </span>
         </div>
         <div className="flex items-center gap-2">
