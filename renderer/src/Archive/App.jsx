@@ -48,10 +48,10 @@ function makeUid() {
 const itemKey = (it) => it.uid;
 
 const DEFAULT_BUBBLES = [
-  { id: "new", name: "New Stock", notes: "" },
-  { id: "cash", name: "Cash Sales", notes: "" },
-  { id: "shelf", name: "Shelf", notes: "" },
-  { id: "returns", name: "Returns", notes: "" },
+  { id: "new", name: "NEW STOCK", notes: "" },
+  { id: "cash", name: "CASH SALES", notes: "" },
+  { id: "shelf", name: "SHELF", notes: "" },
+  { id: "returns", name: "RETURNS", notes: "" },
 ];
 
 function uniqueName(baseName, existingNames) {
@@ -66,7 +66,7 @@ function normalizeItems(arr) {
     const it = { ...raw };
     it.uid = it.uid || it.id || makeUid();
     const allocatedToRaw =
-      it.allocated_to && it.allocated_to !== "" ? it.allocated_to : "New Stock";
+      it.allocated_to && it.allocated_to !== "" ? it.allocated_to : "NEW STOCK";
     const allocatedTo =
       allocatedToRaw === "Stock" ? "Shelf" : allocatedToRaw;
     return {
@@ -307,7 +307,7 @@ function handleAllocatedForBlur(it) {
     const map = new Map();
     bubbles.forEach((b) => map.set(b.name, []));
     for (const it of items) {
-      const target = map.has(it.allocated_to) ? it.allocated_to : "New Stock";
+    const target = map.has(it.allocated_to) ? it.allocated_to : "NEW STOCK";
       if (!map.has(target)) map.set(target, []);
       map.get(target).push(it);
     }

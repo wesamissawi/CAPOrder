@@ -37,6 +37,8 @@ contextBridge.exposeInMainWorld('api', {
   readSharedBubbleData: () => ipcRenderer.invoke('bubble-shared:read'),
   writeSharedBubbleData: (payload) => ipcRenderer.invoke('bubble-shared:write', payload),
   deleteSharedBubbleData: (bubbleId) => ipcRenderer.invoke('bubble-shared:delete', bubbleId),
+  getConfig: () => ipcRenderer.invoke('config:get'),
+  setConfig: (partial) => ipcRenderer.invoke('config:set', partial),
   readConfig: () => ipcRenderer.invoke('config:read'),
   writeConfig: (config) => ipcRenderer.invoke('config:write', config),
   getAppConfig: () => ipcRenderer.invoke('app-config:get'),

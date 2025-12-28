@@ -10,7 +10,7 @@ const numberFormatter = new Intl.NumberFormat("en-US");
 
 const normalizeBubbleName = (name) => {
   const trimmed = (name || "").trim();
-  return trimmed || "New Stock";
+  return (trimmed || "NEW STOCK").toUpperCase();
 };
 
 const isSold = (item) => {

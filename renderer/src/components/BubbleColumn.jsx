@@ -18,12 +18,7 @@ const toNumber = (value) => {
   return Number.isFinite(num) ? num : 0;
 };
 
-const FALLBACK_DELETE_INFO = [
-  "New Stock",
-  "Shelf",
-  "Cash Sales",
-  "Returns",
-];
+const FALLBACK_DELETE_INFO = ["NEW STOCK", "SHELF", "CASH SALES", "RETURNS"];
 
 export default function BubbleColumn({
   bubble,
@@ -108,7 +103,7 @@ export default function BubbleColumn({
   const moveActionsAllowed =
     !(
       isDefaultBubble &&
-      ["cash sales", "shelf", "returns"].includes((name || "").toLowerCase())
+      ["CASH SALES", "SHELF", "RETURNS"].includes((name || "").toUpperCase())
     );
   const hasAdvancedActions =
     onConsolidateItems ||
@@ -251,7 +246,7 @@ export default function BubbleColumn({
           const cost = toNumber(it.cost);
           const itemSubtotal = qty * salesPrice;
           const showWarning =
-            !["New Stock Returns", "Shelf"].includes(name) && cost > salesPrice;
+            !["NEW STOCK RETURNS", "SHELF"].includes((name || "").toUpperCase()) && cost > salesPrice;
           const splitDraft = splitDrafts[uid] || {};
           const splitAmount = splitDraft.quantity ?? "";
           const splitTarget = splitDraft.target || it.allocated_to;
@@ -267,7 +262,7 @@ export default function BubbleColumn({
             <Card
               key={uid}
               className={`relative bg-white hover:shadow-xl transition-shadow duration-200 cursor-grab ${
-                !["New Stock Returns", "Shelf"].includes(name) &&
+                !["NEW STOCK RETURNS", "SHELF"].includes((name || "").toUpperCase()) &&
                 toNumber(it.cost) > toNumber(it.allocated_for || 0)
                   ? "border-2 border-red-300 shadow-red-200"
                   : ""

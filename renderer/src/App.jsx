@@ -22,7 +22,7 @@ import {
 } from "./utils/inventory";
 
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
-const DELETE_DESTINATIONS = ["New Stock", "Shelf", "Cash Sales", "Returns"];
+const DELETE_DESTINATIONS = ["NEW STOCK", "SHELF", "CASH SALES", "RETURNS"];
 
 const ACCOUNTING_PATHS = {
   OUTSTANDING: "OUTSTANDING",
@@ -266,44 +266,133 @@ export default function App() {
         name: bubble?.name || "",
         notes: nextNotes || "",
         extraLines: nextExtras,
+        deleted: overrides?.deleted === true,
       })
       .catch((e) => console.warn("[shared-bubble] write failed", e));
   }
 
+  function markSharedBubbleDeleted(bubble) {
+    if (!bubble || !api?.deleteSharedBubbleData) return;
+    const targets = new Set([bubble.id, bubble.name]);
+    targets.forEach((key) => {
+      if (!key) return;
+      api.deleteSharedBubbleData(key).catch((e) => console.warn("[shared-bubble] delete failed", e));
+    });
+  }
+
   function applySharedBubbleData(shared = {}) {
-    const byId = new Map();
-    const byName = new Map();
-    Object.keys(shared).forEach((key) => {
-      const entry = shared[key] || {};
-      const id = entry.id || key;
-      const name = (entry.name || "").trim().toLowerCase();
-      if (id) byId.set(id, entry);
-      if (name) byName.set(name, entry);
+    const norm = (n) => (n || "").trim().toLowerCase();
+    const entries = Object.keys(shared || {}).map((key) => shared[key]).filter(Boolean);
+    const deleteIds = new Set();
+    const deleteNames = new Set();
+    const extras = {};
+    const createdIds = [];
+    const sharedLowerNames = new Set(entries.map((e) => norm(e.name || e.id)));
+    const itemsLowerNames = new Set((items || []).map((it) => norm(it.allocated_to)));
+    let keptIds = new Set();
+
+    entries.forEach((entry) => {
+      if (entry.deleted) {
+        if (entry.id) deleteIds.add(entry.id);
+        if (entry.name) deleteNames.add(norm(entry.name));
+      }
     });
 
-    const extras = {};
-    setBubbles((prev) =>
-      prev.map((b) => {
-        const entry =
-          byId.get(b.id) ||
-          byName.get((b.name || "").trim().toLowerCase());
-        if (!entry) return b;
-        if (Array.isArray(entry.extraLines)) {
-          extras[b.id] = entry.extraLines;
+    setBubbles((prev) => {
+      const next = [];
+      const indexById = new Map();
+      const indexByLower = new Map();
+
+      prev.forEach((b) => {
+        const lower = norm(b.name);
+        if (deleteIds.has(b.id) || deleteNames.has(lower)) return;
+        const keep =
+          DEFAULT_BUBBLE_NAMES.has(b.name) || itemsLowerNames.has(lower) || sharedLowerNames.has(lower);
+        if (!keep) return;
+        indexById.set(b.id, next.length);
+        if (lower) indexByLower.set(lower, next.length);
+        next.push(b);
+      });
+
+      entries.forEach((entry) => {
+        if (!entry || entry.deleted) return;
+        const id = entry.id || entry.bubbleId || entry.name || makeUid();
+        const name = (entry.name || id || "").toString().trim().toUpperCase();
+        const lower = norm(name);
+        if (!name) return;
+        const existingIdx =
+          (id && indexById.has(id) && indexById.get(id) !== undefined
+            ? indexById.get(id)
+            : undefined) ?? (indexByLower.has(lower) ? indexByLower.get(lower) : undefined);
+        extras[id] = Array.isArray(entry.extraLines) ? entry.extraLines : [];
+        if (existingIdx !== undefined) {
+          const merged = {
+            ...next[existingIdx],
+            id,
+            name,
+            notes: typeof entry.notes === "string" ? entry.notes : next[existingIdx].notes,
+          };
+          next[existingIdx] = merged;
+          indexById.set(merged.id, existingIdx);
+          if (lower) indexByLower.set(lower, existingIdx);
+        } else {
+          const newBubble = { id, name, notes: typeof entry.notes === "string" ? entry.notes : "" };
+          createdIds.push(id);
+          const idx = next.length;
+          next.push(newBubble);
+          indexById.set(newBubble.id, idx);
+          if (lower) indexByLower.set(lower, idx);
         }
-        if (typeof entry.notes === "string" && entry.notes !== b.notes) {
-          return { ...b, notes: entry.notes };
-        }
-        return b;
-      })
-    );
-    setPrintExtraLinesByBubble(extras);
+      });
+
+      // Enforce case-insensitive uniqueness (first seen wins)
+      const seenLower = new Set();
+      const deduped = [];
+      next.forEach((b) => {
+        const lower = norm(b.name);
+        if (lower && seenLower.has(lower)) return;
+        if (lower) seenLower.add(lower);
+        deduped.push(b);
+      });
+      keptIds = new Set(deduped.map((b) => b.id));
+
+      return deduped;
+    });
+
+    setPrintExtraLinesByBubble((prev) => {
+      const merged = { ...prev };
+      Object.keys(extras).forEach((id) => {
+        merged[id] = extras[id];
+      });
+      deleteIds.forEach((id) => {
+        delete merged[id];
+      });
+      Object.keys(merged).forEach((id) => {
+        if (!keptIds.has(id)) delete merged[id];
+      });
+      return merged;
+    });
+
+    if (createdIds.length || deleteIds.size || keptIds.size) {
+      setBubbleMeta((prev) => {
+        const next = { ...prev };
+        createdIds.forEach((id) => {
+          next[id] = { ...(next[id] || {}), accountingPath: ACCOUNTING_PATHS.OUTSTANDING };
+        });
+        deleteIds.forEach((id) => delete next[id]);
+        Object.keys(next).forEach((id) => {
+          if (!keptIds.has(id)) delete next[id];
+        });
+        return next;
+      });
+    }
   }
 
 
-  function addBubble() {
-    const base = newBubbleName.trim() || "New Bubble";
-    const names = new Set(bubbles.map((b) => b.name));
+  async function addBubble() {
+    const baseRaw = newBubbleName.trim() || "New Bubble";
+    const base = baseRaw.toUpperCase();
+    const names = new Set(bubbles.map((b) => (b.name || "").toUpperCase()));
     const finalName = uniqueName(base, names);
     const id = makeUid();
     const nb = { id, name: finalName, notes: "" };
@@ -313,6 +402,16 @@ export default function App() {
       [id]: { ...(prev[id] || {}), accountingPath: ACCOUNTING_PATHS.OUTSTANDING },
     }));
     setNewBubbleName("");
+    if (api?.writeSharedBubbleData) {
+      api
+        .writeSharedBubbleData({
+          bubbleId: id,
+          name: finalName,
+          notes: "",
+          extraLines: [],
+        })
+        .catch((e) => console.warn("[shared-bubble] write failed (new bubble)", e));
+    }
   }
 
   function updateBubbleNotes(id, notes) {
@@ -329,14 +428,14 @@ export default function App() {
 
   const filteredItems = useMemo(() => {
     const nowMs = Date.now();
-    const specialBubbles = new Set(["Returns", "Cash Sales", "Shelf"]);
+    const specialBubbles = new Set(["RETURNS", "CASH SALES", "SHELF"]);
     const generalThresholdMs =
       Number(timeFilterMinutes || 0) * 60_000 +
       Number(timeFilterHours || 0) * 3_600_000 +
       Number(timeFilterDays || 0) * 86_400_000;
 
     return items.filter((it) => {
-      const target = it.allocated_to || "New Stock";
+      const target = it.allocated_to || "NEW STOCK";
       const movedAt = new Date(it.last_moved_at).getTime();
       if (Number.isNaN(movedAt)) return true;
       const ageMs = nowMs - movedAt;
@@ -497,6 +596,46 @@ export default function App() {
     });
     return () => off && off();
   }, []);
+
+  // Ensure bubbles exist for all allocated_to values (case-insensitive), create missing ones and persist to shared
+  useEffect(() => {
+    const norm = (n) => (n || "").trim().toUpperCase();
+    const existingUpper = new Set(bubbles.map((b) => norm(b.name)));
+    const requiredUpper = new Set(
+      (items || [])
+        .map((it) => norm(it.allocated_to))
+        .filter(Boolean)
+    );
+    // Always ensure defaults exist
+    DEFAULT_BUBBLES.forEach((b) => requiredUpper.add(norm(b.name)));
+
+    const toAdd = Array.from(requiredUpper).filter((name) => name && !existingUpper.has(name));
+    if (!toAdd.length) return;
+
+    setBubbles((prev) => {
+      const names = new Set(prev.map((b) => b.name));
+      const additions = toAdd.map((name) => {
+        const finalName = uniqueName(name, names);
+        names.add(finalName);
+        return { id: makeUid(), name: finalName, notes: "" };
+      });
+      // persist new bubbles to shared
+      additions.forEach((b) => {
+        if (api?.writeSharedBubbleData) {
+          api
+            .writeSharedBubbleData({
+              bubbleId: b.id,
+              name: b.name,
+              notes: "",
+              extraLines: [],
+            })
+            .catch((e) => console.warn("[shared-bubble] write failed (auto add)", e));
+        }
+      });
+      const next = [...prev, ...additions];
+      return next;
+    });
+  }, [items, bubbles]);
 
   useEffect(() => {
     let cancelled = false;
@@ -760,16 +899,16 @@ export default function App() {
     const bubble = bubbles.find((b) => b.id === bubbleId);
     if (!bubble) return;
     const validTargets = DELETE_DESTINATIONS.filter((name) => name !== bubble.name);
-    const fallback =
-      validTargets.includes(fallbackTargetName) && fallbackTargetName
-        ? fallbackTargetName
-        : validTargets[0] || "New Stock";
+      const fallback =
+        validTargets.includes(fallbackTargetName) && fallbackTargetName
+          ? fallbackTargetName
+          : validTargets[0] || "NEW STOCK";
     let updatedItemsSnapshot = null;
     setItems((prev) => {
       const nowIso = new Date().toISOString();
       const next = prev.map((it) =>
         it.allocated_to === bubble.name
-          ? { ...it, allocated_to: fallback, last_moved_at: nowIso }
+            ? { ...it, allocated_to: fallback, last_moved_at: nowIso }
           : it
       );
       updatedItemsSnapshot = next;
@@ -813,6 +952,7 @@ export default function App() {
         api.deleteSharedBubbleData(bubble.name).catch(() => {});
       }
     }
+    markSharedBubbleDeleted(bubble);
   }
 
   function handleStartBubbleMove(bubbleKey, clientX, clientY) {
@@ -846,7 +986,7 @@ export default function App() {
         it.uid === uid
           ? {
               ...it,
-              allocated_to: "New Stock",
+              allocated_to: "NEW STOCK",
               accountingPath: ACCOUNTING_PATHS.OUTSTANDING,
               last_moved_at: new Date().toISOString(),
             }
@@ -962,6 +1102,7 @@ export default function App() {
           api.deleteSharedBubbleData(bubble.name).catch(() => {});
         }
       }
+      markSharedBubbleDeleted(bubble);
     } catch (e) {
       console.error("[archive] failed", e);
       alert(e?.message || "Failed to archive bubble.");

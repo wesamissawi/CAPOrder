@@ -47,11 +47,13 @@ function resolvePaths(options = {}) {
   return { storageStatePath, ordersJsonPath };
 }
 
-function getCredentials() {
-  const user = process.env.BESTBUY_USER;
-  const pass = process.env.BESTBUY_PASS;
+function getCredentials(creds) {
+  const user =
+    (creds && (creds.user || creds.BESTBUY_USER || creds.username)) || process.env.BESTBUY_USER;
+  const pass =
+    (creds && (creds.pass || creds.BESTBUY_PASS || creds.password)) || process.env.BESTBUY_PASS;
   if (!user || !pass) {
-    throw new Error("BESTBUY_USER or BESTBUY_PASS not set in .env");
+    throw new Error("Missing BESTBUY credentials. Set them in Settings.");
   }
   return { user, pass };
 }
@@ -82,8 +84,8 @@ function formatDateForInput(date) {
 /**
  * Logs into the portal (or reuses existing session) and persists storage state.
  */
-async function ensureLoggedIn(page, storageStatePath, statusLog = []) {
-  const { user, pass } = getCredentials();
+async function ensureLoggedIn(page, storageStatePath, statusLog = [], credentials) {
+  const { user, pass } = getCredentials(credentials);
   await page.goto(CBK_STYLE_LOGIN, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(150);
 
@@ -372,15 +374,10 @@ function mergeOrders(existing = [], incoming = []) {
   (incoming || []).forEach((o) => {
     if (!o) return;
     const key = o.reference ? String(o.reference).trim().toUpperCase() : `NEW-${byRef.size}`;
-    const prev = byRef.get(key) || {};
-    const next = {
-      ...prev,
-      ...o,
-      lineItems: Array.isArray(o.lineItems) && o.lineItems.length ? o.lineItems : prev.lineItems || [],
-    };
-    byRef.set(key, next);
+    if (byRef.has(key)) return; // keep existing entry untouched
+    byRef.set(key, o);
   });
-  return Array.from(byRef.values()).map(applyDefaults);
+  return Array.from(byRef.values());
 }
 
 /**
@@ -405,7 +402,7 @@ async function getBestBuyOrders(options = {}) {
     const context = await createContextWithStorage(browser, storageStatePath);
     page = await context.newPage();
 
-    const loginInfo = await ensureLoggedIn(page, storageStatePath, statusLog);
+    const loginInfo = await ensureLoggedIn(page, storageStatePath, statusLog, options.credentials);
     await goToHistoryAndSearch(page, statusLog);
 
     const scrapedOrders = await scrapeOrders(page, statusLog);

@@ -59,6 +59,20 @@ export default function SettingsView() {
   const [appVersion, setAppVersion] = useState("");
   const [appName, setAppName] = useState("");
   const [isPackaged, setIsPackaged] = useState(false);
+  const [worldUser, setWorldUser] = useState("");
+  const [worldPass, setWorldPass] = useState("");
+  const [transbecUser, setTransbecUser] = useState("");
+  const [transbecPass, setTransbecPass] = useState("");
+  const [cbkUser, setCbkUser] = useState("");
+  const [cbkPass, setCbkPass] = useState("");
+  const [bestbuyUser, setBestbuyUser] = useState("");
+  const [bestbuyPass, setBestbuyPass] = useState("");
+  const [proforceStore, setProforceStore] = useState("");
+  const [proforceCustomer, setProforceCustomer] = useState("");
+  const [proforcePass, setProforcePass] = useState("");
+  const [credStatus, setCredStatus] = useState("");
+  const [credError, setCredError] = useState("");
+  const [credSaving, setCredSaving] = useState(false);
 
   const fileEntries = useMemo(() => {
     if (!summary?.files) return [];
@@ -142,6 +156,29 @@ export default function SettingsView() {
         setAppName(ver.name || "");
         setIsPackaged(Boolean(ver.isPackaged));
       }
+      try {
+        const credRes = await api.getConfig?.();
+        if (credRes?.ok) {
+          const cfg = credRes.config || {};
+          setWorldUser(cfg.WORLD_USER || "");
+          setWorldPass(cfg.WORLD_PASS || "");
+          setTransbecUser(cfg.TRANSBEC_USER || "");
+          setTransbecPass(cfg.TRANSBEC_PASS || "");
+          setCbkUser(cfg.CBK_USER || "");
+          setCbkPass(cfg.CBK_PASS || "");
+          setBestbuyUser(cfg.BESTBUY_USER || "");
+          setBestbuyPass(cfg.BESTBUY_PASS || "");
+          setProforceStore(cfg.PROFORCE_STORE || "");
+          setProforceCustomer(cfg.PROFORCE_CUSTOMER || "");
+          setProforcePass(cfg.PROFORCE_PASS || "");
+          setCredStatus("");
+          setCredError("");
+        } else if (credRes?.error) {
+          setCredError(credRes.error);
+        }
+      } catch (e) {
+        setCredError(e?.message || "Failed to load credentials.");
+      }
     } catch (e) {
       setError(e?.message || "Failed to load settings.");
     }
@@ -187,6 +224,36 @@ export default function SettingsView() {
       await load();
     } catch (e) {
       setError(e?.message || "Failed to save settings.");
+    }
+  }
+
+  async function handleSaveCreds() {
+    try {
+      setCredSaving(true);
+      setCredStatus("");
+      setCredError("");
+      const res = await api.setConfig?.({
+        WORLD_USER: worldUser || "",
+        WORLD_PASS: worldPass || "",
+        TRANSBEC_USER: transbecUser || "",
+        TRANSBEC_PASS: transbecPass || "",
+        CBK_USER: cbkUser || "",
+        CBK_PASS: cbkPass || "",
+        BESTBUY_USER: bestbuyUser || "",
+        BESTBUY_PASS: bestbuyPass || "",
+        PROFORCE_STORE: proforceStore || "",
+        PROFORCE_CUSTOMER: proforceCustomer || "",
+        PROFORCE_PASS: proforcePass || "",
+      });
+      if (res?.ok) {
+        setCredStatus("Saved");
+      } else {
+        setCredError(res?.error || "Failed to save credentials.");
+      }
+    } catch (e) {
+      setCredError(e?.message || "Failed to save credentials.");
+    } finally {
+      setCredSaving(false);
     }
   }
 
@@ -317,6 +384,140 @@ export default function SettingsView() {
             >
               Save
             </button>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="space-y-4">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-xl font-semibold text-slate-800">Scraper Credentials</h2>
+              <p className="text-sm text-slate-500">
+                Stored per-machine in app data. Used by World, Transbec, CBK, BestBuy, and Proforce scrapers.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              {credError && (
+                <span className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-full px-3 py-1">
+                  {credError}
+                </span>
+              )}
+              {credStatus && !credError && (
+                <span className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1">
+                  {credStatus}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={handleSaveCreds}
+                disabled={credSaving}
+                className="px-4 py-2 rounded-full bg-indigo-600 text-white text-sm font-semibold disabled:opacity-60"
+              >
+                {credSaving ? "Saving..." : "Save Credentials"}
+              </button>
+            </div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">World Username</label>
+              <input
+                type="text"
+                value={worldUser}
+                onChange={(e) => setWorldUser(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">World Password</label>
+              <input
+                type="password"
+                value={worldPass}
+                onChange={(e) => setWorldPass(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Transbec Username</label>
+              <input
+                type="text"
+                value={transbecUser}
+                onChange={(e) => setTransbecUser(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Transbec Password</label>
+              <input
+                type="password"
+                value={transbecPass}
+                onChange={(e) => setTransbecPass(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">CBK Username</label>
+              <input
+                type="text"
+                value={cbkUser}
+                onChange={(e) => setCbkUser(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">CBK Password</label>
+              <input
+                type="password"
+                value={cbkPass}
+                onChange={(e) => setCbkPass(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">BestBuy Username</label>
+              <input
+                type="text"
+                value={bestbuyUser}
+                onChange={(e) => setBestbuyUser(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">BestBuy Password</label>
+              <input
+                type="password"
+                value={bestbuyPass}
+                onChange={(e) => setBestbuyPass(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Proforce Store</label>
+              <input
+                type="text"
+                value={proforceStore}
+                onChange={(e) => setProforceStore(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Proforce Customer</label>
+              <input
+                type="text"
+                value={proforceCustomer}
+                onChange={(e) => setProforceCustomer(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Proforce Password</label>
+              <input
+                type="password"
+                value={proforcePass}
+                onChange={(e) => setProforcePass(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
           </div>
         </div>
       </Card>

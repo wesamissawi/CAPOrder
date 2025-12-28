@@ -309,6 +309,26 @@ function readConfig() {
 function writeConfig(cfg) {
   try { fs.writeFileSync(INSTANCE_PATHS.windowConfig, JSON.stringify(cfg, null, 2), 'utf-8'); } catch (e) { console.error('[config write]', e); }
 }
+function loadConfig() {
+  try {
+    if (!fs.existsSync(INSTANCE_PATHS.windowConfig)) return {};
+    const raw = fs.readFileSync(INSTANCE_PATHS.windowConfig, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+function saveConfig(partial) {
+  const base = loadConfig();
+  const next = { ...(base || {}) };
+  if (partial && typeof partial === 'object' && !Array.isArray(partial)) {
+    Object.assign(next, partial);
+  }
+  ensureDir(path.dirname(INSTANCE_PATHS.windowConfig));
+  fs.writeFileSync(INSTANCE_PATHS.windowConfig, JSON.stringify(next, null, 2), 'utf-8');
+  return next;
+}
 function ensureConfigFile() {
   if (fs.existsSync(INSTANCE_PATHS.windowConfig)) return;
   writeConfig({ userConfig: {} });
@@ -1266,11 +1286,18 @@ ipcMain.handle('orders:fetch-world', async () => {
     ensureDir(VENDOR_PATHS.world.dataDir);
     const existing = readOrders();
     const targetOrdersPath = getOrdersFile();
+    const config = loadConfig();
+    const worldUser = typeof config.WORLD_USER === 'string' ? config.WORLD_USER : '';
+    const worldPass = typeof config.WORLD_PASS === 'string' ? config.WORLD_PASS : '';
+    if (!worldUser || !worldPass) {
+      return { ok: false, error: 'Missing WORLD credentials. Set them in Settings.' };
+    }
     const res = await getWorldOrders({
       storageDir: VENDOR_PATHS.world.dataDir,
       storageStatePath: VENDOR_PATHS.world.storageState,
       ordersPath: targetOrdersPath,
       existingOrders: existing,
+      credentials: { user: worldUser, pass: worldPass },
     });
     if (res?.ok && Array.isArray(res.orders)) {
       writeOrders(res.orders);
@@ -1287,6 +1314,12 @@ ipcMain.handle('orders:fetch-transbec', async () => {
     ensureDir(VENDOR_PATHS.transbec.dataDir);
     const targetOrdersPath = getOrdersFile();
     const existing = readOrders();
+    const config = loadConfig();
+    const transbecUser = typeof config.TRANSBEC_USER === 'string' ? config.TRANSBEC_USER : '';
+    const transbecPass = typeof config.TRANSBEC_PASS === 'string' ? config.TRANSBEC_PASS : '';
+    if (!transbecUser || !transbecPass) {
+      return { ok: false, error: 'Missing TRANSBEC credentials. Set them in Settings.' };
+    }
     const res = await getTransbecOrders({
       storageDir: VENDOR_PATHS.transbec.dataDir,
       storageStatePath: VENDOR_PATHS.transbec.storageState,
@@ -1294,6 +1327,7 @@ ipcMain.handle('orders:fetch-transbec', async () => {
       productsPath: VENDOR_PATHS.transbec.products,
       existingOrders: existing,
       maxPages: 1, // limit to first page as requested
+      credentials: { user: transbecUser, pass: transbecPass },
     });
     let merged = Array.isArray(res?.orders) ? res.orders : [];
     if (res?.ok) {
@@ -1328,6 +1362,13 @@ ipcMain.handle('orders:fetch-transbec', async () => {
 
 ipcMain.handle('orders:fetch-proforce', async () => {
   try {
+    const config = loadConfig();
+    const store = typeof config.PROFORCE_STORE === 'string' ? config.PROFORCE_STORE : '';
+    const customer = typeof config.PROFORCE_CUSTOMER === 'string' ? config.PROFORCE_CUSTOMER : '';
+    const pass = typeof config.PROFORCE_PASS === 'string' ? config.PROFORCE_PASS : '';
+    if (!store || !customer || !pass) {
+      return { ok: false, error: 'Missing PROFORCE credentials. Set them in Settings.' };
+    }
     ensureDir(VENDOR_PATHS.proforce.dataDir);
     const targetOrdersPath = getOrdersFile();
     const existing = readOrders();
@@ -1336,6 +1377,7 @@ ipcMain.handle('orders:fetch-proforce', async () => {
       storageStatePath: VENDOR_PATHS.proforce.storageState,
       ordersPath: targetOrdersPath,
       existingOrders: existing,
+      credentials: { store, customer, pass },
     });
     if (res?.ok && Array.isArray(res.orders)) {
       writeOrders(res.orders);
@@ -1349,6 +1391,12 @@ ipcMain.handle('orders:fetch-proforce', async () => {
 
 ipcMain.handle('orders:fetch-cbk', async () => {
   try {
+    const config = loadConfig();
+    const cbkUser = typeof config.CBK_USER === 'string' ? config.CBK_USER : '';
+    const cbkPass = typeof config.CBK_PASS === 'string' ? config.CBK_PASS : '';
+    if (!cbkUser || !cbkPass) {
+      return { ok: false, error: 'Missing CBK credentials. Set them in Settings.' };
+    }
     ensureDir(VENDOR_PATHS.cbk.dataDir);
     const targetOrdersPath = getOrdersFile();
     const existing = readOrders();
@@ -1357,6 +1405,7 @@ ipcMain.handle('orders:fetch-cbk', async () => {
       storageStatePath: VENDOR_PATHS.cbk.storageState,
       ordersPath: targetOrdersPath,
       existingOrders: existing,
+      credentials: { user: cbkUser, pass: cbkPass },
     });
     if (res?.ok && Array.isArray(res.orders)) {
       writeOrders(res.orders);
@@ -1370,6 +1419,12 @@ ipcMain.handle('orders:fetch-cbk', async () => {
 
 ipcMain.handle('orders:fetch-bestbuy', async () => {
   try {
+    const config = loadConfig();
+    const bestUser = typeof config.BESTBUY_USER === 'string' ? config.BESTBUY_USER : '';
+    const bestPass = typeof config.BESTBUY_PASS === 'string' ? config.BESTBUY_PASS : '';
+    if (!bestUser || !bestPass) {
+      return { ok: false, error: 'Missing BESTBUY credentials. Set them in Settings.' };
+    }
     ensureDir(VENDOR_PATHS.bestbuy.dataDir);
     const targetOrdersPath = getOrdersFile();
     const existing = readOrders();
@@ -1378,6 +1433,7 @@ ipcMain.handle('orders:fetch-bestbuy', async () => {
       storageStatePath: VENDOR_PATHS.bestbuy.storageState,
       ordersPath: targetOrdersPath,
       existingOrders: existing,
+      credentials: { user: bestUser, pass: bestPass },
     });
     if (res?.ok && Array.isArray(res.orders)) {
       writeOrders(res.orders);
@@ -1585,6 +1641,26 @@ ipcMain.handle('app:get-version', () => {
     };
   } catch (e) {
     return { ok: false, error: e?.message || 'Failed to read app version.' };
+  }
+});
+
+ipcMain.handle('config:get', () => {
+  try {
+    const config = loadConfig();
+    return { ok: true, config, path: INSTANCE_PATHS.windowConfig };
+  } catch (e) {
+    return { ok: false, error: e?.message || 'Failed to read config.' };
+  }
+});
+ipcMain.handle('config:set', (_evt, partial) => {
+  try {
+    if (!partial || typeof partial !== 'object' || Array.isArray(partial)) {
+      return { ok: false, error: 'Invalid config payload' };
+    }
+    const config = saveConfig(partial);
+    return { ok: true, config, path: INSTANCE_PATHS.windowConfig };
+  } catch (e) {
+    return { ok: false, error: e?.message || 'Failed to save config.' };
   }
 });
 

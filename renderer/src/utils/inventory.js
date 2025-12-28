@@ -8,27 +8,41 @@ export function makeUid() {
 export const itemKey = (it) => it.uid;
 
 export const DEFAULT_BUBBLES = [
-  { id: "new", name: "New Stock", notes: "" },
-  { id: "cash", name: "Cash Sales", notes: "" },
-  { id: "shelf", name: "Shelf", notes: "" },
-  { id: "returns", name: "Returns", notes: "" },
+  { id: "new", name: "NEW STOCK", notes: "" },
+  { id: "cash", name: "CASH SALES", notes: "" },
+  { id: "shelf", name: "SHELF", notes: "" },
+  { id: "returns", name: "RETURNS", notes: "" },
 ];
 
+const normalizeName = (name) => (name || "").trim().toLowerCase();
+
 export function uniqueName(baseName, existingNames) {
-  if (!existingNames.has(baseName)) return baseName;
+  const lowerExisting = new Set(Array.from(existingNames || []).map((n) => normalizeName(n)));
+  const baseLower = normalizeName(baseName);
+  if (!lowerExisting.has(baseLower)) return baseName;
   let i = 2;
-  while (existingNames.has(`${baseName}${i}`)) i++;
-  return `${baseName}${i}`;
+  let candidate = `${baseName}${i}`;
+  while (lowerExisting.has(normalizeName(candidate))) {
+    i++;
+    candidate = `${baseName}${i}`;
+  }
+  return candidate;
 }
 
 export function normalizeItems(arr) {
   return (arr || []).map((raw) => {
     const it = { ...raw };
     it.uid = it.uid || it.id || makeUid();
+    const pathUpper = String(it.accountingPath || "OUTSTANDING").trim().toUpperCase();
     const allocatedToRaw =
-      it.allocated_to && it.allocated_to !== "" ? it.allocated_to : "New Stock";
-    const allocatedTo =
-      allocatedToRaw === "Stock" ? "Shelf" : allocatedToRaw;
+      it.allocated_to && it.allocated_to !== ""
+        ? it.allocated_to
+        : pathUpper === "OUTSTANDING"
+          ? "NEW STOCK"
+          : "UNALLOCATED";
+    const normalizedAlloc =
+      allocatedToRaw === "Stock" ? "SHELF" : String(allocatedToRaw || "").trim().toUpperCase() || "UNALLOCATED";
+    const allocatedTo = normalizedAlloc || (pathUpper === "OUTSTANDING" ? "NEW STOCK" : "UNALLOCATED");
     return {
       uid: it.uid,
       accountingPath: it.accountingPath || "OUTSTANDING",
@@ -58,14 +72,15 @@ export function normalizeItems(arr) {
 
 export function ensureBubblesForItems(items, setBubblesFn) {
   setBubblesFn((prev) => {
-    const known = new Set(prev.map((b) => b.name));
+    const knownLower = new Set(prev.map((b) => normalizeName(b.name)));
     const extra = [];
 
     for (const it of items) {
       const name = it.allocated_to && it.allocated_to.trim();
-      if (name && !known.has(name)) {
-        known.add(name);
-        extra.push({ id: makeUid(), name, notes: "" });
+      const lower = normalizeName(name);
+      if (name && !knownLower.has(lower)) {
+        knownLower.add(lower);
+        extra.push({ id: makeUid(), name: name.toUpperCase(), notes: "" });
       }
     }
 
@@ -76,11 +91,17 @@ export function ensureBubblesForItems(items, setBubblesFn) {
 
 export function groupItemsByBubble(items, bubbles) {
   const map = new Map();
-  bubbles.forEach((b) => map.set(b.name, []));
+  const byUpper = new Map();
+  bubbles.forEach((b) => {
+    const upper = (b.name || "").toUpperCase();
+    byUpper.set(upper, b.name);
+    map.set(b.name, []);
+  });
   for (const it of items) {
-    const target = map.has(it.allocated_to) ? it.allocated_to : "New Stock";
-    if (!map.has(target)) map.set(target, []);
-    map.get(target).push(it);
+    const targetUpper = (it.allocated_to || "").toUpperCase();
+    const resolvedName = byUpper.get(targetUpper) || "NEW STOCK";
+    if (!map.has(resolvedName)) map.set(resolvedName, []);
+    map.get(resolvedName).push(it);
   }
   return map;
 }

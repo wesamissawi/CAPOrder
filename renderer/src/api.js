@@ -46,6 +46,8 @@ const fallbackApi = {
   getResolvedPathsSummary: async () => ({ ok: false }),
   validateSharedFolderWritable: async () => ({ ok: false }),
   migrateBusinessFilesToShared: async () => ({ ok: false }),
+  getConfig: async () => ({ ok: false, config: {} }),
+  setConfig: async () => ({ ok: false }),
 };
 
 const api = window.api ?? fallbackApi;

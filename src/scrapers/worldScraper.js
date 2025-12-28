@@ -52,14 +52,14 @@ async function getHeaderFrame(page, timeoutMs = 15000) {
 }
 
 // Helper: ensure we have login credentials
-function getCredentials() {
-  const user = process.env.WORLD_USER;
-  const pass = process.env.WORLD_PASS;
-
+function getCredentials(creds) {
+  const user =
+    (creds && (creds.user || creds.WORLD_USER || creds.username)) || process.env.WORLD_USER;
+  const pass =
+    (creds && (creds.pass || creds.WORLD_PASS || creds.password)) || process.env.WORLD_PASS;
   if (!user || !pass) {
-    throw new Error("WORLD_USER or WORLD_PASS not set in .env");
+    throw new Error("Missing WORLD credentials. Set them in Settings.");
   }
-
   return { user, pass };
 }
 
@@ -72,8 +72,8 @@ async function createContextWithStorage(browser, storageStatePath) {
 }
 
 // Login if necessary and save session
-async function ensureLoggedIn(page, storageStatePath) {
-  const { user, pass } = getCredentials();
+async function ensureLoggedIn(page, storageStatePath, credentials) {
+  const { user, pass } = getCredentials(credentials);
 
   await page.goto(WORLD_LOGIN_URL, { waitUntil: "load" });
 
@@ -479,7 +479,7 @@ async function getWorldOrders(options = {}) {
     page = await context.newPage();
 
     statusLog.push("Opening login page…");
-    const loginInfo = await ensureLoggedIn(page, storageStatePath);
+    const loginInfo = await ensureLoggedIn(page, storageStatePath, options.credentials);
     statusLog.push(
       loginInfo?.usedStoredSession
         ? "Using stored session (no login form)."

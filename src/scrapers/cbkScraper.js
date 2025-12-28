@@ -41,11 +41,11 @@ function resolvePaths(options = {}) {
   return { storageStatePath, ordersJsonPath };
 }
 
-function getCredentials() {
-  const user = process.env.CBK_USER;
-  const pass = process.env.CBK_PASS;
+function getCredentials(creds) {
+  const user = (creds && (creds.user || creds.CBK_USER || creds.username)) || process.env.CBK_USER;
+  const pass = (creds && (creds.pass || creds.CBK_PASS || creds.password)) || process.env.CBK_PASS;
   if (!user || !pass) {
-    throw new Error("CBK_USER or CBK_PASS not set in .env");
+    throw new Error("Missing CBK credentials. Set them in Settings.");
   }
   return { user, pass };
 }
@@ -112,8 +112,8 @@ function parseCbkDate(raw) {
   return { iso, sageDate: `${dd}${mm}${yy}` };
 }
 
-async function ensureLoggedIn(page, storageStatePath, statusLog = []) {
-  const { user, pass } = getCredentials();
+async function ensureLoggedIn(page, storageStatePath, statusLog = [], credentials) {
+  const { user, pass } = getCredentials(credentials);
   await page.goto(CBK_LOGIN_URL, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(500);
 
@@ -299,9 +299,16 @@ function mergeOrders(existing = [], incoming = []) {
       ...o,
       lineItems: Array.isArray(o.lineItems) && o.lineItems.length ? o.lineItems : prev.lineItems || [],
     };
+    // Preserve existing source fields when merging into non-CBK orders
+    if (prev.source && o.source && prev.source !== o.source) {
+      next.source = prev.source;
+    }
+    if (prev.sage_source && o.sage_source && prev.sage_source !== o.sage_source) {
+      next.sage_source = prev.sage_source;
+    }
     byRef.set(key, next);
   });
-  return Array.from(byRef.values()).map(applyCbkDefaults);
+  return Array.from(byRef.values());
 }
 
 async function fetchCbkDetail(context, detailUrl) {
@@ -419,7 +426,7 @@ async function getCbkOrders(options = {}) {
     const context = await createContextWithStorage(browser, storageStatePath);
     page = await context.newPage();
 
-    const loginInfo = await ensureLoggedIn(page, storageStatePath, statusLog);
+    const loginInfo = await ensureLoggedIn(page, storageStatePath, statusLog, options.credentials);
     await goToHistoryAndSearch(page, statusLog);
 
     const scrapedOrders = await scrapeCbkOrders(page, statusLog);

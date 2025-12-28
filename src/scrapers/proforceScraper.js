@@ -20,12 +20,16 @@ function resolvePaths(options = {}) {
   return { storageStatePath, ordersJsonPath };
 }
 
-function getCredentials() {
-  const store = process.env.PROFORCE_STORE;
-  const customer = process.env.PROFORCE_CUSTOMER;
-  const pass = process.env.PROFORCE_PASS;
+function getCredentials(creds) {
+  const store =
+    (creds && (creds.store || creds.PROFORCE_STORE || creds.username || creds.user)) ||
+    process.env.PROFORCE_STORE;
+  const customer =
+    (creds && (creds.customer || creds.PROFORCE_CUSTOMER)) || process.env.PROFORCE_CUSTOMER;
+  const pass =
+    (creds && (creds.pass || creds.password || creds.PROFORCE_PASS)) || process.env.PROFORCE_PASS;
   if (!store || !customer || !pass) {
-    throw new Error("Missing PROFORCE_STORE / PROFORCE_CUSTOMER / PROFORCE_PASS in .env");
+    throw new Error("Missing PROFORCE credentials. Set them in Settings.");
   }
   return { store, customer, pass };
 }
@@ -74,9 +78,9 @@ function parseProforceDate(txt) {
   return { iso, sageDate };
 }
 
-async function ensureLoggedIn(page, storageStatePath) {
+async function ensureLoggedIn(page, storageStatePath, credentials) {
   const statusLog = [];
-  const { store, customer, pass } = getCredentials();
+  const { store, customer, pass } = getCredentials(credentials);
 
   await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
 
@@ -300,7 +304,7 @@ async function getProforceOrders(options = {}) {
     page = await context.newPage();
 
   statusLog.push("Opening Proforce login…");
-  const loginInfo = await ensureLoggedIn(page, storageStatePath);
+  const loginInfo = await ensureLoggedIn(page, storageStatePath, options.credentials);
   statusLog.push(...(loginInfo.statusLog || []));
 
     // Stay on landing (invoice recall) page and wait for rows
@@ -390,18 +394,16 @@ async function getProforceOrders(options = {}) {
     for (const o of orders) {
       const key = o?.reference ? String(o.reference).trim().toUpperCase() : "";
       if (!key) continue;
-      if (!mergedMap.has(key)) {
-        mergedMap.set(key, o);
-      }
-    }
-    const mergedOrders = Array.from(mergedMap.values()).map((o) =>
-      standardizeOrderForSage({
+      if (mergedMap.has(key)) continue; // keep existing entry untouched
+      const standardized = standardizeOrderForSage({
         ...o,
         source: "proforce",
         warehouse: o.warehouse || "Proforce",
         sage_source: "PRO505",
-      })
-    );
+      });
+      mergedMap.set(key, standardized);
+    }
+    const mergedOrders = Array.from(mergedMap.values());
 
     saveJson(ordersJsonPath, mergedOrders);
 

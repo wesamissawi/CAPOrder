@@ -25,10 +25,12 @@ function resolvePaths(options = {}) {
   return { storageStatePath, ordersJsonPath, productsJsonPath };
 }
 
-function getCredentials() {
-  const user = process.env.TRANSBEC_USER;
-  const pass = process.env.TRANSBEC_PASS;
-  if (!user || !pass) throw new Error("TRANSBEC_USER or TRANSBEC_PASS not set in .env");
+function getCredentials(creds) {
+  const user =
+    (creds && (creds.user || creds.TRANSBEC_USER || creds.username)) || process.env.TRANSBEC_USER;
+  const pass =
+    (creds && (creds.pass || creds.TRANSBEC_PASS || creds.password)) || process.env.TRANSBEC_PASS;
+  if (!user || !pass) throw new Error("Missing TRANSBEC credentials. Set them in Settings.");
   return { user, pass };
 }
 
@@ -127,8 +129,8 @@ async function dismissOverlays(page) {
   } catch (_) {}
 }
 
-async function ensureLoggedIn(page, storageStatePath) {
-  const { user, pass } = getCredentials();
+async function ensureLoggedIn(page, storageStatePath, credentials) {
+  const { user, pass } = getCredentials(credentials);
   await ensureEnglish(page);
   await page.goto(HOME_URL, { waitUntil: "domcontentloaded" });
   await page
@@ -578,7 +580,7 @@ async function getTransbecOrders(options = {}) {
     page = await context.newPage();
 
     statusLog.push("Opening Transbec home…");
-    const loginInfo = await ensureLoggedIn(page, storageStatePath);
+    const loginInfo = await ensureLoggedIn(page, storageStatePath, options.credentials);
     statusLog.push(
       loginInfo?.usedStoredSession
         ? "Using stored Transbec session (cookie/state)."
@@ -652,16 +654,16 @@ async function getTransbecOrders(options = {}) {
     for (const o of orders) {
       const key = o?.reference ? String(o.reference).trim().toUpperCase() : "";
       if (!key) continue;
-      if (!mergedMap.has(key)) mergedMap.set(key, o);
+      if (mergedMap.has(key)) continue; // leave existing untouched
+      const standardized = standardizeOrderForSage({
+        ...o,
+        source: "transbec",
+        sage_source: "TRA505",
+        ...(o.source_invoice ? { source_invoice: o.source_invoice } : {}),
+      });
+      mergedMap.set(key, standardized);
     }
-      const mergedOrders = Array.from(mergedMap.values()).map((o) =>
-        standardizeOrderForSage({
-          ...o,
-          source: "transbec",
-          sage_source: "TRA505",
-          ...(o.source_invoice ? { source_invoice: o.source_invoice } : {}),
-        })
-      );
+      const mergedOrders = Array.from(mergedMap.values());
 
     const products = aggregateProducts(mergedOrders);
     statusLog.push(`Aggregated ${products.length} unique products from order line items.`);
