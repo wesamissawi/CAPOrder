@@ -31,8 +31,17 @@
       {
         "from": "ahk",
         "to": "ahk"
+      },
+      {
+        "from": "node_modules/playwright/.local-browsers",
+        "to": "playwright-browsers"
       }
+    ],
+    "asarUnpack": [
+      "**/node_modules/playwright/**",
+      "**/node_modules/playwright-core/**"
     ]
+    
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.10.2",

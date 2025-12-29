@@ -5,6 +5,12 @@ const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { spawn } = require('child_process');
+
+// Point Playwright to the packaged browsers when running in production
+if (app.isPackaged) {
+  process.env.PLAYWRIGHT_BROWSERS_PATH = path.join(process.resourcesPath, 'playwright-browsers');
+}
+
 const { getWorldOrders } = require('./src/scrapers/worldScraper');
 const { getTransbecOrders } = require('./src/scrapers/transbecScraper');
 const { getProforceOrders } = require('./src/scrapers/proforceScraper');
