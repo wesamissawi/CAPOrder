@@ -47,6 +47,28 @@ const VIEWS = [
   { id: "payment-management", label: "Payment Management" },
 ];
 
+function ViewTabs({ currentView, onSelect }) {
+  return (
+    <div className="w-full">
+      <div className="flex flex-wrap gap-2 justify-start items-stretch">
+        {VIEWS.map((view) => (
+          <button
+            key={view.id}
+            onClick={() => onSelect(view.id)}
+            className={`h-11 min-w-[150px] px-4 rounded-full border text-sm font-semibold whitespace-nowrap transition ${
+              currentView === view.id
+                ? "bg-indigo-600 text-white border-indigo-600 shadow"
+                : "bg-white border-slate-200 text-slate-600 hover:text-indigo-600"
+            }`}
+          >
+            {view.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [bubbles, setBubbles] = useState(DEFAULT_BUBBLES);
   const [items, setItems] = useState([]);
@@ -389,13 +411,20 @@ export default function App() {
   }
 
 
-  async function addBubble() {
+  async function addBubble(position) {
     const baseRaw = newBubbleName.trim() || "New Bubble";
     const base = baseRaw.toUpperCase();
     const names = new Set(bubbles.map((b) => (b.name || "").toUpperCase()));
     const finalName = uniqueName(base, names);
     const id = makeUid();
     const nb = { id, name: finalName, notes: "" };
+    if (position && typeof position.x === "number" && typeof position.y === "number") {
+      setBubblePositions((prev) => ({
+        ...prev,
+        [id]: { x: position.x, y: position.y },
+        [finalName]: { x: position.x, y: position.y },
+      }));
+    }
     setBubbles((p) => [...p, nb]);
     setBubbleMeta((prev) => ({
       ...prev,
@@ -1404,7 +1433,9 @@ export default function App() {
 
   function handleOrdersUpdatedExternally(list) {
     const normalized = Array.isArray(list) ? list : [];
-    setSageReadyOrders(normalized.filter((o) => o && o.sage_trigger));
+    setSageReadyOrders(
+      normalized.filter((o) => o && o.sage_trigger && !o.enteredInSage)
+    );
     if (ordersDirty) {
       console.log("[orders] external update skipped (local edits present)");
       return;
@@ -1756,29 +1787,15 @@ export default function App() {
   return (
     <div className="min-h-screen w-full bg-gradient-to-br from-fuchsia-100 via-sky-100 to-emerald-100">
       <div className="w-full px-4 sm:px-6 lg:px-8 space-y-6">
-        <header className="bg-white/80 rounded-3xl shadow border border-white/50">
-          <div className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between">
-            <div>
+        <header className="bg-white/70 rounded-3xl shadow border border-white/60">
+          <div className="w-full flex flex-col gap-4 p-4 sm:flex-col sm:items-start sm:justify-start">
+            <div className="shrink-0 text-left">
               <h1 className="text-2xl sm:text-3xl font-bold text-slate-800">
                 Business Control Center
               </h1>
               <p className="text-sm text-slate-500">Manage pipelines, orders, and payments from one dashboard.</p>
             </div>
-            <nav className="flex flex-wrap gap-2">
-              {VIEWS.map((view) => (
-                <button
-                  key={view.id}
-                  onClick={() => setCurrentView(view.id)}
-                  className={`px-4 py-2 rounded-full border text-sm font-semibold transition ${
-                    currentView === view.id
-                      ? "bg-indigo-600 text-white border-indigo-600 shadow"
-                      : "bg-white border-slate-200 text-slate-600 hover:text-indigo-600"
-                  }`}
-                >
-                  {view.label}
-                </button>
-              ))}
-            </nav>
+            <ViewTabs currentView={currentView} onSelect={setCurrentView} />
           </div>
         </header>
 
@@ -1832,6 +1849,7 @@ export default function App() {
             handleFieldFocus={handleFieldFocus}
             handleFieldBlur={handleFieldBlur}
             addBubble={addBubble}
+            showCreateBubble={currentView === "stock-flow"}
             bubbles={bubblesForView}
             bubblePositions={bubblePositions}
             bubbleSizes={bubbleSizes}

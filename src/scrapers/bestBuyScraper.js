@@ -427,6 +427,13 @@ async function getBestBuyOrders(options = {}) {
           order.totalRaw = res.detail.totals.total.raw;
         }
         order.detailFetchedAt = new Date().toISOString();
+        const standardized = standardizeOrderForSage({
+          ...order,
+          source: order.source || "bestbuy",
+          warehouse: order.warehouse || "BestBuy",
+          sage_source: order.sage_source || "BES505",
+        });
+        Object.assign(order, standardized);
         detailFetched += 1;
       } else if (res.error) {
         statusLog.push(`[detail] ${order.reference}: ${res.error}`);

@@ -44,7 +44,7 @@ export default function DashboardView({
   sageWatchError,
 }) {
   return (
-    <section className="grid gap-4 lg:grid-cols-2">
+    <section className="grid gap-4 lg:grid-cols-2 items-start text-left">
       <Card className="bg-white/80">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="space-y-1">

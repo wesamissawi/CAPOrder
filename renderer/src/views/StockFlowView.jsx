@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useRef } from "react";
 import Card from "../components/Card";
 import BubbleColumn from "../components/BubbleColumn";
 
@@ -8,6 +8,7 @@ export default function StockFlowView({
   handleFieldFocus,
   handleFieldBlur,
   addBubble,
+  showCreateBubble = true,
   bubbles,
   bubblePositions,
   bubbleSizes,
@@ -39,6 +40,7 @@ export default function StockFlowView({
   archivableBubbleIds,
   onArchiveBubble,
 }) {
+  const createBubbleRef = useRef(null);
   const workspaceSize = useMemo(() => {
     let maxX = 0;
     let maxY = 0;
@@ -59,37 +61,43 @@ export default function StockFlowView({
 
   return (
     <>
-      <section>
-        <Card>
-          <div className="flex flex-col lg:flex-row gap-3 lg:items-center">
-            <div className="flex-1">
-              <div className="text-slate-700">Create a new bubble</div>
-              <div className="mt-2 flex items-center gap-2">
-                <input
-                  className="flex-1 border rounded-xl p-2"
-                  placeholder="e.g., Waiting on Customer"
-                  value={newBubbleName}
-                  onChange={(e) => setNewBubbleName(e.target.value)}
-                  onFocus={handleFieldFocus}
-                  onBlur={handleFieldBlur}
-                />
-                <button
-                  onClick={addBubble}
-                  className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700"
-                >
-                  Add Bubble
-                </button>
+      {showCreateBubble && (
+        <section className="inline-block" ref={createBubbleRef}>
+          <Card className="inline-block">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-3">
+              <div className="flex flex-col gap-2">
+                <div className="text-slate-700">Create a new bubble</div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <input
+                    className="w-52 max-w-full border rounded-xl px-3 py-2 text-sm"
+                    placeholder="e.g., Waiting on Customer"
+                    value={newBubbleName}
+                    onChange={(e) => setNewBubbleName(e.target.value)}
+                    onFocus={handleFieldFocus}
+                    onBlur={handleFieldBlur}
+                  />
+                  <button
+                    onClick={() => {
+                      if (createBubbleRef.current && workspaceRef?.current) {
+                        const cardRect = createBubbleRef.current.getBoundingClientRect();
+                        const workspaceRect = workspaceRef.current.getBoundingClientRect();
+                        const x = Math.max(0, cardRect.right - workspaceRect.left + 8);
+                        const y = Math.max(0, cardRect.bottom - workspaceRect.top + 8);
+                        addBubble({ x, y });
+                      } else {
+                        addBubble();
+                      }
+                    }}
+                    className="px-4 py-2 rounded-xl bg-emerald-600 text-white shadow hover:bg-emerald-700 whitespace-nowrap"
+                  >
+                    Add Bubble
+                  </button>
+                </div>
               </div>
-              <p className="mt-2 text-xs text-slate-500">
-                If a bubble name already exists, a numeric suffix (e.g., “2”) will be added automatically.
-              </p>
             </div>
-            <div className="text-sm text-slate-600">
-              <div>Tip: Drag an item card into a bubble to reassign it.</div>
-            </div>
-          </div>
-        </Card>
-      </section>
+          </Card>
+        </section>
+      )}
 
       <section>
         <div

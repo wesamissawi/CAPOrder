@@ -132,18 +132,20 @@ export default function OrderManagementView({
                           </span>
                         )}
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => onMarkForSage(refKey)}
-                        disabled={isSageTriggered}
-                        className={`px-3 py-1 rounded-full text-xs font-semibold border ${
-                          isSageTriggered
-                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                            : "bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50"
-                        }`}
-                      >
-                        {isSageTriggered ? "Ready for Sage" : "Send to Sage"}
-                      </button>
+                      {!order.enteredInSage && (
+                        <button
+                          type="button"
+                          onClick={() => onMarkForSage(refKey)}
+                          disabled={isSageTriggered}
+                          className={`px-3 py-1 rounded-full text-xs font-semibold border ${
+                            isSageTriggered
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : "bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50"
+                          }`}
+                        >
+                          {isSageTriggered ? "Ready for Sage" : "Send to Sage"}
+                        </button>
+                      )}
                     </div>
                   </div>
                   <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">

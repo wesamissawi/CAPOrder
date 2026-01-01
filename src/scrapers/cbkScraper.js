@@ -453,6 +453,14 @@ async function getCbkOrders(options = {}) {
           order.totalRaw = res.detail.totals.total.raw;
         }
         order.detailFetchedAt = new Date().toISOString();
+        // Re-standardize this new order only, so sage_lineItems and derived fields stay in sync.
+        const standardized = standardizeOrderForSage({
+          ...order,
+          source: order.source || "cbk",
+          warehouse: order.warehouse || "CBK",
+          sage_source: order.sage_source || "CBK505",
+        });
+        Object.assign(order, standardized);
         detailFetched += 1;
       } else if (res.error) {
         statusLog.push(`[detail] ${order.reference}: ${res.error}`);

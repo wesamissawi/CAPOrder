@@ -381,6 +381,14 @@ async function getProforceOrders(options = {}) {
         order.totalRaw = d.totalRaw || order.totalRaw;
         order.detailStored = true;
         order.detailFetchedAt = new Date().toISOString();
+        // Re-standardize this new order only so sage_lineItems and derived fields reflect fetched detail.
+        const standardized = standardizeOrderForSage({
+          ...order,
+          source: order.source || "proforce",
+          warehouse: order.warehouse || "Proforce",
+          sage_source: order.sage_source || "PRO505",
+        });
+        Object.assign(order, standardized);
         detailFetched += 1;
       } else {
         order.detailError = detailRes.error || detailRes.reason || "detail-fetch-failed";

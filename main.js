@@ -613,6 +613,23 @@ function toMoneyString(val) {
   return normalized;
 }
 
+function computeAllocatedFor(val) {
+  const normalized = String(val ?? '').replace(/[^\d.-]/g, '').trim();
+  const num = Number(normalized);
+  if (!Number.isFinite(num)) return '';
+  let out = num;
+  if (num > 300) out = num + 100;
+  else if (num > 200) out = num + 70;
+  else if (num > 100) out = num + 50;
+  else if (num > 70) out = num + 40;
+  else if (num > 50) out = num + 30;
+  else if (num > 30) out = num + 20;
+  else if (num > 10) out = num * 1.3;
+  else if (num > 5) out = num + 5;
+  else out = num * 2;
+  return out.toFixed(2);
+}
+
 function toDDMMYYYY(order) {
   // Prefer ISO orderDate
   if (order?.orderDate) {
@@ -641,7 +658,7 @@ function makeOutstandingFromLine(order, line) {
   return {
     uid: randomUUID(),
     accountingPath: 'OUTSTANDING',
-    allocated_for: toMoneyString(line?.extended ?? line?.costPrice ?? order?.total ?? order?.totalRaw ?? ''),
+    allocated_for: computeAllocatedFor(costVal),
     allocated_to: 'New Stock',
     cost: toMoneyString(costVal),
     date: toDDMMYYYY(order),
@@ -978,6 +995,19 @@ async function processSageOrdersQueue() {
       sageProcessingRefs.add(refKey);
       targets.push({ refKey, order });
     });
+
+    // Oldest orders first based on orderDate/orderDateRaw
+    const orderToTimestamp = (o) => {
+      const d =
+        o?.orderDate
+          ? new Date(o.orderDate)
+          : o?.orderDateRaw
+          ? new Date(o.orderDateRaw)
+          : null;
+      const ts = d && !Number.isNaN(d.getTime()) ? d.getTime() : Number.POSITIVE_INFINITY;
+      return ts;
+    };
+    targets.sort((a, b) => orderToTimestamp(a.order) - orderToTimestamp(b.order));
 
     for (const { refKey, order } of targets) {
       console.log("[sage] starting AHK for", refKey);

@@ -16,6 +16,27 @@ SetWinDelay, 0
 
 
 ; --- Helpers ---------------------------------------------------------------
+GetOrderSortKey(orderObj) {
+    if (!IsObject(orderObj))
+        return "99999999999999"
+    dt := ""
+    if (orderObj.HasKey("orderDate"))
+        dt := orderObj.orderDate
+    if (dt = "" && orderObj.HasKey("orderDateRaw"))
+        dt := orderObj.orderDateRaw
+    if (dt = "" && orderObj.HasKey("sageDate"))
+        dt := orderObj.sageDate  ; already ddmmyy
+
+    if (dt != "") {
+        cleaned := RegExReplace(dt, "[^0-9]", "")
+        if (StrLen(cleaned) >= 8) {
+            ; Take up to YYYYMMDDHHMMSS if present; pads comparison lexically.
+            return SubStr(cleaned, 1, 14)
+        }
+    }
+    return "99999999999999"
+}
+
 SelectOrderFromJson(data, orderRef := "") {
     if (!IsObject(data))
         return ""
@@ -32,11 +53,30 @@ SelectOrderFromJson(data, orderRef := "") {
             if (refKey != "" && candKey = refKey)
                 return obj
         }
+
+        ; Oldest sage_trigger first (by orderDate/orderDateRaw)
+        bestObj := ""
+        bestKey := ""
         for i, obj in data {
             if !IsObject(obj)
                 continue
-            if (obj.HasKey("sage_trigger") && obj.sage_trigger)
+            if (obj.HasKey("sage_trigger") && obj.sage_trigger) {
+                key := GetOrderSortKey(obj)
+                if (bestKey = "" || key < bestKey) {
+                    bestKey := key
+                    bestObj := obj
+                }
+            }
+        }
+        if (bestObj)
+            return bestObj
+
+        for i, obj in data {
+            if !IsObject(obj)
+                continue
+            if (obj.HasKey("sage_trigger") && obj.sage_trigger) {
                 return obj
+            }
         }
         return data[1]
     }
@@ -289,6 +329,13 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
             SendTab(1, 50)
 
             cost := lineItems[idx].costPrice + 0.0
+            ; Capture extended values if present (safe defaults)
+            extendedRaw := ""
+            extendedVal := ""
+            try extendedRaw := lineItems[idx].extended
+            if (extendedRaw != "") {
+                try extendedVal := extendedRaw + 0.0
+            }
 
             ; Price ladder
             if (cost < 21)
@@ -399,7 +446,14 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
         Send, %purchase_price%
         Sleep, 50
 
-        SendTab(4, 25)
+        if (extendedRaw != "") {
+            SendTab(3, 25)
+            Send, %extendedRaw%
+            Sleep, 50
+            SendTab(1, 25)
+        } else {
+            SendTab(4, 25)
+        }
     } ; end loop
 
     Sleep, 200
