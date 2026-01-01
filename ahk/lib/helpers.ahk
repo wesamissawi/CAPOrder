@@ -239,6 +239,7 @@ UpdateOrderJournal(ref, journalEntry, jsonPath := "") {
         obj.journal_entry      := journalEntry     ; optional: snake_case too
         obj.enteredInSage      := 1
         obj.invoiceSageUpdate  := 1
+        obj.sage_reference_synced := obj.HasKey("sage_reference") ? obj.sage_reference : obj.reference
         obj.sage_trigger       := false
         obj.sage_processed_at  := A_Now
         found := true

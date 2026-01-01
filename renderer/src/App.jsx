@@ -1383,7 +1383,7 @@ export default function App() {
         if (!refMatch && !rowMatch) return o;
         changed = true;
         const patchVal = typeof patch === "function" ? patch(o) : patch || {};
-        return { ...o, ...(patchVal || {}) };
+        return { ...o, ...(patchVal || {}), _localDirty: true };
       });
       if (changed) setOrdersDirty(true);
       return next;
@@ -1453,7 +1453,8 @@ export default function App() {
       setOrdersError(null);
       const normalized = (orders || []).map((o) => {
         const invFilled = Boolean((o?.source_invoice || "").trim());
-        return { ...o, hasInvoiceNum: invFilled };
+        const { _localDirty, ...rest } = o || {};
+        return { ...rest, hasInvoiceNum: invFilled };
       });
       const res = await api?.writeOrders?.(normalized);
       if (!res?.ok) {
@@ -1746,6 +1747,7 @@ export default function App() {
     });
 
     const pickupFiltered = filtered.filter((order) => {
+      if (order?._localDirty) return true;
       switch (ordersPickupFilter) {
         case "not-picked":
           return !order.pickedUp;

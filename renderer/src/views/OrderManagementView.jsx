@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import Card from "../components/Card";
 
 export default function OrderManagementView({
@@ -20,6 +20,65 @@ export default function OrderManagementView({
   onMarkComplete,
   hasSearch,
 }) {
+  const [invoiceEdits, setInvoiceEdits] = useState({});
+  const [dirtyRefs, setDirtyRefs] = useState({});
+  const [dirtyReasons, setDirtyReasons] = useState({});
+
+  const markDirty = (key, reason) => {
+    if (!key) return;
+    setDirtyRefs((prev) => ({ ...prev, [key]: true }));
+    if (reason) {
+      setDirtyReasons((prev) => {
+        const existing = prev[key] || [];
+        if (existing.includes(reason)) return prev;
+        return { ...prev, [key]: [...existing, reason] };
+      });
+    }
+  };
+
+  const getInvoiceEntry = (key, current) => {
+    const entry = invoiceEdits[key];
+    if (entry) return entry;
+    return { editing: false, value: current || "", dirty: false, original: current || "" };
+  };
+
+  const startInvoiceEdit = (key, current) => {
+    if (!key) return;
+    setInvoiceEdits((prev) => ({
+      ...prev,
+      [key]: { editing: true, value: current || "", original: current || "", dirty: false },
+    }));
+  };
+
+  const stopInvoiceEdit = (key) => {
+    if (!key) return;
+    setInvoiceEdits((prev) => {
+      const existing = prev[key];
+      if (!existing) return prev;
+      return { ...prev, [key]: { ...existing, editing: false } };
+    });
+  };
+
+  const updateInvoiceDraft = (key, value) => {
+    markDirty(key);
+    setInvoiceEdits((prev) => {
+      const existing = prev[key] || { editing: true, original: value || "" };
+      const dirty = value !== (existing.original || "");
+      return {
+        ...prev,
+        [key]: { ...existing, value, dirty, editing: true },
+      };
+    });
+  };
+
+  React.useEffect(() => {
+    if (!ordersDirty) {
+      setDirtyRefs({});
+      setDirtyReasons({});
+      setInvoiceEdits({});
+    }
+  }, [ordersDirty]);
+
   const filters = [
     { value: "all", label: "All" },
     { value: "not-picked", label: "Not Picked Up" },
@@ -108,8 +167,23 @@ export default function OrderManagementView({
               const key = `${order.reference || "order"}-${order.warehouse || idx}`;
               const refKey = order.reference || order.__row || key;
               const isSageTriggered = Boolean(order.sage_trigger);
+              const invoiceEntry = getInvoiceEntry(refKey, order.source_invoice || "");
+              const needsSync = Boolean(order.invoiceNeedsSync);
+              const reasons = dirtyReasons[refKey] || [];
+              const isDirty = (ordersDirty && dirtyRefs[refKey]) || invoiceEntry.dirty || needsSync;
               return (
-                <Card key={key} className="border-indigo-100">
+                <Card
+                  key={key}
+                  className={`${
+                    isDirty
+                      ? `animate-pulse ${
+                          needsSync
+                            ? "border-red-500 bg-red-50 ring-2 ring-red-300"
+                            : "border-amber-500 bg-amber-50 ring-2 ring-amber-300"
+                        }`
+                      : "border-indigo-100"
+                  }`}
+                >
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                     <div>
                       <div className="text-lg font-semibold text-slate-800">
@@ -168,7 +242,10 @@ export default function OrderManagementView({
                           <input
                             type="checkbox"
                             checked={checked}
-                            onChange={(e) => handleOrderCheckboxChange(refKey, meta.field, e.target.checked)}
+                            onChange={(e) => {
+                              markDirty(refKey, meta.label);
+                              handleOrderCheckboxChange(refKey, meta.field, e.target.checked);
+                            }}
                           />
                           <span className="text-slate-700 text-sm">{meta.label}</span>
                         </label>
@@ -187,12 +264,38 @@ export default function OrderManagementView({
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     <div className="flex flex-col gap-1">
                       <span className="text-xs uppercase tracking-wide text-slate-400">Invoice #</span>
-                      <input
-                        className="border rounded-xl px-3 py-1.5 bg-slate-100 text-sm text-slate-700 max-w-xs"
-                        value={order.source_invoice || ""}
-                        readOnly
-                        disabled
-                      />
+                      <div className="flex items-center gap-2 w-full max-w-xs">
+                        <input
+                          className={`flex-1 min-w-0 border rounded-xl px-3 py-1.5 text-sm text-slate-700 ${
+                            invoiceEntry.editing ? "bg-white" : "bg-slate-100"
+                          }`}
+                          value={invoiceEntry.value}
+                          readOnly={!invoiceEntry.editing}
+                          disabled={!invoiceEntry.editing}
+                          onChange={(e) => {
+                            const nextVal = e.target.value;
+                            const orig = invoiceEntry.original || "";
+                            const needsSync =
+                              Boolean(order.invoiceSageUpdate) &&
+                              String(nextVal).trim() !== String(orig).trim();
+                            updateInvoiceDraft(refKey, nextVal);
+                            markDirty(refKey, "Invoice changed");
+                            handleOrderFieldChange(refKey, "source_invoice", nextVal);
+                            handleOrderFieldChange(refKey, "sage_reference", nextVal);
+                            handleOrderFieldChange(refKey, "hasInvoiceNum", true);
+                            handleOrderFieldChange(refKey, "invoiceNeedsSync", needsSync);
+                          }}
+                          onBlur={() => stopInvoiceEdit(refKey)}
+                        />
+                        <button
+                          type="button"
+                          className="px-2 py-1 text-xs rounded-lg border bg-white text-slate-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                          disabled={invoiceEntry.editing}
+                          onClick={() => startInvoiceEdit(refKey, order.source_invoice || "")}
+                        >
+                          Edit
+                        </button>
+                      </div>
                     </div>
                     <div className="flex flex-col gap-1">
                       <span className="text-xs uppercase tracking-wide text-slate-400">Journal Entry</span>
@@ -231,6 +334,38 @@ export default function OrderManagementView({
                             );
                           })}
                         </div>
+                      </div>
+                    )}
+                    {needsSync && (
+                      <div className="mt-3 text-xs font-semibold text-red-700 flex items-center gap-2 flex-wrap">
+                        <span className="inline-block h-2 w-2 rounded-full bg-red-600"></span>
+                        <span>
+                          {order.sage_reference_synced
+                            ? `Invoice differs from last Sage update (${order.sage_reference_synced})`
+                            : "Invoice differs from last Sage update"}
+                        </span>
+                        <button
+                          type="button"
+                          className="px-2 py-1 text-xs rounded-lg border border-red-500 text-red-700 bg-white hover:bg-red-50"
+                          onClick={() => {
+                            markDirty(refKey, "Invoice update queued");
+                            handleOrderFieldChange(refKey, "sage_invoice_trigger", true);
+                          }}
+                        >
+                          Update Invoice
+                        </button>
+                      </div>
+                    )}
+                    {!needsSync && isDirty && reasons.length > 0 && (
+                      <div className="mt-3 text-xs font-semibold text-amber-700 flex items-center gap-2">
+                        <span className="inline-block h-2 w-2 rounded-full bg-amber-600"></span>
+                        Unsaved changes: {reasons.join(", ")}
+                      </div>
+                    )}
+                    {needsSync && (
+                      <div className="mt-3 text-xs font-semibold text-red-700 flex items-center gap-2">
+                        <span className="inline-block h-2 w-2 rounded-full bg-red-600"></span>
+                        Invoice differs from last Sage update
                       </div>
                     )}
                 </Card>

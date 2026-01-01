@@ -74,6 +74,9 @@ const SAGE_TEMP_ORDER = INSTANCE_PATHS.sageTempOrder;
 const SAGE_AHK_SCRIPT = app.isPackaged
   ? path.join(process.resourcesPath, 'ahk', 'sage_purchaser.ahk')
   : path.join(__dirname, 'ahk', 'sage_purchaser.ahk');
+const SAGE_INVOICE_SCRIPT = app.isPackaged
+  ? path.join(process.resourcesPath, 'ahk', 'update_invoice.ahk')
+  : path.join(__dirname, 'ahk', 'update_invoice.ahk');
 
 let dataFileOverride = null;
 let autoUpdaterInitialized = false;
@@ -306,6 +309,9 @@ let sageIntegrationActive = false;
 let sageProcessing = false;
 let sagePendingRun = false;
 const sageProcessingRefs = new Set();
+let invoiceProcessing = false;
+let invoicePendingRun = false;
+const invoiceProcessingRefs = new Set();
 let bubbleSharedWatcher = null;
 
 function readConfig() {
@@ -937,6 +943,11 @@ function applySageResult(refKey, res = {}, fallbackOrder = null) {
     (res.journalEntry || "").toString().trim() ||
     "";
   const nowIso = new Date().toISOString();
+  const syncedRef = (fallbackOrder?.sage_reference ||
+    fallbackOrder?.reference ||
+    fallbackOrder?.__row ||
+    refKey ||
+    "").toString();
 
   let changed = false;
   let found = false;
@@ -953,6 +964,8 @@ function applySageResult(refKey, res = {}, fallbackOrder = null) {
       journal_entry: journalEntry || o.journal_entry || o.journalEntry || "",
       enteredInSage: true,
       invoiceSageUpdate: true,
+      invoiceNeedsSync: false,
+      sage_reference_synced: o?.sage_reference || o?.reference || "",
       sage_trigger: false,
       sage_processed_at: nowIso,
     };
@@ -964,6 +977,8 @@ function applySageResult(refKey, res = {}, fallbackOrder = null) {
       journal_entry: journalEntry || fallbackOrder.journal_entry || fallbackOrder.journalEntry || "",
       enteredInSage: true,
       invoiceSageUpdate: true,
+      invoiceNeedsSync: false,
+      sage_reference_synced: syncedRef,
       sage_trigger: false,
       sage_processed_at: nowIso,
     };
@@ -972,6 +987,30 @@ function applySageResult(refKey, res = {}, fallbackOrder = null) {
     changed = true;
   }
 
+  if (changed) writeOrders(updated);
+}
+
+function applyInvoiceResult(refKey, res = {}, fallbackOrder = null) {
+  const orders = readOrders();
+  const list = Array.isArray(orders) ? orders : [];
+  const key = (refKey || "").toString().trim().toUpperCase();
+  if (!key) return;
+  const nowIso = new Date().toISOString();
+  let changed = false;
+  const updated = list.map((o) => {
+    if (!o) return o;
+    const cand = (o.sage_reference || o.reference || o.__row || "").toString().trim().toUpperCase();
+    if (!cand || cand !== key) return o;
+    changed = true;
+    return {
+      ...o,
+      invoiceNeedsSync: false,
+      sage_invoice_trigger: false,
+      invoiceSageUpdate: true,
+      sage_reference_synced: o?.sage_reference || o?.reference || "",
+      sage_processed_at: nowIso,
+    };
+  });
   if (changed) writeOrders(updated);
 }
 
@@ -1041,6 +1080,71 @@ async function processSageOrdersQueue() {
   }
 }
 
+async function runUpdateInvoice(order) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(SAGE_INVOICE_SCRIPT)) {
+      console.error('[sage-invoice] AHK script not found', { path: SAGE_INVOICE_SCRIPT });
+      return resolve({ ok: false, error: 'ahk-script-missing' });
+    }
+    const orderPath = writeTempOrder(order);
+    if (!orderPath) return resolve({ ok: false, error: 'temp-write-failed' });
+    const ahkExecutable = getAhkExePath();
+    const resolvedExecutable = ahkExecutable ? path.resolve(ahkExecutable) : '';
+    const ahkExists = Boolean(ahkExecutable) && fs.existsSync(ahkExecutable);
+    if (!ahkExecutable || !ahkExists) {
+      return resolve({ ok: false, error: 'ahk-exe-missing' });
+    }
+    const args = [SAGE_INVOICE_SCRIPT, orderPath, order?.sage_reference || order?.reference || ""];
+    const child = spawn(resolvedExecutable, args, { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on('data', (d) => (stdout += d.toString()));
+    child.stderr.on('data', (d) => (stderr += d.toString()));
+    child.on('error', (err) => resolve({ ok: false, error: err?.message || 'spawn-error', stderr, stdout }));
+    child.on('close', (code) => resolve({ ok: code === 0, code, stdout, stderr }));
+  });
+}
+
+async function processInvoiceUpdateQueue() {
+  if (!sageIntegrationActive) return;
+  if (invoiceProcessing) {
+    invoicePendingRun = true;
+    return;
+  }
+  invoiceProcessing = true;
+  try {
+    const orders = readOrders();
+    const targets = [];
+    (orders || []).forEach((order) => {
+      const refKey = normalizeOrderRef(order);
+      if (!refKey) return;
+      if (!order?.sage_invoice_trigger) return;
+      if (invoiceProcessingRefs.has(refKey)) return;
+      invoiceProcessingRefs.add(refKey);
+      targets.push({ refKey, order });
+    });
+    for (const { refKey, order } of targets) {
+      const res = await runUpdateInvoice(order);
+      if (!res?.ok) {
+        console.error("[sage-invoice] AHK run failed for", refKey, res?.error || res?.stderr || res?.code);
+      } else {
+        applyInvoiceResult(refKey, res, order);
+      }
+      invoiceProcessingRefs.delete(refKey);
+    }
+  } catch (e) {
+    console.error("[sage-invoice] queue error", e);
+  } finally {
+    invoiceProcessing = false;
+    if (invoicePendingRun && sageIntegrationActive) {
+      invoicePendingRun = false;
+      setTimeout(() => processInvoiceUpdateQueue(), 200);
+    } else {
+      invoicePendingRun = false;
+    }
+  }
+}
+
 function scheduleSageProcessing() {
   if (!sageIntegrationActive) return;
   if (sageProcessing) {
@@ -1048,6 +1152,7 @@ function scheduleSageProcessing() {
     return;
   }
   processSageOrdersQueue();
+  processInvoiceUpdateQueue();
 }
 
 function resetSageQueue() {
