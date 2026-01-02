@@ -23,6 +23,7 @@ export default function OrderManagementView({
   const [invoiceEdits, setInvoiceEdits] = useState({});
   const [dirtyRefs, setDirtyRefs] = useState({});
   const [dirtyReasons, setDirtyReasons] = useState({});
+  const [lineItemFeeDrafts, setLineItemFeeDrafts] = useState({});
 
   const markDirty = (key, reason) => {
     if (!key) return;
@@ -76,6 +77,7 @@ export default function OrderManagementView({
       setDirtyRefs({});
       setDirtyReasons({});
       setInvoiceEdits({});
+      setLineItemFeeDrafts({});
     }
   }, [ordersDirty]);
 
@@ -319,17 +321,168 @@ export default function OrderManagementView({
                                 ? `${item.partLineCode || ""} ${item.partNumber || ""}`.trim()
                                 : "Item";
                             const cost = item.costPrice ?? item.extended ?? "";
+                            const rowTone = liIdx % 2 === 0 ? "bg-blue-50" : "bg-white";
+                            const feeKey = `${refKey}-li-${liIdx}`;
+                            const draft = lineItemFeeDrafts[feeKey];
+                            const rawFee = draft?.value ?? (item.environmentalFeeAmount ?? "");
+                            const hasFeeVal =
+                              Boolean(item?.hasEnvironmentalFee) ||
+                              (draft?.value !== undefined && String(draft.value || "").trim() !== "") ||
+                              (draft?.value === undefined &&
+                                item &&
+                                item.environmentalFeeAmount !== null &&
+                                item.environmentalFeeAmount !== undefined &&
+                                String(item.environmentalFeeAmount).trim() !== "");
+                            const showFeeInput = hasFeeVal || Boolean(draft?.editing);
+                            const toNumber = (val) => {
+                              const n = Number(val);
+                              return Number.isFinite(n) ? n : null;
+                            };
+                            const handleFeeChange = (value) => {
+                              const trimmed = String(value || "").trim();
+                              const hasFee = trimmed !== "";
+                              const parsed = Number(trimmed);
+                              const amountVal = hasFee && Number.isFinite(parsed) ? parsed : hasFee ? trimmed : null;
+
+                              const baseLineItems = order.lineItems || [];
+                              const baseLineItem = baseLineItems[liIdx] || item || {};
+                              const baseCostVal = toNumber(baseLineItem.costPriceValue ?? baseLineItem.costPrice);
+                              const baseCostStr =
+                                baseLineItem.costPrice ??
+                                order.sage_lineItems?.[liIdx]?.costPrice ??
+                                "";
+                              const baseExtendedVal = toNumber(baseLineItem.extendedValue ?? baseLineItem.extended);
+                              const baseExtendedStr =
+                                baseLineItem.extended ??
+                                order.sage_lineItems?.[liIdx]?.extended ??
+                                "";
+                              const qtyVal =
+                                toNumber(baseLineItem.quantity) ??
+                                toNumber(order.sage_lineItems?.[liIdx]?.quantity) ??
+                                0;
+                              const feeNum = toNumber(amountVal);
+
+                              const nextCostVal =
+                                hasFee && feeNum !== null && baseCostVal !== null
+                                  ? baseCostVal + feeNum
+                                  : baseCostVal;
+                              const nextCostStr =
+                                hasFee && feeNum !== null && baseCostVal !== null
+                                  ? String(nextCostVal)
+                                  : baseCostStr;
+
+                              const nextExtendedVal =
+                                hasFee && feeNum !== null && baseExtendedVal !== null
+                                  ? baseExtendedVal + feeNum * qtyVal
+                                  : baseExtendedVal;
+                              const nextExtendedStr =
+                                hasFee && feeNum !== null && baseExtendedVal !== null
+                                  ? String(nextExtendedVal)
+                                  : baseExtendedStr;
+
+                              const nextLineItems = (order.lineItems || []).map((li, idx) => {
+                                if (idx !== liIdx) return li;
+                                const updated = {
+                                  ...li,
+                                  hasEnvironmentalFee: hasFee,
+                                  environmentalFeeAmount: amountVal,
+                                };
+                                return updated;
+                              });
+
+                              const baseSage = Array.isArray(order.sage_lineItems) && order.sage_lineItems.length
+                                ? order.sage_lineItems
+                                : order.lineItems || [];
+                              const nextSageLineItems = baseSage.map((li, idx) => {
+                                if (idx !== liIdx) return li;
+                                const source = li || baseLineItem;
+                                const updated = {
+                                  ...source,
+                                  hasEnvironmentalFee: hasFee,
+                                  environmentalFeeAmount: amountVal,
+                                };
+                                if (nextCostVal !== null) {
+                                  updated.costPrice = nextCostStr;
+                                  updated.costPriceValue = nextCostVal;
+                                } else {
+                                  updated.costPrice = baseCostStr;
+                                  updated.costPriceValue = baseCostVal;
+                                }
+                                if (nextExtendedVal !== null) {
+                                  updated.extended = nextExtendedStr;
+                                  updated.extendedValue = nextExtendedVal;
+                                } else {
+                                  updated.extended = baseExtendedStr;
+                                  updated.extendedValue = baseExtendedVal;
+                                }
+                                return updated;
+                              });
+
+                              setLineItemFeeDrafts((prev) => ({
+                                ...prev,
+                                [feeKey]: { editing: true, value },
+                              }));
+                              markDirty(refKey, "Environmental fee");
+                              handleOrderFieldChange(refKey, "lineItems", nextLineItems);
+                              handleOrderFieldChange(refKey, "sage_lineItems", nextSageLineItems);
+                            };
                             return (
                               <div
                                 key={`${order.reference || idx}-li-${liIdx}`}
-                                className="text-xs text-slate-700 flex items-center justify-between gap-2"
+                                className={`text-xs text-slate-700 flex items-center justify-between gap-3 px-3 py-1.5 rounded-lg ${rowTone}`}
                               >
-                                <span className="truncate">
-                                  {part} <span className="text-slate-400">x</span> {qty}
-                                </span>
-                                <span className="font-semibold text-slate-800 tabular-nums">
-                                  {cost}
-                                </span>
+                                <div className="flex-1 min-w-0 flex items-center gap-2">
+                                  <span className="truncate">
+                                    {part} <span className="text-slate-400">x</span> {qty}
+                                  </span>
+                                  <div className="flex items-center gap-2">
+                                    {showFeeInput ? (
+                                      <input
+                                        type="text"
+                                        value={rawFee ?? ""}
+                                        onChange={(e) => handleFeeChange(e.target.value)}
+                                        onBlur={() => {
+                                          const currentVal =
+                                            lineItemFeeDrafts[feeKey]?.value ??
+                                            item.environmentalFeeAmount ??
+                                            "";
+                                          const hasVal = String(currentVal || "").trim() !== "";
+                                          if (!hasVal) {
+                                            setLineItemFeeDrafts((prev) => {
+                                              const { [feeKey]: _, ...rest } = prev;
+                                              return rest;
+                                            });
+                                          } else {
+                                            setLineItemFeeDrafts((prev) => ({
+                                              ...prev,
+                                              [feeKey]: { ...(prev[feeKey] || {}), editing: false },
+                                            }));
+                                          }
+                                        }}
+                                        placeholder="Env fee"
+                                        className="w-20 border border-emerald-200 rounded-lg px-2 py-1 text-[11px] text-emerald-800 bg-white shadow-inner"
+                                      />
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        title="Add Environmental Fee"
+                                        className="px-2 py-1 rounded-full text-[11px] font-semibold border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                                        onClick={() =>
+                                          setLineItemFeeDrafts((prev) => ({
+                                            ...prev,
+                                            [feeKey]: {
+                                              editing: true,
+                                              value: item.environmentalFeeAmount ?? "",
+                                            },
+                                          }))
+                                        }
+                                      >
+                                        +ev
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                                <span className="font-semibold text-slate-800 tabular-nums">{cost}</span>
                               </div>
                             );
                           })}
