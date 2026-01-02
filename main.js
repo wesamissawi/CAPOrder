@@ -995,20 +995,27 @@ function applyInvoiceResult(refKey, res = {}, fallbackOrder = null) {
   const list = Array.isArray(orders) ? orders : [];
   const key = (refKey || "").toString().trim().toUpperCase();
   if (!key) return;
+  const journalOut = (res?.stdout || "").toString().trim();
   const nowIso = new Date().toISOString();
   let changed = false;
   const updated = list.map((o) => {
     if (!o) return o;
     const cand = (o.sage_reference || o.reference || o.__row || "").toString().trim().toUpperCase();
     if (!cand || cand !== key) return o;
+    const existingJournal = o.journalEntry || o.journal_entry || "";
+    const nextJournal = journalOut
+      ? `${journalOut}${existingJournal ? " | " + existingJournal : ""}`
+      : existingJournal;
     changed = true;
     return {
       ...o,
       invoiceNeedsSync: false,
       sage_invoice_trigger: false,
       invoiceSageUpdate: true,
-      sage_reference_synced: o?.sage_reference || o?.reference || "",
+      sage_reference_synced: o?.sage_reference || o?.source_invoice || o?.reference || "",
       sage_processed_at: nowIso,
+      journalEntry: nextJournal,
+      journal_entry: nextJournal,
     };
   });
   if (changed) writeOrders(updated);

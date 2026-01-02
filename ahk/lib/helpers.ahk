@@ -134,14 +134,25 @@ GetSageTxnNumber(timeout := 15) {
     ; Get its handle and text
     WinGet, hwnd, ID, %title%
     WinGetText, allText, ahk_id %hwnd%
-    ; Optional: normalize whitespace a bit
+    ; Normalize whitespace
     allText := RegExReplace(allText, "\R+", "`n")
 
-    ; Parse: Transaction Number: J4191.
-    ; capture letters/digits/dashes, ignore trailing period
+    ;MsgBox, 64, Txn Debug, Raw text:`n%allText%
+
+    ; New format: "2 Journal Entries: Jxxxx to Jyyyy"
+   if RegExMatch(allText, "i)Journal\s*Entries:\s*([A-Z0-9-]+)\s*to\s*([A-Z0-9-]+)", m2) {
+        rangeText := m21 . " to " . m22
+        ;MsgBox, 64, Txn Debug1, Parsed range:`n%rangeText%
+        return rangeText
+    }
+
+    ; Legacy: "Transaction Number: J4191."
     if RegExMatch(allText, "i)Transaction\s*Number:\s*([A-Z0-9\-]+)", m) {
+        single := m1
+        ;MsgBox, 64, Txn Debug2, Parsed single:`n%single%
         return m1
     }
+    ;MsgBox, 48, Txn Debug, No journal entry found.
     return ""  ; not found
 }
 
