@@ -128,6 +128,7 @@ GetSageTxnNumber(timeout := 15) {
     ; Wait for the window to appear
     WinWait, %title%,, %timeout%
     if (ErrorLevel) {
+        MsgBox, 16, Txn Error, Transaction confirmation window not found within %timeout%s.
         return ""  ; timed out
     }
 
@@ -145,6 +146,11 @@ GetSageTxnNumber(timeout := 15) {
         ;MsgBox, 64, Txn Debug1, Parsed range:`n%rangeText%
         return rangeText
     }
+    ; Variant: "2 Transaction Numbers: Jxxxx to Jyyyy"
+   if RegExMatch(allText, "i)Transaction\s*Numbers?:\s*([A-Z0-9-]+)\s*to\s*([A-Z0-9-]+)", m3) {
+        rangeText := m31 . " to " . m32
+        return rangeText
+    }
 
     ; Legacy: "Transaction Number: J4191."
     if RegExMatch(allText, "i)Transaction\s*Number:\s*([A-Z0-9\-]+)", m) {
@@ -152,7 +158,7 @@ GetSageTxnNumber(timeout := 15) {
         ;MsgBox, 64, Txn Debug2, Parsed single:`n%single%
         return m1
     }
-    ;MsgBox, 48, Txn Debug, No journal entry found.
+    MsgBox, 48, Txn Debug, No journal entry found.`nRaw text:`n%allText%
     return ""  ; not found
 }
 

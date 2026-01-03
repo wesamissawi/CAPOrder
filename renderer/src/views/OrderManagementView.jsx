@@ -18,12 +18,14 @@ export default function OrderManagementView({
   handleOrderFieldChange,
   onMarkForSage,
   onMarkComplete,
+  onReconcileTotals,
   hasSearch,
 }) {
   const [invoiceEdits, setInvoiceEdits] = useState({});
   const [dirtyRefs, setDirtyRefs] = useState({});
   const [dirtyReasons, setDirtyReasons] = useState({});
   const [lineItemFeeDrafts, setLineItemFeeDrafts] = useState({});
+  const [billedEdits, setBilledEdits] = useState({});
 
   const markDirty = (key, reason) => {
     if (!key) return;
@@ -78,8 +80,71 @@ export default function OrderManagementView({
       setDirtyReasons({});
       setInvoiceEdits({});
       setLineItemFeeDrafts({});
+      setBilledEdits({});
     }
   }, [ordersDirty]);
+
+  const getBilledEntry = (key, current) => {
+    const entry = billedEdits[key];
+    if (entry) return entry;
+    const normalized =
+      current === null || current === undefined || current === ""
+        ? ""
+        : Number.isFinite(current)
+        ? Number(current).toFixed(2)
+        : String(current);
+    return { editing: false, value: normalized, dirty: false, original: normalized };
+  };
+
+  const startBilledEdit = (key, current) => {
+    if (!key) return;
+    setBilledEdits((prev) => {
+      const normalized =
+        current === null || current === undefined || current === ""
+          ? ""
+          : Number.isFinite(current)
+          ? Number(current).toFixed(2)
+          : String(current);
+      return {
+        ...prev,
+        [key]: { editing: true, value: normalized, original: normalized, dirty: false },
+      };
+    });
+  };
+
+  const stopBilledEdit = (key) => {
+    if (!key) return;
+    setBilledEdits((prev) => {
+      const existing = prev[key];
+      if (!existing) return prev;
+      return { ...prev, [key]: { ...existing, editing: false } };
+    });
+  };
+
+  const clampTwoDecimals = (val) => {
+    if (val === null || val === undefined) return "";
+    const str = String(val).replace(/[^0-9.-]/g, "");
+    const parts = str.split(".");
+    if (parts.length > 1) {
+      parts[1] = parts[1].slice(0, 2);
+      return parts[0] + "." + parts[1];
+    }
+    return str;
+  };
+
+  const updateBilledDraft = (key, value) => {
+    if (!key) return;
+    const limited = clampTwoDecimals(value);
+    const num = parseFloat(limited);
+    const normalized = Number.isFinite(num) ? num.toFixed(2) : "";
+    const dirty = normalized !== (getBilledEntry(key, "").original || "");
+    setBilledEdits((prev) => ({
+      ...prev,
+      [key]: { editing: true, value: limited, original: getBilledEntry(key, "").original, dirty },
+    }));
+    markDirty(key, "Billed total");
+    handleOrderFieldChange(key, "billed_total", Number.isFinite(num) ? Number(num.toFixed(2)) : null);
+  };
 
   const filters = [
     { value: "all", label: "All" },
@@ -90,8 +155,21 @@ export default function OrderManagementView({
     { value: "no-invoice", label: "No Invoice #" },
   ];
 
+  const valueCheckStyles = `
+  @keyframes valueCheckPulse {
+    0% { box-shadow: 0 0 0 0 rgba(59,130,246,0.45); background-color: rgba(239,246,255,0.8); border-color: rgba(59,130,246,0.8); }
+    50% { box-shadow: 0 0 0 3px rgba(239,68,68,0.45); background-color: rgba(254,242,242,0.85); border-color: rgba(239,68,68,0.9); }
+    100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.45); background-color: rgba(239,246,255,0.8); border-color: rgba(59,130,246,0.8); }
+  }
+  .value-check-alert {
+    animation: valueCheckPulse 1.2s ease-in-out infinite;
+    border-width: 2px !important;
+  }
+  `;
+
   return (
     <>
+      <style>{valueCheckStyles}</style>
       <section>
         <Card>
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -173,18 +251,29 @@ export default function OrderManagementView({
               const needsSync = Boolean(order.invoiceNeedsSync);
               const reasons = dirtyReasons[refKey] || [];
               const isDirty = (ordersDirty && dirtyRefs[refKey]) || invoiceEntry.dirty || needsSync;
+              const billedTotal = order.billed_total ?? order.billedTotal;
+              const sageTotal = order.sage_total_synced ?? order.sageTotalSynced;
+              const billedNum = billedTotal === null || billedTotal === undefined ? NaN : Number(billedTotal);
+              const sageNum = sageTotal === null || sageTotal === undefined ? NaN : Number(sageTotal);
+              const showReconcile =
+                Boolean(order.enteredInSage) &&
+                Number.isFinite(billedNum) &&
+                Number.isFinite(sageNum) &&
+                Math.abs(billedNum - sageNum) > 0.009;
+              const needsValueCheck = Boolean(order.valueCheckAlert);
+              const cardTone = needsValueCheck
+                ? "value-check-alert border-indigo-400"
+                : isDirty
+                ? `animate-pulse ${
+                    needsSync
+                      ? "border-red-500 bg-red-50 ring-2 ring-red-300"
+                      : "border-amber-500 bg-amber-50 ring-2 ring-amber-300"
+                  }`
+                : "border-indigo-100";
               return (
                 <Card
                   key={key}
-                  className={`${
-                    isDirty
-                      ? `animate-pulse ${
-                          needsSync
-                            ? "border-red-500 bg-red-50 ring-2 ring-red-300"
-                            : "border-amber-500 bg-amber-50 ring-2 ring-amber-300"
-                        }`
-                      : "border-indigo-100"
-                  }`}
+                  className={`${cardTone}`}
                 >
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                     <div>
@@ -222,6 +311,16 @@ export default function OrderManagementView({
                           {isSageTriggered ? "Ready for Sage" : "Send to Sage"}
                         </button>
                       )}
+                      {showReconcile && (
+                        <button
+                          type="button"
+                          onClick={() => onReconcileTotals?.(refKey)}
+                          className="px-3 py-1 rounded-full text-xs font-semibold border bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100"
+                          title="Adjust Sage tax to match billed total"
+                        >
+                          Reconcile totals
+                        </button>
+                      )}
                     </div>
                   </div>
                   <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
@@ -232,6 +331,7 @@ export default function OrderManagementView({
                       { label: "Value Check", field: "totalVerified" },
                     ].map((meta) => {
                       const checked = Boolean(order[meta.field]);
+                      const billedEntry = getBilledEntry(refKey, order.billed_total ?? "");
                       return (
                         <label
                           key={meta.field}
@@ -250,6 +350,36 @@ export default function OrderManagementView({
                             }}
                           />
                           <span className="text-slate-700 text-sm">{meta.label}</span>
+                          {meta.field === "totalVerified" && (
+                            <div className="flex items-center gap-2 ml-auto">
+                              <input
+                                type="text"
+                                value={billedEntry.value}
+                                readOnly={!billedEntry.editing}
+                                disabled={!billedEntry.editing}
+                                onChange={(e) => updateBilledDraft(refKey, e.target.value)}
+                                onBlur={() => {
+                                  const num = parseFloat(billedEntry.value);
+                                  const normalized = Number.isFinite(num) ? num.toFixed(2) : "";
+                                  updateBilledDraft(refKey, normalized);
+                                  stopBilledEdit(refKey);
+                                }}
+                                placeholder="Billed total"
+                                className={`w-24 border rounded-lg px-2 py-1 text-xs ${
+                                  billedEntry.editing ? "bg-white" : "bg-slate-100"
+                                }`}
+                              />
+                              <button
+                                type="button"
+                                className="px-2 py-1 text-xs rounded-lg border bg-white text-slate-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                                disabled={billedEntry.editing}
+                                onClick={() => startBilledEdit(refKey, order.billed_total ?? "")}
+                                title="Edit billed total"
+                              >
+                                Edit
+                              </button>
+                            </div>
+                          )}
                         </label>
                       );
                     })}

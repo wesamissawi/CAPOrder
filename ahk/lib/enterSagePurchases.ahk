@@ -13,6 +13,7 @@ SetWinDelay, 0
 #Include %A_ScriptDir%\lib\JSON.ahk
 #Include %A_ScriptDir%\lib\capRules\rules.ahk
 #Include %A_ScriptDir%\lib\helpers.ahk
+#Include %A_ScriptDir%\lib\adjust_tax.ahk
 
 
 ; --- Helpers ---------------------------------------------------------------
@@ -275,6 +276,14 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
 
     Loop, % lineItems.MaxIndex() {
         idx := A_Index
+        extendedRaw := ""  ; reset per line
+
+        try extendedRaw := lineItems[idx].extended
+        msgLineInfo := "Line #" . idx
+        msgPartInfo := "Part: " . lineItems[idx].partLineCode . " " . lineItems[idx].partNumber
+        msgCostInfo := "Cost: " . lineItems[idx].costPrice
+        msgExtInfo  := "Extended field raw: " . extendedRaw
+        ; MsgBox, 64, Ext Debug, % msgLineInfo . "`n" . msgPartInfo . "`n" . msgCostInfo . "`n" . msgExtInfo
 
         ; your custom rule mapper: should return [type, description]
         resultList := ourRules(ruleSource
@@ -330,12 +339,7 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
 
             cost := lineItems[idx].costPrice + 0.0
             ; Capture extended values if present (safe defaults)
-            extendedRaw := ""
-            extendedVal := ""
-            try extendedRaw := lineItems[idx].extended
-            if (extendedRaw != "") {
-                try extendedVal := extendedRaw + 0.0
-            }
+            ; extendedRaw already set at loop start
 
             ; Price ladder
             if (cost < 21)
@@ -447,11 +451,13 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
         Sleep, 50
 
         if (extendedRaw != "") {
+            ; MsgBox, 64, Ext Debug, Using extendedRaw branch for line #%idx%`nextendedRaw: %extendedRaw%
             SendTab(3, 25)
             Send, %extendedRaw%
             Sleep, 50
             SendTab(1, 25)
         } else {
+            ; MsgBox, 64, Ext Debug, No extendedRaw for line #%idx%, taking fallback branch.
             SendTab(4, 25)
         }
     } ; end loop
@@ -463,15 +469,26 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
     ; inv_total := GetTextByClassRe(nowTitle, "i)^WindowsForms10\.STATIC\.app\.0\.", "i)^\d+(\.\d+)?$")
     inv_total := GetSageTotal(nowTitle, 15)
     Sleep, 200
+
+    billed_total := ""
+    if (parsedData.HasKey("billed_total"))
+        billed_total := parsedData.billed_total
+
+    if (inv_total != "" && billed_total != "") {
+        inv_num := inv_total + 0.0
+        billed_num := billed_total + 0.0
+        diff := Round(billed_num - inv_num, 2)
+        if (Abs(diff) >= 0.001 && Abs(diff) < 0.1) {
+            AdjustSageTax(diff)
+            inv_num := billed_num
+            inv_total := Format("{:.2f}", inv_num)
+        }
+    }
     ; class regex (prefix only, tail can change)
     ; text regex: 24 or 24.92 etc.
 
-    ; Get the bill tototal
-    ; MsgBox, %inv_total%
-
-    ; MsgBox, "Leave the script if you want to now"
-
     Send, !p
+    ;Exit, 7
     Sleep, 1000
 
     journal_entry := GetSageTxnNumber(10)
@@ -480,8 +497,8 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
         return false
     } else {
         journal_tax := journal_entry . "    $" . inv_total
-        ; Emit result to stdout for Electron to consume; do not touch orders.json here.
-        ; MsgBox, 64, AHK Result, Sending back:`n%journal_tax%
+        ; Emit result to stdout for Electron to consume; include Sage total for syncing.
+        FileAppend, SAGE_TOTAL:%inv_total%`n, *
         FileAppend, %journal_tax%`n, *
         Send {Enter}
         Sleep, 500

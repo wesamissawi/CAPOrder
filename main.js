@@ -77,6 +77,9 @@ const SAGE_AHK_SCRIPT = app.isPackaged
 const SAGE_INVOICE_SCRIPT = app.isPackaged
   ? path.join(process.resourcesPath, 'ahk', 'update_invoice.ahk')
   : path.join(__dirname, 'ahk', 'update_invoice.ahk');
+const SAGE_RECONCILE_SCRIPT = app.isPackaged
+  ? path.join(process.resourcesPath, 'ahk', 'reconcile_totals.ahk')
+  : path.join(__dirname, 'ahk', 'reconcile_totals.ahk');
 
 let dataFileOverride = null;
 let autoUpdaterInitialized = false;
@@ -796,6 +799,41 @@ function extractJournalLine(stdoutRaw) {
   return lastLine.replace(/^\[[^\]]*\]\s*/, "");
 }
 
+function extractSageTotal(stdoutRaw) {
+  const stdout = (stdoutRaw || "").toString();
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((ln) => (ln || "").trim())
+    .filter(Boolean);
+  let total = null;
+  for (const ln of lines) {
+    const match = ln.match(/^SAGE_TOTAL\s*:?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)/i);
+    if (match) {
+      const num = parseFloat(match[1]);
+      if (Number.isFinite(num)) {
+        total = num;
+      }
+    }
+  }
+  return total;
+}
+
+function extractReconcileApplied(stdoutRaw) {
+  const stdout = (stdoutRaw || "").toString();
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((ln) => (ln || "").trim())
+    .filter(Boolean);
+  for (const ln of lines) {
+    const match = ln.match(/^DELTA_APPLIED\s*:\s*([0-9.-]+)/i);
+    if (match) {
+      const num = parseFloat(match[1]);
+      return { applied: true, delta: Number.isFinite(num) ? num : null };
+    }
+  }
+  return { applied: false, delta: null };
+}
+
 function getVendorName(order) {
   if (!order) return "";
   return (
@@ -915,18 +953,125 @@ function runSagePurchase(order) {
     child.on('close', (code) => {
       const ok = code === 0;
       const parsedJournal = extractJournalLine(stdout);
+      const parsedTotal = extractSageTotal(stdout);
       console.log('[sage] AHK finished', {
         code,
         ok,
         stdout: stdout.trim(),
         stderr: stderr.trim(),
         parsedJournal,
+        parsedTotal,
       });
       console.log(ok ? '[sage] AHK process launch+run completed successfully' : '[sage] AHK process finished with errors', {
         code,
         ok,
       });
-      complete({ ok, code, stdout, stderr, journalEntry: parsedJournal });
+      complete({ ok, code, stdout, stderr, journalEntry: parsedJournal, sageTotal: parsedTotal });
+    });
+  });
+}
+
+function runSageReconcile(order, delta) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(SAGE_RECONCILE_SCRIPT)) {
+      console.error('[sage-reconcile] AHK script not found', { path: SAGE_RECONCILE_SCRIPT });
+      return resolve({
+        ok: false,
+        error: 'AHK script not found',
+        code: 'ahk-script-missing',
+        reason: 'ahk-script-missing',
+        path: SAGE_RECONCILE_SCRIPT,
+      });
+    }
+
+    const ordersFilePath = getOrdersFile();
+    const orderPath = writeTempOrder(order);
+    if (!orderPath) {
+      return resolve({ ok: false, error: 'Failed to write temp order file', code: 'temp-write-failed' });
+    }
+
+    const ahkExecutable = getAhkExePath();
+    const resolvedExecutable = ahkExecutable ? path.resolve(ahkExecutable) : '';
+    const ahkExists = Boolean(ahkExecutable) && fs.existsSync(ahkExecutable);
+
+    if (!ahkExecutable || !ahkExists) {
+      console.error('[sage-reconcile] AHK executable path missing or invalid', {
+        ahkExecutable,
+        resolvedExecutable,
+      });
+      return resolve({
+        ok: false,
+        code: ahkExecutable ? 'ahk-path-invalid' : 'ahk-path-not-set',
+        reason: ahkExecutable ? 'ahk-path-invalid' : 'ahk-path-not-set',
+        error: 'AutoHotkey executable path is not configured or not found.',
+      });
+    }
+
+    const ref = order?.sage_reference_synced || order?.sage_reference || order?.reference || "";
+    const args = [
+      SAGE_RECONCILE_SCRIPT,
+      orderPath,
+      ref,
+      typeof delta === 'number' && Number.isFinite(delta) ? delta.toFixed(2) : "",
+    ];
+
+    console.log('[sage-reconcile] preparing to spawn AHK', {
+      timestamp: new Date().toISOString(),
+      ordersFilePath,
+      tempOrderPath: orderPath,
+      ahkScriptPath: path.resolve(SAGE_RECONCILE_SCRIPT),
+      ahkExecutable,
+      resolvedAhkExecutable: resolvedExecutable,
+      spawnArgs: args,
+      spawnCommand: [resolvedExecutable, ...args].join(' '),
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let finished = false;
+    const complete = (payload) => {
+      if (finished) return;
+      finished = true;
+      resolve(payload);
+    };
+
+    const child = spawn(resolvedExecutable, args, { windowsHide: true });
+    console.log('[sage-reconcile] AHK spawn initiated', {
+      pid: child?.pid,
+      command: resolvedExecutable,
+      args,
+    });
+    child.on('spawn', () => {
+      console.log('[sage-reconcile] AHK process launched successfully', { pid: child.pid });
+    });
+    child.stdout.on('data', (d) => {
+      const chunk = d.toString();
+      stdout += chunk;
+      console.log('[sage-reconcile] AHK stdout chunk:', chunk.trim());
+    });
+    child.stderr.on('data', (d) => {
+      const chunk = d.toString();
+      stderr += chunk;
+      console.error('[sage-reconcile] AHK stderr chunk:', chunk.trim());
+    });
+    child.on('error', (err) => {
+      console.error('[sage-reconcile] spawn error', err);
+      complete({ ok: false, code: 'spawn-error', error: err, stdout, stderr });
+    });
+    child.on('close', (code) => {
+      const ok = code === 0;
+      const parsedJournal = extractJournalLine(stdout);
+      const parsedTotal = extractSageTotal(stdout);
+      console.log('[sage-reconcile] AHK finished', {
+        code,
+        ok,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        parsedJournal,
+        parsedTotal,
+      });
+      const applied = extractReconcileApplied(stdout);
+      complete({ ok, code, stdout, stderr, applied, journalEntry: parsedJournal, sageTotal: parsedTotal });
     });
   });
 }
@@ -942,6 +1087,7 @@ function applySageResult(refKey, res = {}, fallbackOrder = null) {
     extractJournalLine(res.stdout || "") ||
     (res.journalEntry || "").toString().trim() ||
     "";
+  const sageTotal = res.sageTotal;
   const nowIso = new Date().toISOString();
   const syncedRef = (fallbackOrder?.sage_reference ||
     fallbackOrder?.reference ||
@@ -958,6 +1104,14 @@ function applySageResult(refKey, res = {}, fallbackOrder = null) {
 
     changed = true;
     found = true;
+    const nextSageTotal = Number.isFinite(sageTotal) ? sageTotal : o.sage_total_synced;
+    const billedNum = Number.isFinite(o?.billed_total) ? o.billed_total : Number.isFinite(o?.billedTotal) ? o.billedTotal : null;
+    const diff =
+      Number.isFinite(billedNum) && Number.isFinite(nextSageTotal)
+        ? Math.abs(billedNum - nextSageTotal)
+        : null;
+    const verified = diff !== null && diff < 0.001;
+    const needsValueCheck = diff !== null && diff > 0.1;
     return {
       ...o,
       journalEntry: journalEntry || o.journalEntry || o.journal_entry || "",
@@ -966,8 +1120,11 @@ function applySageResult(refKey, res = {}, fallbackOrder = null) {
       invoiceSageUpdate: true,
       invoiceNeedsSync: false,
       sage_reference_synced: o?.sage_reference || o?.reference || "",
+      sage_total_synced: nextSageTotal,
       sage_trigger: false,
       sage_processed_at: nowIso,
+      totalVerified: verified ? true : o.totalVerified,
+      valueCheckAlert: needsValueCheck ? true : verified ? false : o.valueCheckAlert,
     };
   });
 
@@ -979,8 +1136,35 @@ function applySageResult(refKey, res = {}, fallbackOrder = null) {
       invoiceSageUpdate: true,
       invoiceNeedsSync: false,
       sage_reference_synced: syncedRef,
+      sage_total_synced: Number.isFinite(sageTotal) ? sageTotal : fallbackOrder.sage_total_synced,
       sage_trigger: false,
       sage_processed_at: nowIso,
+      totalVerified: (() => {
+        const billedNum = Number.isFinite(fallbackOrder?.billed_total)
+          ? fallbackOrder.billed_total
+          : Number.isFinite(fallbackOrder?.billedTotal)
+          ? fallbackOrder.billedTotal
+          : null;
+        const diff =
+          Number.isFinite(billedNum) && Number.isFinite(sageTotal)
+            ? Math.abs(billedNum - sageTotal)
+            : null;
+        return diff !== null && diff < 0.001 ? true : fallbackOrder.totalVerified;
+      })(),
+      valueCheckAlert: (() => {
+        const billedNum = Number.isFinite(fallbackOrder?.billed_total)
+          ? fallbackOrder.billed_total
+          : Number.isFinite(fallbackOrder?.billedTotal)
+          ? fallbackOrder.billedTotal
+          : null;
+        const diff =
+          Number.isFinite(billedNum) && Number.isFinite(sageTotal)
+            ? Math.abs(billedNum - sageTotal)
+            : null;
+        if (diff !== null && diff > 0.1) return true;
+        if (diff !== null && diff < 0.001) return false;
+        return fallbackOrder.valueCheckAlert;
+      })(),
     };
     const merged = { ...fallbackOrder, ...patch };
     updated.push(merged);
@@ -988,6 +1172,77 @@ function applySageResult(refKey, res = {}, fallbackOrder = null) {
   }
 
   if (changed) writeOrders(updated);
+}
+
+function applyReconcileResult(refKey, billedTotal, delta, fallbackOrder = null, sageTotalOverride = null, journalStr = "") {
+  const orders = readOrders();
+  const list = Array.isArray(orders) ? orders : [];
+  const key = (refKey || "").toString().trim().toUpperCase();
+  if (!key) return;
+  const nowIso = new Date().toISOString();
+  const billedNum = Number.isFinite(billedTotal) ? billedTotal : null;
+  let found = false;
+  const updated = list.map((o) => {
+    if (!o) return o;
+    if (!orderMatchesKey(o, key)) return o;
+    found = true;
+    const resolvedSageTotal = Number.isFinite(sageTotalOverride)
+      ? sageTotalOverride
+      : billedNum !== null
+      ? billedNum
+      : o.sage_total_synced;
+    const resolvedJournal = (journalStr || "").trim() || o.journalEntry || o.journal_entry || "";
+    const diff =
+      Number.isFinite(billedNum) && Number.isFinite(resolvedSageTotal)
+        ? Math.abs(billedNum - resolvedSageTotal)
+        : null;
+    const verified = diff !== null && diff < 0.001;
+    const needsValueCheck = diff !== null && diff > 0.1;
+    return {
+      ...o,
+      billed_total: billedNum !== null ? billedNum : o.billed_total,
+      billedTotal: billedNum !== null ? billedNum : o.billedTotal,
+      sage_total_synced: resolvedSageTotal,
+      sage_processed_at: nowIso,
+      invoiceNeedsSync: false,
+      sage_invoice_trigger: false,
+      reconciliation_delta: delta,
+      journalEntry: resolvedJournal,
+      journal_entry: resolvedJournal,
+      totalVerified: verified ? true : o.totalVerified,
+      valueCheckAlert: needsValueCheck ? true : verified ? false : o.valueCheckAlert,
+    };
+  });
+  if (!found && fallbackOrder) {
+    const resolvedSageTotal = Number.isFinite(sageTotalOverride)
+      ? sageTotalOverride
+      : billedNum !== null
+      ? billedNum
+      : fallbackOrder.sage_total_synced;
+    const resolvedJournal = (journalStr || "").trim() || fallbackOrder.journalEntry || fallbackOrder.journal_entry || "";
+    const diff =
+      Number.isFinite(billedNum) && Number.isFinite(resolvedSageTotal)
+        ? Math.abs(billedNum - resolvedSageTotal)
+        : null;
+    const verified = diff !== null && diff < 0.001;
+    const needsValueCheck = diff !== null && diff > 0.1;
+    const merged = {
+      ...fallbackOrder,
+      billed_total: billedNum !== null ? billedNum : fallbackOrder.billed_total,
+      billedTotal: billedNum !== null ? billedNum : fallbackOrder.billedTotal,
+      sage_total_synced: resolvedSageTotal,
+      sage_processed_at: nowIso,
+      invoiceNeedsSync: false,
+      sage_invoice_trigger: false,
+      reconciliation_delta: delta,
+      journalEntry: resolvedJournal,
+      journal_entry: resolvedJournal,
+      totalVerified: verified ? true : fallbackOrder.totalVerified,
+      valueCheckAlert: needsValueCheck ? true : verified ? false : fallbackOrder.valueCheckAlert,
+    };
+    updated.push(merged);
+  }
+  writeOrders(updated);
 }
 
 function applyInvoiceResult(refKey, res = {}, fallbackOrder = null) {
@@ -1590,6 +1845,68 @@ ipcMain.handle('orders:fetch-bestbuy', async () => {
   } catch (e) {
     console.error('[orders:fetch-bestbuy]', e);
     return { ok: false, error: e?.message || 'Failed to fetch BestBuy orders.' };
+  }
+});
+
+const orderMatchesKey = (order, targetKey) => {
+  if (!order || !targetKey) return false;
+  const candidates = [
+    order.sage_reference_synced,
+    order.sage_reference,
+    order.source_invoice,
+    order.reference,
+    order.__row,
+  ];
+  return candidates.some((val) => {
+    if (val === null || val === undefined) return false;
+    return String(val).trim().toUpperCase() === targetKey;
+  });
+};
+
+ipcMain.handle('orders:reconcile-totals', async (_event, refKeyRaw, providedOrder) => {
+  try {
+    const orders = readOrders();
+    const key = (refKeyRaw || "").toString().trim().toUpperCase();
+    if (!key) return { ok: false, error: 'Missing reference key.' };
+    const target = (orders || []).find((o) => orderMatchesKey(o, key));
+    const providedMatches = orderMatchesKey(providedOrder, key);
+    const mergedTarget = target
+      ? { ...target, ...(providedMatches ? providedOrder : {}) }
+      : providedMatches
+      ? providedOrder
+      : null;
+    if (!mergedTarget) return { ok: false, error: 'Order not found.' };
+
+    const billedRaw =
+      (providedMatches ? providedOrder?.billed_total ?? providedOrder?.billedTotal : undefined) ??
+      mergedTarget.billed_total ??
+      mergedTarget.billedTotal;
+    const sageRaw =
+      (providedMatches ? providedOrder?.sage_total_synced ?? providedOrder?.sageTotalSynced : undefined) ??
+      mergedTarget.sage_total_synced ??
+      mergedTarget.sageTotalSynced;
+    const billedNum = billedRaw === undefined || billedRaw === null ? NaN : Number(billedRaw);
+    const sageNum = sageRaw === undefined || sageRaw === null ? NaN : Number(sageRaw);
+    if (!Number.isFinite(billedNum) || !Number.isFinite(sageNum)) {
+      return { ok: false, error: 'Missing billed_total or sage_total_synced.' };
+    }
+    const delta = Number((billedNum - sageNum).toFixed(2));
+    if (Math.abs(delta) < 0.001) {
+      return { ok: false, error: 'Totals already match.' };
+    }
+
+    const res = await runSageReconcile(mergedTarget, delta);
+    if (!res?.ok) {
+      return { ok: false, error: res?.error || 'Reconcile failed', stderr: res?.stderr, stdout: res?.stdout };
+    }
+    if (!res?.applied?.applied) {
+      return { ok: false, error: 'Reconcile did not complete in AHK.', stdout: res?.stdout, stderr: res?.stderr };
+    }
+    applyReconcileResult(key, billedNum, delta, mergedTarget, res.sageTotal, res.journalEntry);
+    return { ok: true, delta, sageTotal: res.sageTotal, journalEntry: res.journalEntry };
+  } catch (e) {
+    console.error('[orders:reconcile-totals]', e);
+    return { ok: false, error: e?.message || 'Failed to reconcile totals.' };
   }
 });
 

@@ -1399,6 +1399,8 @@ export default function App() {
     if (field === "inStore") {
       // Marking as arrived should also mark as picked up.
       updateOrderByKey(referenceKey, { inStore: checked, pickedUp: checked || false });
+    } else if (field === "totalVerified" && checked) {
+      updateOrderByKey(referenceKey, { [field]: checked, valueCheckAlert: false });
     } else {
       updateOrderByKey(referenceKey, { [field]: checked });
     }
@@ -1419,6 +1421,26 @@ export default function App() {
   }
   function handleOrderSageTrigger(referenceKey) {
     updateOrderByKey(referenceKey, { sage_trigger: true });
+  }
+
+  async function handleReconcileTotals(referenceKey) {
+    try {
+      setOrdersError(null);
+      const normalizedKey = String(referenceKey || "").trim().toUpperCase();
+      const currentOrder = (orders || []).find((o) => {
+        if (!o) return false;
+        const cand = (o.sage_reference || o.reference || o.__row || "").toString().trim().toUpperCase();
+        return cand && cand === normalizedKey;
+      });
+      const res = await api?.reconcileTotals?.(referenceKey, currentOrder);
+      if (!res?.ok) {
+        setOrdersError(res?.error || "Failed to reconcile totals.");
+        return;
+      }
+      await loadOrders();
+    } catch (e) {
+      setOrdersError(e?.message || "Failed to reconcile totals.");
+    }
   }
 
   function handleSageIntegrationToggleClick() {
@@ -1925,6 +1947,7 @@ export default function App() {
             handleOrderFieldChange={handleOrderFieldChange}
             onMarkForSage={handleOrderSageTrigger}
             onMarkComplete={handleMarkComplete}
+            onReconcileTotals={handleReconcileTotals}
             hasSearch={hasSearch}
           />
         ) : currentView === "archive-search" ? (

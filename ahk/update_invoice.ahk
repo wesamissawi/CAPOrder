@@ -91,6 +91,7 @@ Sleep, 100
 Send, %oldRef%
 SendTab(1, 200)
 Send, {Enter}
+Sleep, 1000
 Send, ^a
 
 ; Back to Edit1 and move to invoice field for new reference

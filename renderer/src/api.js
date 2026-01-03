@@ -25,6 +25,7 @@ const fallbackApi = {
   fetchWorldOrders: async () => ({ ok: false }),
   fetchCbkOrders: async () => ({ ok: false }),
   fetchBestBuyOrders: async () => ({ ok: false }),
+  reconcileTotals: async () => ({ ok: false }),
   addOrdersToOutstanding: async () => ({ ok: false }),
   archiveBubble: async () => ({ ok: false }),
   searchArchive: async () => ({ ok: false, results: [] }),
