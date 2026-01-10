@@ -5,6 +5,17 @@ const path = require('path');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { spawn } = require('child_process');
+const { createItemsDomain } = require('./main/domain/items.domain');
+const { normalizeOrderRef, orderMatchesKey, getVendorName } = require('./main/domain/orders.domain');
+const { extractJournalLine, extractSageTotal, extractReconcileApplied, createSageDomain } = require('./main/domain/sage.domain');
+const { searchArchiveEntries } = require('./main/domain/archive.domain');
+const { normalizeSharedBubblePayload } = require('./main/domain/sharedBubble.domain');
+const { createItemsService } = require('./main/services/items.service');
+const { createWatchersService } = require('./main/services/watchers.service');
+const { createVendorOrdersService } = require('./main/services/vendorOrders.service');
+const { createSageService } = require('./main/services/sage.service');
+const { createAppConfigService } = require('./main/services/appConfig.service');
+const { createUpdatesService } = require('./main/services/updates.service');
 
 // Point Playwright to the packaged browsers when running in production
 if (app.isPackaged) {
@@ -20,6 +31,16 @@ const { getCbkOrders } = require('./src/scrapers/cbkScraper');
 const isDev = !app.isPackaged;
 
 const LOCK_DURATION_MS = 20000; // 20 seconds
+
+const itemsDomain = createItemsDomain({ randomUUID });
+const {
+  toMoneyString,
+  computeAllocatedFor,
+  toDDMMYYYY,
+  makeOutstandingFromLine,
+  splitItemsByQueue,
+  cleanExpiredLocks,
+} = itemsDomain;
 
 
 // ---- path + config helpers ----
@@ -82,7 +103,6 @@ const SAGE_RECONCILE_SCRIPT = app.isPackaged
   : path.join(__dirname, 'ahk', 'reconcile_totals.ahk');
 
 let dataFileOverride = null;
-let autoUpdaterInitialized = false;
 
 function normalizeAppConfig(raw = {}) {
   const sharedDataDir = typeof raw.sharedDataDir === 'string' ? raw.sharedDataDir.trim() : '';
@@ -197,44 +217,6 @@ function validateWritable(targetDir) {
     return { ok: false, error: e?.message || 'Not writable' };
   }
 }
-function migrateBusinessFilesToShared(mode = 'copy') {
-  const { sharedDir, sharedConfigured } = getSharedDirInfo();
-  if (!sharedConfigured || !sharedDir || sharedDir === INSTANCE_DIR) {
-    return { ok: false, error: 'Shared folder not configured.' };
-  }
-  ensureDir(sharedDir);
-
-  const results = [];
-  BUSINESS_FILE_LIST.forEach((name) => {
-    const src = path.join(INSTANCE_DIR, name);
-    const dest = path.join(sharedDir, name);
-    if (!fs.existsSync(src)) {
-      results.push({ name, action: 'skip', reason: 'missing source' });
-      return;
-    }
-    if (src === dest) {
-      results.push({ name, action: 'skip', reason: 'already in shared' });
-      return;
-    }
-    if (fs.existsSync(dest)) {
-      results.push({ name, action: 'skip', reason: 'dest exists' });
-      return;
-    }
-    try {
-      ensureDir(path.dirname(dest));
-      if (mode === 'move') {
-        fs.renameSync(src, dest);
-        results.push({ name, action: 'moved', from: src, to: dest });
-      } else {
-        fs.copyFileSync(src, dest);
-        results.push({ name, action: 'copied', from: src, to: dest });
-      }
-    } catch (e) {
-      results.push({ name, action: 'error', error: e?.message || 'failed' });
-    }
-  });
-  return { ok: true, sharedDir, results };
-}
 function backupFile(srcPath, suffix = '.bak') {
   try {
     if (!fs.existsSync(srcPath)) return;
@@ -247,75 +229,11 @@ function backupFile(srcPath, suffix = '.bak') {
   }
 }
 
-function findInstanceBusinessFiles() {
-  return BUSINESS_FILE_LIST
-    .map((name) => {
-      const filePath = path.join(INSTANCE_DIR, name);
-      return fs.existsSync(filePath) ? { name, path: filePath } : null;
-    })
-    .filter(Boolean);
-}
-
-async function promptForSharedFolderIfMissing() {
-  const { sharedConfigured } = getSharedDirInfo();
-  if (sharedConfigured) return null;
-  const res = await dialog.showMessageBox({
-    type: 'question',
-    buttons: ['Choose folder', 'Skip for now'],
-    defaultId: 0,
-    cancelId: 1,
-    message: 'Select shared folder for business data',
-    detail: 'orders.json and all queue files must live in a shared/network folder so every workstation stays in sync.',
-  });
-  if (res.response !== 0) return { prompted: true, chosen: false };
-  const pick = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
-  if (!pick.canceled && pick.filePaths?.[0]) {
-    const chosen = pick.filePaths[0];
-    writeAppConfig({ sharedDataDir: chosen });
-    return { prompted: true, chosen: true, path: chosen };
-  }
-  return { prompted: true, chosen: false, canceled: true };
-}
-
-async function maybeOfferMigrationToShared() {
-  const { sharedDir, sharedConfigured } = getSharedDirInfo();
-  if (!sharedConfigured || !sharedDir || sharedDir === INSTANCE_DIR) {
-    return { skipped: true, reason: 'not-configured' };
-  }
-  const candidates = findInstanceBusinessFiles().filter((entry) => entry.path !== path.join(sharedDir, entry.name));
-  if (!candidates.length) return { skipped: true, reason: 'no-instance-files' };
-
-  const res = await dialog.showMessageBox({
-    type: 'question',
-    buttons: ['Copy to shared', 'Move to shared', 'Skip'],
-    defaultId: 0,
-    cancelId: 2,
-    message: 'Move business data to shared folder?',
-    detail: `Found business files in the instance folder (${INSTANCE_DIR}). Copy or move them to the shared folder so all machines share orders and queue data.\nShared folder: ${sharedDir}`,
-  });
-  if (res.response === 0 || res.response === 1) {
-    const mode = res.response === 1 ? 'move' : 'copy';
-    return migrateBusinessFilesToShared(mode);
-  }
-  return { skipped: true, reason: 'user-skip' };
-}
-
-
-
 // ---- log preload path exists ----
 console.log('[main] preload path =', PRELOAD, 'exists?', fs.existsSync(PRELOAD));
 
 // ---- data helpers ----
-let itemsWatchers = [];
-let ordersWatcher = null;
 let sageIntegrationActive = false;
-let sageProcessing = false;
-let sagePendingRun = false;
-const sageProcessingRefs = new Set();
-let invoiceProcessing = false;
-let invoicePendingRun = false;
-const invoiceProcessingRefs = new Set();
-let bubbleSharedWatcher = null;
 
 function readConfig() {
   try { if (fs.existsSync(INSTANCE_PATHS.windowConfig)) return JSON.parse(fs.readFileSync(INSTANCE_PATHS.windowConfig, 'utf-8')); } catch {}
@@ -424,75 +342,14 @@ function readItems() {
   ];
 }
 
-function readAllQueueItems() {
-  const queues = ['OUTSTANDING', 'SAGE_AR', 'CASH_SALE'];
-  const byQueue = {};
-  queues.forEach((queue) => {
-    const file = getQueueFile(queue);
-    byQueue[queue] = readItemsAt(file);
-  });
-  return byQueue;
-}
-function splitItemsByQueue(items) {
-  const buckets = {
-    OUTSTANDING: [],
-    SAGE_AR: [],
-    CASH_SALE: [],
-  };
-  (items || []).forEach((it) => {
-    const queue = it?.accountingPath || 'OUTSTANDING';
-    if (queue === 'SAGE_AR') buckets.SAGE_AR.push(it);
-    else if (queue === 'CASH_SALE') buckets.CASH_SALE.push(it);
-    else buckets.OUTSTANDING.push(it);
-  });
-  return buckets;
-}
-function writeItems(items) {
-  const queues = ['OUTSTANDING', 'SAGE_AR', 'CASH_SALE'];
-
-  // 1) Read current state of all queues
-  const currentByQueue = readAllQueueItems();
-
-  // 2) Build uid -> item map from current items
-  const map = new Map();
-  queues.forEach((queue) => {
-    (currentByQueue[queue] || []).forEach((it) => {
-      if (!it) return;
-      const uid = it.uid || randomUUID();
-      map.set(uid, { ...it, uid });
-    });
-  });
-
-  // 3) Apply incoming items (overwrite by uid)
-  const incomingUids = new Set();
-  (items || []).forEach((it) => {
-    if (!it) return;
-    const uid = it.uid || randomUUID();
-    incomingUids.add(uid);
-    map.set(uid, { ...it, uid });
-  });
-
-  // 3b) Remove items that are no longer present (honor deletions)
-  Array.from(map.keys()).forEach((uid) => {
-    if (!incomingUids.has(uid)) {
-      map.delete(uid);
-    }
-  });
-
-  // 4) Split merged list back into queues
-  const mergedList = Array.from(map.values());
-  const buckets = splitItemsByQueue(mergedList);
-
-  // 5) Atomically write each queue file if changed
-  queues.forEach((queue) => {
-    const file = getQueueFile(queue);
-    const current = currentByQueue[queue] || [];
-    const next = buckets[queue];
-    const a = JSON.stringify(current ?? []);
-    const b = JSON.stringify(next ?? []);
-    if (a !== b) writeItemsAt(file, next);
-  });
-}
+const itemsService = createItemsService({
+  getQueueFile,
+  readItemsAt,
+  writeItemsAt,
+  splitItemsByQueue,
+  randomUUID,
+});
+const { readAllQueueItems, writeItems } = itemsService;
 
 function getOrdersFile() {
   const resolved = resolveBusinessPaths();
@@ -516,9 +373,50 @@ function writeOrdersAt(file, orders) {
 function writeOrders(orders) {
   return writeOrdersAt(getOrdersFile(), orders);
 }
+
+const sageDomain = createSageDomain({ readOrders, writeOrders, orderMatchesKey });
+const { applySageResult, applyReconcileResult, applyInvoiceResult } = sageDomain;
+
+const vendorOrdersService = createVendorOrdersService({
+  ensureDir,
+  VENDOR_PATHS,
+  readOrders,
+  writeOrders,
+  getOrdersFile,
+  loadConfig,
+  getWorldOrders,
+  getTransbecOrders,
+  getProforceOrders,
+  getCbkOrders,
+  getBestBuyOrders,
+});
+const {
+  fetchWorldOrders,
+  fetchTransbecOrders,
+  fetchProforceOrders,
+  fetchCbkOrders,
+  fetchBestBuyOrders,
+} = vendorOrdersService;
+
 function ensureDir(dirPath) {
   try { fs.mkdirSync(dirPath, { recursive: true }); } catch {}
 }
+
+const appConfigService = createAppConfigService({
+  fs,
+  dialog,
+  path,
+  INSTANCE_DIR,
+  BUSINESS_FILE_LIST,
+  getSharedDirInfo,
+  ensureDir,
+  writeAppConfig,
+});
+const {
+  promptForSharedFolderIfMissing,
+  maybeOfferMigrationToShared,
+  migrateBusinessFilesToShared,
+} = appConfigService;
 
 function writeJsonAtomic(filePath, jsonString) {
   const dir = path.dirname(filePath);
@@ -613,235 +511,7 @@ function writeArchivedEntries(entries) {
   writeJsonAtomic(file, JSON.stringify(entries ?? [], null, 2));
 }
 
-function toMoneyString(val) {
-  if (val === null || val === undefined || val === '') return '';
-  const normalized = String(val).replace(/[^\d.-]/g, '').trim();
-  if (!normalized) return '';
-  const num = Number(normalized);
-  if (Number.isFinite(num)) return num.toFixed(2);
-  return normalized;
-}
 
-function computeAllocatedFor(val) {
-  const normalized = String(val ?? '').replace(/[^\d.-]/g, '').trim();
-  const num = Number(normalized);
-  if (!Number.isFinite(num)) return '';
-  let out = num;
-  if (num > 300) out = num + 100;
-  else if (num > 200) out = num + 70;
-  else if (num > 100) out = num + 50;
-  else if (num > 70) out = num + 40;
-  else if (num > 50) out = num + 30;
-  else if (num > 30) out = num + 20;
-  else if (num > 10) out = num * 1.3;
-  else if (num > 5) out = num + 5;
-  else out = num * 2;
-  return out.toFixed(2);
-}
-
-function toDDMMYYYY(order) {
-  // Prefer ISO orderDate
-  if (order?.orderDate) {
-    const d = new Date(order.orderDate);
-    if (!Number.isNaN(d.getTime())) {
-      const dd = String(d.getDate()).padStart(2, '0');
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const yyyy = d.getFullYear();
-      return `${dd}${mm}${yyyy}`;
-    }
-  }
-  // Fallback: sageDate (DDMMYY)
-  const s = String(order?.sageDate || '').trim();
-  if (s.length === 6) {
-    return `${s.slice(0, 2)}${s.slice(2, 4)}20${s.slice(4, 6)}`;
-  }
-  return '';
-}
-
-function makeOutstandingFromLine(order, line) {
-  const nowIso = new Date().toISOString();
-  const itemcode = `${line?.partLineCode || ''} ${line?.partNumber || ''}`.trim() || (line?.partNumber || line?.partLineCode || 'ITEM');
-  const costVal = line?.costPriceValue ?? line?.costPrice ?? line?.extendedValue ?? line?.extended;
-  const qty = Number(line?.quantity ?? 1) || 1;
-  const inv = (order?.source_invoice || order?.invoiceNum || '').trim();
-  return {
-    uid: randomUUID(),
-    accountingPath: 'OUTSTANDING',
-    allocated_for: computeAllocatedFor(costVal),
-    allocated_to: 'New Stock',
-    cost: toMoneyString(costVal),
-    date: toDDMMYYYY(order),
-    invoice_num: '',
-    'invoiced date': '',
-    'invoiced status': '',
-    itemcode,
-    notes1: line?.partDescription || '',
-    notes2: '',
-    source_inv: inv || order?.source || 'world',
-    warehouse: order?.warehouse || order?.seller || '',
-    last_moved_at: nowIso,
-    quantity: qty,
-    reference_num: order?.reference || '',
-    sold_date: '',
-    sold_status: '',
-  };
-}
-
-function startWatching(win) {
-  const files = [
-    getQueueFile('OUTSTANDING'),
-    getQueueFile('SAGE_AR'),
-    getQueueFile('CASH_SALE'),
-  ];
-  itemsWatchers.forEach((w) => {
-    try { w.close(); } catch {}
-  });
-  itemsWatchers = [];
-  files.forEach((file) => {
-    ensureDataFileAt(file);
-    const w = fs.watch(file, { persistent: false }, () => {
-      const arr = readItems();
-      if (win && !win.isDestroyed()) {
-        win.webContents.send('items:updated', arr);
-        console.log('[main] watch -> items:updated', arr.length);
-      }
-    });
-    itemsWatchers.push(w);
-  });
-}
-
-function startBubbleSharedWatching(win) {
-  try { if (bubbleSharedWatcher) bubbleSharedWatcher.close(); } catch {}
-  const target = ensureSharedBubbleFile();
-  bubbleSharedWatcher = fs.watch(target, { persistent: false }, () => {
-    const data = readSharedBubbleData();
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('bubble-shared:updated', data);
-      console.log('[main] watch -> bubble-shared:updated');
-    }
-  });
-}
-
-function startOrdersWatching(win) {
-  const file = getOrdersFile();
-  try { if (ordersWatcher) ordersWatcher.close(); } catch {}
-  ensureDataFileAt(file);
-  ordersWatcher = fs.watch(file, { persistent: false }, () => {
-    const arr = readOrders();
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('orders:updated', arr);
-      console.log('[main] watch -> orders:updated', Array.isArray(arr) ? arr.length : 0);
-    }
-    if (sageIntegrationActive)
-      scheduleSageProcessing();
-  });
-}
-
-function stopOrdersWatching() {
-  try { if (ordersWatcher) ordersWatcher.close(); } catch {}
-  ordersWatcher = null;
-}
-
-function sendUpdateStatus(payload = {}) {
-  try {
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('updates:status', { ...payload, timestamp: new Date().toISOString() });
-    }
-  } catch (e) {
-    console.error('[updates] failed to send status', e);
-  }
-}
-
-function setupAutoUpdater() {
-  if (autoUpdaterInitialized) return;
-  autoUpdaterInitialized = true;
-  if (!app.isPackaged) return;
-
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = false;
-
-  autoUpdater.on('checking-for-update', () => sendUpdateStatus({ status: 'checking' }));
-  autoUpdater.on('update-available', (info) =>
-    sendUpdateStatus({ status: 'update-available', version: info?.version || info?.releaseName })
-  );
-  autoUpdater.on('update-not-available', (info) =>
-    sendUpdateStatus({ status: 'update-not-available', version: info?.version || info?.releaseName })
-  );
-  autoUpdater.on('download-progress', (progress) =>
-    sendUpdateStatus({ status: 'downloading', percent: Math.round(progress?.percent ?? 0) })
-  );
-  autoUpdater.on('update-downloaded', (info) =>
-    sendUpdateStatus({
-      status: 'downloaded',
-      version: info?.version || info?.releaseName,
-      releaseName: info?.releaseName,
-    })
-  );
-  autoUpdater.on('error', (err) =>
-    sendUpdateStatus({ status: 'error', error: err?.message || 'Update error' })
-  );
-}
-
-function normalizeOrderRef(order) {
-  if (!order) return "";
-  const ref = order.sage_reference || order.reference || order.__row || "";
-  return String(ref || "").trim().toUpperCase();
-}
-
-function extractJournalLine(stdoutRaw) {
-  const stdout = (stdoutRaw || "").toString();
-  const lines = stdout
-    .split(/\r?\n/)
-    .map((ln) => (ln || "").trim())
-    .filter(Boolean);
-  if (!lines.length) return "";
-  const lastLine = lines[lines.length - 1];
-  return lastLine.replace(/^\[[^\]]*\]\s*/, "");
-}
-
-function extractSageTotal(stdoutRaw) {
-  const stdout = (stdoutRaw || "").toString();
-  const lines = stdout
-    .split(/\r?\n/)
-    .map((ln) => (ln || "").trim())
-    .filter(Boolean);
-  let total = null;
-  for (const ln of lines) {
-    const match = ln.match(/^SAGE_TOTAL\s*:?\s*\$?\s*([0-9]+(?:\.[0-9]+)?)/i);
-    if (match) {
-      const num = parseFloat(match[1]);
-      if (Number.isFinite(num)) {
-        total = num;
-      }
-    }
-  }
-  return total;
-}
-
-function extractReconcileApplied(stdoutRaw) {
-  const stdout = (stdoutRaw || "").toString();
-  const lines = stdout
-    .split(/\r?\n/)
-    .map((ln) => (ln || "").trim())
-    .filter(Boolean);
-  for (const ln of lines) {
-    const match = ln.match(/^DELTA_APPLIED\s*:\s*([0-9.-]+)/i);
-    if (match) {
-      const num = parseFloat(match[1]);
-      return { applied: true, delta: Number.isFinite(num) ? num : null };
-    }
-  }
-  return { applied: false, delta: null };
-}
-
-function getVendorName(order) {
-  if (!order) return "";
-  return (
-    (order.sage_source || "").trim() ||
-    (order.warehouse || "").trim() ||
-    (order.seller || "").trim()
-  );
-}
 
 function writeTempOrder(order) {
   try {
@@ -853,597 +523,75 @@ function writeTempOrder(order) {
   }
 }
 
-function runSagePurchase(order) {
-  return new Promise((resolve) => {
-    if (!fs.existsSync(SAGE_AHK_SCRIPT)) {
-      console.error('[sage] AHK script not found', { path: SAGE_AHK_SCRIPT });
-      return resolve({
-        ok: false,
-        error: 'AHK script not found',
-        code: 'ahk-script-missing',
-        reason: 'ahk-script-missing',
-        path: SAGE_AHK_SCRIPT,
-      });
-    }
-
-    const ordersFilePath = getOrdersFile();
-    backupFile(ordersFilePath, '.pre-sage.bak');
-
-    const orderPath = writeTempOrder(order);
-    if (!orderPath) {
-      return resolve({ ok: false, error: 'Failed to write temp order file', code: 'temp-write-failed' });
-    }
-
-    const ahkExecutable = getAhkExePath();
-    const resolvedExecutable = ahkExecutable ? path.resolve(ahkExecutable) : '';
-    const ahkExists = Boolean(ahkExecutable) && fs.existsSync(ahkExecutable);
-
-    if (!ahkExecutable || !ahkExists) {
-      console.error('[sage] AHK executable path missing or invalid', {
-        ahkExecutable,
-        resolvedExecutable,
-      });
-      return resolve({
-        ok: false,
-        code: ahkExecutable ? 'ahk-path-invalid' : 'ahk-path-not-set',
-        reason: ahkExecutable ? 'ahk-path-invalid' : 'ahk-path-not-set',
-        error: 'AutoHotkey executable path is not configured or not found.',
-      });
-    }
-
-    const args = [
-      SAGE_AHK_SCRIPT,
-      orderPath,
-      order?.sage_reference || order?.reference || "",
-      getVendorName(order) || "",
-      ordersFilePath,
-    ];
-
-    console.log('[sage] preparing to spawn AHK', {
-      timestamp: new Date().toISOString(),
-      appIsPackaged: app.isPackaged,
-      ordersFilePath,
-      tempOrderPath: orderPath,
-      ahkScriptPath: path.resolve(SAGE_AHK_SCRIPT),
-      ahkExecutable,
-      resolvedAhkExecutable: resolvedExecutable,
-      spawnArgs: args,
-      spawnCommand: [resolvedExecutable, ...args].join(' '),
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let finished = false;
-
-    const complete = (payload) => {
-      if (finished) return;
-      finished = true;
-      resolve(payload);
-    };
-
-    const child = spawn(resolvedExecutable, args, { windowsHide: true });
-    console.log('[sage] AHK spawn initiated', {
-      pid: child?.pid,
-      command: resolvedExecutable,
-      args,
-    });
-    child.on('spawn', () => {
-      console.log('[sage] AHK process launched successfully', { pid: child.pid });
-    });
-    child.stdout.on('data', (d) => {
-      const chunk = d.toString();
-      stdout += chunk;
-      console.log('[sage] AHK stdout chunk:', chunk.trim());
-    });
-    child.stderr.on('data', (d) => {
-      const chunk = d.toString();
-      stderr += chunk;
-      console.error('[sage] AHK stderr chunk:', chunk.trim());
-    });
-    child.on('error', (err) => {
-      console.error('[sage] spawn error', err);
-      console.error('[sage] AHK process failed to launch', {
-        error: err,
-        command: resolvedExecutable,
-        args,
-        ahkExecutable,
-      });
-      complete({ ok: false, code: 'spawn-error', error: err, stdout, stderr });
-    });
-    child.on('close', (code) => {
-      const ok = code === 0;
-      const parsedJournal = extractJournalLine(stdout);
-      const parsedTotal = extractSageTotal(stdout);
-      console.log('[sage] AHK finished', {
-        code,
-        ok,
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-        parsedJournal,
-        parsedTotal,
-      });
-      console.log(ok ? '[sage] AHK process launch+run completed successfully' : '[sage] AHK process finished with errors', {
-        code,
-        ok,
-      });
-      complete({ ok, code, stdout, stderr, journalEntry: parsedJournal, sageTotal: parsedTotal });
-    });
-  });
-}
-
-function runSageReconcile(order, delta) {
-  return new Promise((resolve) => {
-    if (!fs.existsSync(SAGE_RECONCILE_SCRIPT)) {
-      console.error('[sage-reconcile] AHK script not found', { path: SAGE_RECONCILE_SCRIPT });
-      return resolve({
-        ok: false,
-        error: 'AHK script not found',
-        code: 'ahk-script-missing',
-        reason: 'ahk-script-missing',
-        path: SAGE_RECONCILE_SCRIPT,
-      });
-    }
-
-    const ordersFilePath = getOrdersFile();
-    const orderPath = writeTempOrder(order);
-    if (!orderPath) {
-      return resolve({ ok: false, error: 'Failed to write temp order file', code: 'temp-write-failed' });
-    }
-
-    const ahkExecutable = getAhkExePath();
-    const resolvedExecutable = ahkExecutable ? path.resolve(ahkExecutable) : '';
-    const ahkExists = Boolean(ahkExecutable) && fs.existsSync(ahkExecutable);
-
-    if (!ahkExecutable || !ahkExists) {
-      console.error('[sage-reconcile] AHK executable path missing or invalid', {
-        ahkExecutable,
-        resolvedExecutable,
-      });
-      return resolve({
-        ok: false,
-        code: ahkExecutable ? 'ahk-path-invalid' : 'ahk-path-not-set',
-        reason: ahkExecutable ? 'ahk-path-invalid' : 'ahk-path-not-set',
-        error: 'AutoHotkey executable path is not configured or not found.',
-      });
-    }
-
-    const ref = order?.sage_reference_synced || order?.sage_reference || order?.reference || "";
-    const args = [
-      SAGE_RECONCILE_SCRIPT,
-      orderPath,
-      ref,
-      typeof delta === 'number' && Number.isFinite(delta) ? delta.toFixed(2) : "",
-    ];
-
-    console.log('[sage-reconcile] preparing to spawn AHK', {
-      timestamp: new Date().toISOString(),
-      ordersFilePath,
-      tempOrderPath: orderPath,
-      ahkScriptPath: path.resolve(SAGE_RECONCILE_SCRIPT),
-      ahkExecutable,
-      resolvedAhkExecutable: resolvedExecutable,
-      spawnArgs: args,
-      spawnCommand: [resolvedExecutable, ...args].join(' '),
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let finished = false;
-    const complete = (payload) => {
-      if (finished) return;
-      finished = true;
-      resolve(payload);
-    };
-
-    const child = spawn(resolvedExecutable, args, { windowsHide: true });
-    console.log('[sage-reconcile] AHK spawn initiated', {
-      pid: child?.pid,
-      command: resolvedExecutable,
-      args,
-    });
-    child.on('spawn', () => {
-      console.log('[sage-reconcile] AHK process launched successfully', { pid: child.pid });
-    });
-    child.stdout.on('data', (d) => {
-      const chunk = d.toString();
-      stdout += chunk;
-      console.log('[sage-reconcile] AHK stdout chunk:', chunk.trim());
-    });
-    child.stderr.on('data', (d) => {
-      const chunk = d.toString();
-      stderr += chunk;
-      console.error('[sage-reconcile] AHK stderr chunk:', chunk.trim());
-    });
-    child.on('error', (err) => {
-      console.error('[sage-reconcile] spawn error', err);
-      complete({ ok: false, code: 'spawn-error', error: err, stdout, stderr });
-    });
-    child.on('close', (code) => {
-      const ok = code === 0;
-      const parsedJournal = extractJournalLine(stdout);
-      const parsedTotal = extractSageTotal(stdout);
-      console.log('[sage-reconcile] AHK finished', {
-        code,
-        ok,
-        stdout: stdout.trim(),
-        stderr: stderr.trim(),
-        parsedJournal,
-        parsedTotal,
-      });
-      const applied = extractReconcileApplied(stdout);
-      complete({ ok, code, stdout, stderr, applied, journalEntry: parsedJournal, sageTotal: parsedTotal });
-    });
-  });
-}
-
-function applySageResult(refKey, res = {}, fallbackOrder = null) {
-  const orders = readOrders();
-  const list = Array.isArray(orders) ? orders : [];
-
-  const key = (refKey || "").toString().trim().toUpperCase();
-  if (!key) return;
-
-  const journalEntry =
-    extractJournalLine(res.stdout || "") ||
-    (res.journalEntry || "").toString().trim() ||
-    "";
-  const sageTotal = res.sageTotal;
-  const nowIso = new Date().toISOString();
-  const syncedRef = (fallbackOrder?.sage_reference ||
-    fallbackOrder?.reference ||
-    fallbackOrder?.__row ||
-    refKey ||
-    "").toString();
-
-  let changed = false;
-  let found = false;
-  const updated = list.map((o) => {
-    if (!o) return o;
-    const cand = (o.sage_reference || o.reference || o.__row || "").toString().trim().toUpperCase();
-    if (!cand || cand !== key) return o;
-
-    changed = true;
-    found = true;
-    const nextSageTotal = Number.isFinite(sageTotal) ? sageTotal : o.sage_total_synced;
-    const billedNum = Number.isFinite(o?.billed_total) ? o.billed_total : Number.isFinite(o?.billedTotal) ? o.billedTotal : null;
-    const diff =
-      Number.isFinite(billedNum) && Number.isFinite(nextSageTotal)
-        ? Math.abs(billedNum - nextSageTotal)
-        : null;
-    const verified = diff !== null && diff < 0.001;
-    const needsValueCheck = diff !== null && diff > 0.1;
-    return {
-      ...o,
-      journalEntry: journalEntry || o.journalEntry || o.journal_entry || "",
-      journal_entry: journalEntry || o.journal_entry || o.journalEntry || "",
-      enteredInSage: true,
-      invoiceSageUpdate: true,
-      invoiceNeedsSync: false,
-      sage_reference_synced: o?.sage_reference || o?.reference || "",
-      sage_total_synced: nextSageTotal,
-      sage_trigger: false,
-      sage_processed_at: nowIso,
-      totalVerified: verified ? true : o.totalVerified,
-      valueCheckAlert: needsValueCheck ? true : verified ? false : o.valueCheckAlert,
-    };
-  });
-
-  if (!found && fallbackOrder) {
-    const patch = {
-      journalEntry: journalEntry || fallbackOrder.journalEntry || fallbackOrder.journal_entry || "",
-      journal_entry: journalEntry || fallbackOrder.journal_entry || fallbackOrder.journalEntry || "",
-      enteredInSage: true,
-      invoiceSageUpdate: true,
-      invoiceNeedsSync: false,
-      sage_reference_synced: syncedRef,
-      sage_total_synced: Number.isFinite(sageTotal) ? sageTotal : fallbackOrder.sage_total_synced,
-      sage_trigger: false,
-      sage_processed_at: nowIso,
-      totalVerified: (() => {
-        const billedNum = Number.isFinite(fallbackOrder?.billed_total)
-          ? fallbackOrder.billed_total
-          : Number.isFinite(fallbackOrder?.billedTotal)
-          ? fallbackOrder.billedTotal
-          : null;
-        const diff =
-          Number.isFinite(billedNum) && Number.isFinite(sageTotal)
-            ? Math.abs(billedNum - sageTotal)
-            : null;
-        return diff !== null && diff < 0.001 ? true : fallbackOrder.totalVerified;
-      })(),
-      valueCheckAlert: (() => {
-        const billedNum = Number.isFinite(fallbackOrder?.billed_total)
-          ? fallbackOrder.billed_total
-          : Number.isFinite(fallbackOrder?.billedTotal)
-          ? fallbackOrder.billedTotal
-          : null;
-        const diff =
-          Number.isFinite(billedNum) && Number.isFinite(sageTotal)
-            ? Math.abs(billedNum - sageTotal)
-            : null;
-        if (diff !== null && diff > 0.1) return true;
-        if (diff !== null && diff < 0.001) return false;
-        return fallbackOrder.valueCheckAlert;
-      })(),
-    };
-    const merged = { ...fallbackOrder, ...patch };
-    updated.push(merged);
-    changed = true;
-  }
-
-  if (changed) writeOrders(updated);
-}
-
-function applyReconcileResult(refKey, billedTotal, delta, fallbackOrder = null, sageTotalOverride = null, journalStr = "") {
-  const orders = readOrders();
-  const list = Array.isArray(orders) ? orders : [];
-  const key = (refKey || "").toString().trim().toUpperCase();
-  if (!key) return;
-  const nowIso = new Date().toISOString();
-  const billedNum = Number.isFinite(billedTotal) ? billedTotal : null;
-  let found = false;
-  const updated = list.map((o) => {
-    if (!o) return o;
-    if (!orderMatchesKey(o, key)) return o;
-    found = true;
-    const resolvedSageTotal = Number.isFinite(sageTotalOverride)
-      ? sageTotalOverride
-      : billedNum !== null
-      ? billedNum
-      : o.sage_total_synced;
-    const resolvedJournal = (journalStr || "").trim() || o.journalEntry || o.journal_entry || "";
-    const diff =
-      Number.isFinite(billedNum) && Number.isFinite(resolvedSageTotal)
-        ? Math.abs(billedNum - resolvedSageTotal)
-        : null;
-    const verified = diff !== null && diff < 0.001;
-    const needsValueCheck = diff !== null && diff > 0.1;
-    return {
-      ...o,
-      billed_total: billedNum !== null ? billedNum : o.billed_total,
-      billedTotal: billedNum !== null ? billedNum : o.billedTotal,
-      sage_total_synced: resolvedSageTotal,
-      sage_processed_at: nowIso,
-      invoiceNeedsSync: false,
-      sage_invoice_trigger: false,
-      reconciliation_delta: delta,
-      journalEntry: resolvedJournal,
-      journal_entry: resolvedJournal,
-      totalVerified: verified ? true : o.totalVerified,
-      valueCheckAlert: needsValueCheck ? true : verified ? false : o.valueCheckAlert,
-    };
-  });
-  if (!found && fallbackOrder) {
-    const resolvedSageTotal = Number.isFinite(sageTotalOverride)
-      ? sageTotalOverride
-      : billedNum !== null
-      ? billedNum
-      : fallbackOrder.sage_total_synced;
-    const resolvedJournal = (journalStr || "").trim() || fallbackOrder.journalEntry || fallbackOrder.journal_entry || "";
-    const diff =
-      Number.isFinite(billedNum) && Number.isFinite(resolvedSageTotal)
-        ? Math.abs(billedNum - resolvedSageTotal)
-        : null;
-    const verified = diff !== null && diff < 0.001;
-    const needsValueCheck = diff !== null && diff > 0.1;
-    const merged = {
-      ...fallbackOrder,
-      billed_total: billedNum !== null ? billedNum : fallbackOrder.billed_total,
-      billedTotal: billedNum !== null ? billedNum : fallbackOrder.billedTotal,
-      sage_total_synced: resolvedSageTotal,
-      sage_processed_at: nowIso,
-      invoiceNeedsSync: false,
-      sage_invoice_trigger: false,
-      reconciliation_delta: delta,
-      journalEntry: resolvedJournal,
-      journal_entry: resolvedJournal,
-      totalVerified: verified ? true : fallbackOrder.totalVerified,
-      valueCheckAlert: needsValueCheck ? true : verified ? false : fallbackOrder.valueCheckAlert,
-    };
-    updated.push(merged);
-  }
-  writeOrders(updated);
-}
-
-function applyInvoiceResult(refKey, res = {}, fallbackOrder = null) {
-  const orders = readOrders();
-  const list = Array.isArray(orders) ? orders : [];
-  const key = (refKey || "").toString().trim().toUpperCase();
-  if (!key) return;
-  const journalOut = (res?.stdout || "").toString().trim();
-  const nowIso = new Date().toISOString();
-  let changed = false;
-  const updated = list.map((o) => {
-    if (!o) return o;
-    const cand = (o.sage_reference || o.reference || o.__row || "").toString().trim().toUpperCase();
-    if (!cand || cand !== key) return o;
-    const existingJournal = o.journalEntry || o.journal_entry || "";
-    const nextJournal = journalOut
-      ? `${journalOut}${existingJournal ? " | " + existingJournal : ""}`
-      : existingJournal;
-    changed = true;
-    return {
-      ...o,
-      invoiceNeedsSync: false,
-      sage_invoice_trigger: false,
-      invoiceSageUpdate: true,
-      sage_reference_synced: o?.sage_reference || o?.source_invoice || o?.reference || "",
-      sage_processed_at: nowIso,
-      journalEntry: nextJournal,
-      journal_entry: nextJournal,
-    };
-  });
-  if (changed) writeOrders(updated);
-}
-
-async function processSageOrdersQueue() {
-  if (!sageIntegrationActive) return;
-  if (sageProcessing) {
-    sagePendingRun = true;
-    return;
-  }
-
-  sageProcessing = true;
-  try {
-    const orders = readOrders();
-    const targets = [];
-    (orders || []).forEach((order) => {
-      const refKey = normalizeOrderRef(order);
-      if (!refKey) return;
-      if (!order?.sage_trigger) return;
-      if (order?.enteredInSage) return;
-      if (sageProcessingRefs.has(refKey)) return;
-      sageProcessingRefs.add(refKey);
-      targets.push({ refKey, order });
-    });
-
-    // Oldest orders first based on orderDate/orderDateRaw
-    const orderToTimestamp = (o) => {
-      const d =
-        o?.orderDate
-          ? new Date(o.orderDate)
-          : o?.orderDateRaw
-          ? new Date(o.orderDateRaw)
-          : null;
-      const ts = d && !Number.isNaN(d.getTime()) ? d.getTime() : Number.POSITIVE_INFINITY;
-      return ts;
-    };
-    targets.sort((a, b) => orderToTimestamp(a.order) - orderToTimestamp(b.order));
-
-    for (const { refKey, order } of targets) {
-      console.log("[sage] starting AHK for", refKey);
-      const res = await runSagePurchase(order);
-      if (!res?.ok) {
-        console.error("[sage] AHK run failed for", refKey, res?.error || res?.stderr || res?.code, {
-          stdout: (res?.stdout || "").toString().trim(),
-          stderr: (res?.stderr || "").toString().trim(),
-        });
-      } else {
-        console.log(
-          "[sage] AHK success for",
-          refKey,
-          "stdout:",
-            (res.stdout || "").toString().trim()
-          );
-          applySageResult(refKey, res, order);
-        }
-        sageProcessingRefs.delete(refKey);
-      }
-    } catch (e) {
-      console.error("[sage] queue error", e);
-  } finally {
-    sageProcessing = false;
-    if (sagePendingRun && sageIntegrationActive) {
-      sagePendingRun = false;
-      setTimeout(() => processSageOrdersQueue(), 200);
-    } else {
-      sagePendingRun = false;
-    }
-  }
-}
-
-async function runUpdateInvoice(order) {
-  return new Promise((resolve) => {
-    if (!fs.existsSync(SAGE_INVOICE_SCRIPT)) {
-      console.error('[sage-invoice] AHK script not found', { path: SAGE_INVOICE_SCRIPT });
-      return resolve({ ok: false, error: 'ahk-script-missing' });
-    }
-    const orderPath = writeTempOrder(order);
-    if (!orderPath) return resolve({ ok: false, error: 'temp-write-failed' });
-    const ahkExecutable = getAhkExePath();
-    const resolvedExecutable = ahkExecutable ? path.resolve(ahkExecutable) : '';
-    const ahkExists = Boolean(ahkExecutable) && fs.existsSync(ahkExecutable);
-    if (!ahkExecutable || !ahkExists) {
-      return resolve({ ok: false, error: 'ahk-exe-missing' });
-    }
-    const args = [SAGE_INVOICE_SCRIPT, orderPath, order?.sage_reference || order?.reference || ""];
-    const child = spawn(resolvedExecutable, args, { windowsHide: true });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on('data', (d) => (stdout += d.toString()));
-    child.stderr.on('data', (d) => (stderr += d.toString()));
-    child.on('error', (err) => resolve({ ok: false, error: err?.message || 'spawn-error', stderr, stdout }));
-    child.on('close', (code) => resolve({ ok: code === 0, code, stdout, stderr }));
-  });
-}
-
-async function processInvoiceUpdateQueue() {
-  if (!sageIntegrationActive) return;
-  if (invoiceProcessing) {
-    invoicePendingRun = true;
-    return;
-  }
-  invoiceProcessing = true;
-  try {
-    const orders = readOrders();
-    const targets = [];
-    (orders || []).forEach((order) => {
-      const refKey = normalizeOrderRef(order);
-      if (!refKey) return;
-      if (!order?.sage_invoice_trigger) return;
-      if (invoiceProcessingRefs.has(refKey)) return;
-      invoiceProcessingRefs.add(refKey);
-      targets.push({ refKey, order });
-    });
-    for (const { refKey, order } of targets) {
-      const res = await runUpdateInvoice(order);
-      if (!res?.ok) {
-        console.error("[sage-invoice] AHK run failed for", refKey, res?.error || res?.stderr || res?.code);
-      } else {
-        applyInvoiceResult(refKey, res, order);
-      }
-      invoiceProcessingRefs.delete(refKey);
-    }
-  } catch (e) {
-    console.error("[sage-invoice] queue error", e);
-  } finally {
-    invoiceProcessing = false;
-    if (invoicePendingRun && sageIntegrationActive) {
-      invoicePendingRun = false;
-      setTimeout(() => processInvoiceUpdateQueue(), 200);
-    } else {
-      invoicePendingRun = false;
-    }
-  }
-}
-
-function scheduleSageProcessing() {
-  if (!sageIntegrationActive) return;
-  if (sageProcessing) {
-    sagePendingRun = true;
-    return;
-  }
-  processSageOrdersQueue();
-  processInvoiceUpdateQueue();
-}
-
-function resetSageQueue() {
-  sageProcessingRefs.clear();
-  sagePendingRun = false;
-}
-
-function cleanExpiredLocks(items) {
-  const now = Date.now();
-  let changed = false;
-  const cleaned = items.map((it) => {
-    if (it.lock_expires_at && it.lock_expires_at < now) {
-      const { lock_expires_at, ...rest } = it;
-      changed = true;
-      return rest;
-    }
-    return it;
-  });
-  return { items: cleaned, changed };
-}
 
 
+let win = null;
+let boundsSaveTimeout = null;
+
+const sageService = createSageService({
+  fs,
+  path,
+  spawn,
+  app,
+  SAGE_AHK_SCRIPT,
+  SAGE_RECONCILE_SCRIPT,
+  SAGE_INVOICE_SCRIPT,
+  SAGE_TEMP_ORDER,
+  getOrdersFile,
+  backupFile,
+  writeTempOrder,
+  getAhkExePath,
+  extractJournalLine,
+  extractSageTotal,
+  extractReconcileApplied,
+  getVendorName,
+  normalizeOrderRef,
+  readOrders,
+  applySageResult,
+  applyInvoiceResult,
+  applyReconcileResult,
+  getSageIntegrationActive: () => sageIntegrationActive,
+});
+const {
+  runSagePurchase,
+  runSageReconcile,
+  runUpdateInvoice,
+  processSageOrdersQueue,
+  processInvoiceUpdateQueue,
+  scheduleSageProcessing,
+  resetSageQueue,
+} = sageService;
+
+const watchersService = createWatchersService({
+  fs,
+  getWin: () => win,
+  getQueueFile,
+  getOrdersFile,
+  ensureDataFileAt,
+  ensureSharedBubbleFile,
+  readItems,
+  readOrders,
+  readSharedBubbleData,
+  scheduleSageProcessing,
+  getSageIntegrationActive: () => sageIntegrationActive,
+});
+const {
+  startWatching,
+  startBubbleSharedWatching,
+  startOrdersWatching,
+  stopOrdersWatching,
+} = watchersService;
+
+const updatesService = createUpdatesService({
+  autoUpdater,
+  app,
+  getWin: () => win,
+});
+const { setupAutoUpdater, sendUpdateStatus } = updatesService;
 
 
 
 // ---- window ----
-let win = null;
-let boundsSaveTimeout = null;
-
 async function createWindow() {
   // restore any saved custom data file path
   ensureConfigFile();
@@ -1502,6 +650,7 @@ async function createWindow() {
   console.log('[main] data file =', getDataFile());
   startWatching(win);
   startBubbleSharedWatching(win);
+  registerAllIpc();
 
   const scheduleSaveBounds = () => {
     if (boundsSaveTimeout) clearTimeout(boundsSaveTimeout);
@@ -1525,133 +674,6 @@ async function createWindow() {
     writeConfig(cfg);
   });
 }
-
-app.whenReady().then(async () => {
-  ensureAppConfigFile();
-  try {
-    await promptForSharedFolderIfMissing();
-  } catch (e) {
-    console.warn('[app-config] prompt for shared folder failed', e);
-  }
-  try {
-    await maybeOfferMigrationToShared();
-  } catch (e) {
-    console.warn('[app-config] migration prompt failed', e);
-  }
-  ensureBusinessFiles();
-  createWindow();
-});
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
-});
-
-// ---- IPC ----
-ipcMain.handle('items:read', () => readItems());
-// ipcMain.handle('items:write', (_evt, items) => { writeItems(items); return { ok: true }; });
-ipcMain.handle('items:write', (_evt, items) => {
-  const current = readItems();                // existing array
-  const a = JSON.stringify(current);
-  const b = JSON.stringify(items ?? []);
-  if (a !== b) writeItems(items);             // only write if actually different
-  return { ok: true };
-});
-ipcMain.handle('items:export', async (_evt, items) => {
-  const { canceled, filePath } = await dialog.showSaveDialog({
-    title: 'Export updated items',
-    defaultPath: 'outstanding_items.updated.json',
-    filters: [{ name: 'JSON', extensions: ['json'] }]
-  });
-  if (canceled || !filePath) return { ok: false, canceled: true };
-  fs.writeFileSync(filePath, JSON.stringify(items ?? [], null, 2), 'utf-8');
-  return { ok: true, filePath };
-});
-ipcMain.handle('items:get-path', () => ({ path: getDataFile() }));
-ipcMain.handle('items:reveal', () => { const f = getDataFile(); if (fs.existsSync(f)) shell.showItemInFolder(f); return { ok: true }; });
-ipcMain.handle('items:choose-file', async () => {
-  const res = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'JSON', extensions: ['json'] }] });
-  if (res.canceled || !res.filePaths?.[0]) return { ok: false, canceled: true };
-  dataFileOverride = res.filePaths[0];
-  const cfg = readConfig(); cfg.dataFile = dataFileOverride; writeConfig(cfg);
-  startWatching(win);
-  if (win && !win.isDestroyed()) win.webContents.send('items:updated', readItems());
-  return { ok: true, path: dataFileOverride };
-});
-ipcMain.handle('items:use-default', () => {
-  dataFileOverride = null;
-  const cfg = readConfig(); delete cfg.dataFile; writeConfig(cfg);
-  startWatching(win);
-  if (win && !win.isDestroyed()) win.webContents.send('items:updated', readItems());
-  return { ok: true, path: getDataFile() };
-});
-
-ipcMain.handle('orders:read', () => readOrders());
-ipcMain.handle('orders:get-path', () => ({ path: getOrdersFile() }));
-ipcMain.handle('orders:watch', (_evt, enable = true) => {
-  try {
-    sageIntegrationActive = enable !== false;
-
-    if (enable === false) {
-      resetSageQueue();
-      stopOrdersWatching();
-      return { ok: true, watching: false };
-    }
-    startOrdersWatching(win);
-    scheduleSageProcessing();
-    return { ok: true, watching: true, path: getOrdersFile() };
-  } catch (e) {
-    console.error('[orders:watch]', e);
-    return { ok: false, error: e?.message || 'Failed to watch orders file.' };
-  }
-});
-ipcMain.handle('orders:write', (_evt, orders) => {
-  const current = readOrders();                  // existing array
-  const a = JSON.stringify(current);
-  const b = JSON.stringify(orders ?? []);
-  if (a !== b) writeOrders(orders);              // only write if actually different
-  try {
-    syncOutstandingInvoices(orders ?? []);
-  } catch (e) {
-    console.error('[orders:write] sync outstanding failed', e);
-  }
-  if (sageIntegrationActive)
-    scheduleSageProcessing();
-  return { ok: true };
-});
-ipcMain.handle('orders:add-to-outstanding', () => {
-  try {
-    const orders = readOrders();
-    const items = readItems();
-    const newItems = [];
-    let lineUpdates = 0;
-
-    const updatedOrders = orders.map((order) => {
-      if (!order || !Array.isArray(order.lineItems)) return order;
-      const updatedLineItems = order.lineItems.map((line) => {
-        if (!line || line.addedToOutstanding === true) return line;
-        const outItem = makeOutstandingFromLine(order, line);
-        newItems.push(outItem);
-        lineUpdates += 1;
-        return { ...line, addedToOutstanding: true };
-      });
-      return { ...order, lineItems: updatedLineItems };
-    });
-
-    if (newItems.length > 0) {
-      const mergedItems = items.concat(newItems);
-      writeItems(mergedItems);
-      writeOrders(updatedOrders);
-    }
-
-    return { ok: true, added: newItems.length, linesUpdated: lineUpdates };
-  } catch (e) {
-    console.error('[orders:add-to-outstanding]', e);
-    return { ok: false, error: e?.message || 'Failed to add outstanding items.' };
-  }
-});
 
 function syncOutstandingInvoices(orders) {
   try {
@@ -1684,635 +706,116 @@ function syncOutstandingInvoices(orders) {
     console.error('[syncOutstandingInvoices]', e);
   }
 }
-ipcMain.handle('orders:fetch-world', async () => {
-  try {
-    ensureDir(VENDOR_PATHS.world.dataDir);
-    const existing = readOrders();
-    const targetOrdersPath = getOrdersFile();
-    const config = loadConfig();
-    const worldUser = typeof config.WORLD_USER === 'string' ? config.WORLD_USER : '';
-    const worldPass = typeof config.WORLD_PASS === 'string' ? config.WORLD_PASS : '';
-    if (!worldUser || !worldPass) {
-      return { ok: false, error: 'Missing WORLD credentials. Set them in Settings.' };
-    }
-    const res = await getWorldOrders({
-      storageDir: VENDOR_PATHS.world.dataDir,
-      storageStatePath: VENDOR_PATHS.world.storageState,
-      ordersPath: targetOrdersPath,
-      existingOrders: existing,
-      credentials: { user: worldUser, pass: worldPass },
-    });
-    if (res?.ok && Array.isArray(res.orders)) {
-      writeOrders(res.orders);
-    }
-    return { ok: true, ...(res || {}), path: targetOrdersPath };
-  } catch (e) {
-    console.error('[orders:fetch-world]', e);
-    return { ok: false, error: e?.message || 'Failed to fetch World orders.' };
-  }
-});
 
-ipcMain.handle('orders:fetch-transbec', async () => {
-  try {
-    ensureDir(VENDOR_PATHS.transbec.dataDir);
-    const targetOrdersPath = getOrdersFile();
-    const existing = readOrders();
-    const config = loadConfig();
-    const transbecUser = typeof config.TRANSBEC_USER === 'string' ? config.TRANSBEC_USER : '';
-    const transbecPass = typeof config.TRANSBEC_PASS === 'string' ? config.TRANSBEC_PASS : '';
-    if (!transbecUser || !transbecPass) {
-      return { ok: false, error: 'Missing TRANSBEC credentials. Set them in Settings.' };
-    }
-    const res = await getTransbecOrders({
-      storageDir: VENDOR_PATHS.transbec.dataDir,
-      storageStatePath: VENDOR_PATHS.transbec.storageState,
-      ordersPath: targetOrdersPath,
-      productsPath: VENDOR_PATHS.transbec.products,
-      existingOrders: existing,
-      maxPages: 1, // limit to first page as requested
-      credentials: { user: transbecUser, pass: transbecPass },
-    });
-    let merged = Array.isArray(res?.orders) ? res.orders : [];
-    if (res?.ok) {
-      const byRef = new Map();
-      (existing || []).forEach((o) => {
-        if (!o?.reference) return;
-        const key = String(o.reference).trim().toUpperCase();
-        if (key) byRef.set(key, o);
-      });
-      for (const o of merged) {
-        const key = o?.reference ? String(o.reference).trim().toUpperCase() : "";
-        if (!key) continue;
-        if (!byRef.has(key)) {
-          byRef.set(key, o);
-        }
-      }
-      merged = Array.from(byRef.values());
-      writeOrders(merged);
-    }
-    return {
-      ok: true,
-      ...(res || {}),
-      orders: merged,
-      path: targetOrdersPath,
-      productsPath: VENDOR_PATHS.transbec.products,
-    };
-  } catch (e) {
-    console.error('[orders:fetch-transbec]', e);
-    return { ok: false, error: e?.message || 'Failed to fetch Transbec orders.' };
-  }
-});
 
-ipcMain.handle('orders:fetch-proforce', async () => {
+app.whenReady().then(async () => {
+  ensureAppConfigFile();
   try {
-    const config = loadConfig();
-    const store = typeof config.PROFORCE_STORE === 'string' ? config.PROFORCE_STORE : '';
-    const customer = typeof config.PROFORCE_CUSTOMER === 'string' ? config.PROFORCE_CUSTOMER : '';
-    const pass = typeof config.PROFORCE_PASS === 'string' ? config.PROFORCE_PASS : '';
-    if (!store || !customer || !pass) {
-      return { ok: false, error: 'Missing PROFORCE credentials. Set them in Settings.' };
-    }
-    ensureDir(VENDOR_PATHS.proforce.dataDir);
-    const targetOrdersPath = getOrdersFile();
-    const existing = readOrders();
-    const res = await getProforceOrders({
-      storageDir: VENDOR_PATHS.proforce.dataDir,
-      storageStatePath: VENDOR_PATHS.proforce.storageState,
-      ordersPath: targetOrdersPath,
-      existingOrders: existing,
-      credentials: { store, customer, pass },
-    });
-    if (res?.ok && Array.isArray(res.orders)) {
-      writeOrders(res.orders);
-    }
-    return { ok: true, ...(res || {}), path: targetOrdersPath };
+    await promptForSharedFolderIfMissing();
   } catch (e) {
-    console.error('[orders:login-proforce]', e);
-    return { ok: false, error: e?.message || 'Failed to fetch Proforce orders.' };
-  }
-});
-
-ipcMain.handle('orders:fetch-cbk', async () => {
-  try {
-    const config = loadConfig();
-    const cbkUser = typeof config.CBK_USER === 'string' ? config.CBK_USER : '';
-    const cbkPass = typeof config.CBK_PASS === 'string' ? config.CBK_PASS : '';
-    if (!cbkUser || !cbkPass) {
-      return { ok: false, error: 'Missing CBK credentials. Set them in Settings.' };
-    }
-    ensureDir(VENDOR_PATHS.cbk.dataDir);
-    const targetOrdersPath = getOrdersFile();
-    const existing = readOrders();
-    const res = await getCbkOrders({
-      storageDir: VENDOR_PATHS.cbk.dataDir,
-      storageStatePath: VENDOR_PATHS.cbk.storageState,
-      ordersPath: targetOrdersPath,
-      existingOrders: existing,
-      credentials: { user: cbkUser, pass: cbkPass },
-    });
-    if (res?.ok && Array.isArray(res.orders)) {
-      writeOrders(res.orders);
-    }
-    return { ok: true, ...(res || {}), path: targetOrdersPath };
-  } catch (e) {
-    console.error('[orders:fetch-cbk]', e);
-    return { ok: false, error: e?.message || 'Failed to fetch CBK orders.' };
-  }
-});
-
-ipcMain.handle('orders:fetch-bestbuy', async () => {
-  try {
-    const config = loadConfig();
-    const bestUser = typeof config.BESTBUY_USER === 'string' ? config.BESTBUY_USER : '';
-    const bestPass = typeof config.BESTBUY_PASS === 'string' ? config.BESTBUY_PASS : '';
-    if (!bestUser || !bestPass) {
-      return { ok: false, error: 'Missing BESTBUY credentials. Set them in Settings.' };
-    }
-    ensureDir(VENDOR_PATHS.bestbuy.dataDir);
-    const targetOrdersPath = getOrdersFile();
-    const existing = readOrders();
-    const res = await getBestBuyOrders({
-      storageDir: VENDOR_PATHS.bestbuy.dataDir,
-      storageStatePath: VENDOR_PATHS.bestbuy.storageState,
-      ordersPath: targetOrdersPath,
-      existingOrders: existing,
-      credentials: { user: bestUser, pass: bestPass },
-    });
-    if (res?.ok && Array.isArray(res.orders)) {
-      writeOrders(res.orders);
-    }
-    return { ok: true, ...(res || {}), path: targetOrdersPath };
-  } catch (e) {
-    console.error('[orders:fetch-bestbuy]', e);
-    return { ok: false, error: e?.message || 'Failed to fetch BestBuy orders.' };
-  }
-});
-
-const orderMatchesKey = (order, targetKey) => {
-  if (!order || !targetKey) return false;
-  const candidates = [
-    order.sage_reference_synced,
-    order.sage_reference,
-    order.source_invoice,
-    order.reference,
-    order.__row,
-  ];
-  return candidates.some((val) => {
-    if (val === null || val === undefined) return false;
-    return String(val).trim().toUpperCase() === targetKey;
-  });
-};
-
-ipcMain.handle('orders:reconcile-totals', async (_event, refKeyRaw, providedOrder) => {
-  try {
-    const orders = readOrders();
-    const key = (refKeyRaw || "").toString().trim().toUpperCase();
-    if (!key) return { ok: false, error: 'Missing reference key.' };
-    const target = (orders || []).find((o) => orderMatchesKey(o, key));
-    const providedMatches = orderMatchesKey(providedOrder, key);
-    const mergedTarget = target
-      ? { ...target, ...(providedMatches ? providedOrder : {}) }
-      : providedMatches
-      ? providedOrder
-      : null;
-    if (!mergedTarget) return { ok: false, error: 'Order not found.' };
-
-    const billedRaw =
-      (providedMatches ? providedOrder?.billed_total ?? providedOrder?.billedTotal : undefined) ??
-      mergedTarget.billed_total ??
-      mergedTarget.billedTotal;
-    const sageRaw =
-      (providedMatches ? providedOrder?.sage_total_synced ?? providedOrder?.sageTotalSynced : undefined) ??
-      mergedTarget.sage_total_synced ??
-      mergedTarget.sageTotalSynced;
-    const billedNum = billedRaw === undefined || billedRaw === null ? NaN : Number(billedRaw);
-    const sageNum = sageRaw === undefined || sageRaw === null ? NaN : Number(sageRaw);
-    if (!Number.isFinite(billedNum) || !Number.isFinite(sageNum)) {
-      return { ok: false, error: 'Missing billed_total or sage_total_synced.' };
-    }
-    const delta = Number((billedNum - sageNum).toFixed(2));
-    if (Math.abs(delta) < 0.001) {
-      return { ok: false, error: 'Totals already match.' };
-    }
-
-    const res = await runSageReconcile(mergedTarget, delta);
-    if (!res?.ok) {
-      return { ok: false, error: res?.error || 'Reconcile failed', stderr: res?.stderr, stdout: res?.stdout };
-    }
-    if (!res?.applied?.applied) {
-      return { ok: false, error: 'Reconcile did not complete in AHK.', stdout: res?.stdout, stderr: res?.stderr };
-    }
-    applyReconcileResult(key, billedNum, delta, mergedTarget, res.sageTotal, res.journalEntry);
-    return { ok: true, delta, sageTotal: res.sageTotal, journalEntry: res.journalEntry };
-  } catch (e) {
-    console.error('[orders:reconcile-totals]', e);
-    return { ok: false, error: e?.message || 'Failed to reconcile totals.' };
-  }
-});
-
-ipcMain.handle('ui-state:read', () => ({ ok: true, state: readUIState() }));
-ipcMain.handle('ui-state:write', (_evt, state) => {
-  writeUIState(state && typeof state === 'object' ? state : {});
-  return { ok: true };
-});
-ipcMain.handle('bubble-shared:read', () => {
-  try {
-    const data = readSharedBubbleData();
-    const pathStr = getSharedBubbleDataPath();
-    return { ok: true, data, path: pathStr, exists: fs.existsSync(pathStr) };
-  } catch (e) {
-    console.error('[bubble-shared:read]', e);
-    return { ok: false, error: e?.message || 'Failed to read shared bubble data.' };
-  }
-});
-ipcMain.handle('bubble-shared:write', (_evt, payload) => {
-  try {
-    const bubbleId = payload?.bubbleId || payload?.id || payload?.name;
-    const name = typeof payload?.name === 'string' ? payload.name : '';
-    const notes = typeof payload?.notes === 'string' ? payload.notes : '';
-    const extraLines = Array.isArray(payload?.extraLines) ? payload.extraLines : [];
-    return writeSharedBubbleData(bubbleId, { id: bubbleId, name, notes, extraLines });
-  } catch (e) {
-    console.error('[bubble-shared:write]', e);
-    return { ok: false, error: e?.message || 'Failed to write shared bubble data.' };
-  }
-});
-ipcMain.handle('bubble-shared:delete', (_evt, bubbleId) => {
-  try {
-    return deleteSharedBubbleData(bubbleId);
-  } catch (e) {
-    console.error('[bubble-shared:delete]', e);
-    return { ok: false, error: e?.message || 'Failed to delete shared bubble data.' };
-  }
-});
-
-ipcMain.handle('app-config:get', () => {
-  try {
-    const cfg = readAppConfig();
-    ensureBusinessFiles();
-    const { sharedDir, sharedConfigured } = getSharedDirInfo();
-    return { ok: true, config: { ...cfg, sharedDataDir: cfg.sharedDataDir || '', instanceDataDir: INSTANCE_DIR }, path: INSTANCE_PATHS.appConfig, sharedConfigured };
-  } catch (e) {
-    console.error('[app-config:get]', e);
-    return { ok: false, error: e?.message || 'Failed to read app config.' };
-  }
-});
-
-ipcMain.handle('app-config:set', (_evt, partial) => {
-  try {
-    if (!partial || typeof partial !== 'object' || Array.isArray(partial)) {
-      return { ok: false, error: 'Invalid config payload' };
-    }
-    const next = writeAppConfig(partial);
-    ensureBusinessFiles();
-    // restart watchers to pick up new shared dir
-    startWatching(win);
-    startOrdersWatching(win);
-    startBubbleSharedWatching(win);
-    const { sharedDir, sharedConfigured } = getSharedDirInfo();
-    return { ok: true, config: { ...next, sharedDataDir: sharedDir, instanceDataDir: INSTANCE_DIR }, sharedConfigured, path: INSTANCE_PATHS.appConfig };
-  } catch (e) {
-    console.error('[app-config:set]', e);
-    return { ok: false, error: e?.message || 'Failed to write app config.' };
-  }
-});
-
-ipcMain.handle('app-config:choose-shared', async () => {
-  const res = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
-  if (res.canceled || !res.filePaths?.[0]) return { ok: false, canceled: true };
-  const chosen = res.filePaths[0];
-  return { ok: true, path: chosen };
-});
-
-ipcMain.handle('app-config:paths-summary', () => {
-  try {
-    ensureBusinessFiles();
-    return { ok: true, summary: getResolvedPathsSummary() };
-  } catch (e) {
-    return { ok: false, error: e?.message || 'Failed to summarize paths.' };
-  }
-});
-ipcMain.handle('app-config:resolved-paths', () => {
-  try {
-    ensureBusinessFiles();
-    return { ok: true, summary: getResolvedPathsSummary() };
-  } catch (e) {
-    return { ok: false, error: e?.message || 'Failed to resolve paths.' };
-  }
-});
-
-ipcMain.handle('app-config:validate-shared', (_evt, dirPath) => {
-  const target = (dirPath || '').trim();
-  if (!target) return { ok: false, error: 'Path required' };
-  const res = validateWritable(target);
-  return res.ok ? { ok: true } : res;
-});
-
-ipcMain.handle('app-config:migrate-business', (_evt, payload) => {
-  try {
-    const mode = payload?.mode === 'move' ? 'move' : 'copy';
-    const res = migrateBusinessFilesToShared(mode);
-    ensureBusinessFiles();
-    startWatching(win);
-    startOrdersWatching(win);
-    return res;
-  } catch (e) {
-    console.error('[app-config:migrate-business]', e);
-    return { ok: false, error: e?.message || 'Failed to migrate files.' };
-  }
-});
-
-ipcMain.handle('ahk:get-path', () => {
-  try {
-    const pathStr = getAhkExePath();
-    return { ok: true, path: pathStr, exists: Boolean(pathStr) && fs.existsSync(pathStr) };
-  } catch (e) {
-    console.error('[ahk:get-path]', e);
-    return { ok: false, error: e?.message || 'Failed to read AHK path.' };
-  }
-});
-ipcMain.handle('ahk:set-path', (_evt, pathStr) => {
-  try {
-    const next = writeAppConfig({ ahkExePath: typeof pathStr === 'string' ? pathStr.trim() : '' });
-    const exists = Boolean(next.ahkExePath) && fs.existsSync(next.ahkExePath);
-    return { ok: true, path: next.ahkExePath, exists };
-  } catch (e) {
-    console.error('[ahk:set-path]', e);
-    return { ok: false, error: e?.message || 'Failed to save AHK path.' };
-  }
-});
-ipcMain.handle('ahk:choose-path', async () => {
-  try {
-    const res = await dialog.showOpenDialog({
-      properties: ['openFile'],
-      filters: [{ name: 'Executable', extensions: ['exe'] }],
-    });
-    if (res.canceled || !res.filePaths?.[0]) return { ok: false, canceled: true };
-    const chosen = res.filePaths[0];
-    return { ok: true, path: chosen };
-  } catch (e) {
-    console.error('[ahk:choose-path]', e);
-    return { ok: false, error: e?.message || 'Failed to choose AHK path.' };
-  }
-});
-ipcMain.handle('ahk:validate-path', (_evt, pathStr) => {
-  try {
-    const res = validateAhkExePath(pathStr);
-    return { ok: true, exists: res.exists, path: res.path };
-  } catch (e) {
-    console.error('[ahk:validate-path]', e);
-    return { ok: false, error: e?.message || 'Failed to validate AHK path.' };
-  }
-});
-
-ipcMain.handle('updates:check', async () => {
-  if (!app.isPackaged) {
-    const msg = 'Update checks are only available in packaged builds.';
-    sendUpdateStatus({ status: 'error', error: msg });
-    return { ok: false, error: msg };
+    console.warn('[app-config] prompt for shared folder failed', e);
   }
   try {
-    sendUpdateStatus({ status: 'checking' });
-    await autoUpdater.checkForUpdates();
-    return { ok: true };
+    await maybeOfferMigrationToShared();
   } catch (e) {
-    const msg = e?.message || 'Failed to check for updates.';
-    console.error('[updates:check]', e);
-    sendUpdateStatus({ status: 'error', error: msg });
-    return { ok: false, error: msg };
+    console.warn('[app-config] migration prompt failed', e);
   }
+  ensureBusinessFiles();
+  createWindow();
 });
 
-ipcMain.handle('updates:restart', () => {
-  try {
-    if (!app.isPackaged) return { ok: false, error: 'Updates are only available in packaged builds.' };
-    autoUpdater.quitAndInstall(false, true);
-    return { ok: true };
-  } catch (e) {
-    const msg = e?.message || 'Failed to restart for update.';
-    console.error('[updates:restart]', e);
-    sendUpdateStatus({ status: 'error', error: msg });
-    return { ok: false, error: msg };
-  }
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
-ipcMain.handle('app:get-version', () => {
-  try {
-    return {
-      ok: true,
-      version: app.getVersion(),
-      name: app.getName ? app.getName() : 'CAPOrder',
-      isPackaged: app.isPackaged,
-    };
-  } catch (e) {
-    return { ok: false, error: e?.message || 'Failed to read app version.' };
-  }
-});
+let ipcRegistered = false;
+function registerAllIpc() {
+  if (ipcRegistered) return;
+  ipcRegistered = true;
 
-ipcMain.handle('config:get', () => {
-  try {
-    const config = loadConfig();
-    return { ok: true, config, path: INSTANCE_PATHS.windowConfig };
-  } catch (e) {
-    return { ok: false, error: e?.message || 'Failed to read config.' };
-  }
-});
-ipcMain.handle('config:set', (_evt, partial) => {
-  try {
-    if (!partial || typeof partial !== 'object' || Array.isArray(partial)) {
-      return { ok: false, error: 'Invalid config payload' };
-    }
-    const config = saveConfig(partial);
-    return { ok: true, config, path: INSTANCE_PATHS.windowConfig };
-  } catch (e) {
-    return { ok: false, error: e?.message || 'Failed to save config.' };
-  }
-});
+  const { registerItemsIpc } = require('./main/ipc/items.ipc');
+  const { registerOrdersIpc } = require('./main/ipc/orders.ipc');
+  const { registerStockFlowIpc } = require('./main/ipc/stockflow.ipc');
+  const { registerSettingsIpc } = require('./main/ipc/settings.ipc');
+  const { registerUpdatesIpc } = require('./main/ipc/updates.ipc');
 
-ipcMain.handle('config:read', () => {
-  try {
-    ensureConfigFile();
-    const raw = getUserConfigRaw();
-    const effective = getUserConfigEffective();
-    const overrides = getEnvOverrides(raw);
-    return { ok: true, config: effective, raw, overrides, path: INSTANCE_PATHS.windowConfig };
-  } catch (e) {
-    console.error('[config:read]', e);
-    return { ok: false, error: e?.message || 'Failed to read config.' };
-  }
-});
-ipcMain.handle('config:write', (_evt, nextConfig) => {
-  try {
-    ensureConfigFile();
-    if (!nextConfig || typeof nextConfig !== 'object' || Array.isArray(nextConfig)) {
-      return { ok: false, error: 'Config must be an object.' };
-    }
-    const cfg = readConfig();
-    cfg.userConfig = nextConfig;
-    writeConfig(cfg);
-    return { ok: true };
-  } catch (e) {
-    console.error('[config:write]', e);
-    return { ok: false, error: e?.message || 'Failed to write config.' };
-  }
-});
+  const deps = {
+    getWin: () => win,
+    fs,
+    dialog,
+    shell,
+    app,
+    autoUpdater,
+    sendUpdateStatus,
+    LOCK_DURATION_MS,
+    INSTANCE_DIR,
+    INSTANCE_PATHS,
+    VENDOR_PATHS,
+    readItems,
+    writeItems,
+    getDataFile,
+    readConfig,
+    writeConfig,
+    startWatching,
+    setDataFileOverride: (next) => { dataFileOverride = next; },
+    cleanExpiredLocks,
+    readOrders,
+    writeOrders,
+    getOrdersFile,
+    resetSageQueue,
+    stopOrdersWatching,
+    startOrdersWatching,
+    scheduleSageProcessing,
+    getSageIntegrationActive: () => sageIntegrationActive,
+    setSageIntegrationActive: (next) => { sageIntegrationActive = next; },
+    syncOutstandingInvoices,
+    makeOutstandingFromLine,
+    loadConfig,
+    fetchWorldOrders,
+    fetchTransbecOrders,
+    fetchProforceOrders,
+    fetchCbkOrders,
+    fetchBestBuyOrders,
+    orderMatchesKey,
+    runSageReconcile,
+    applyReconcileResult,
+    readSharedBubbleData,
+    getSharedBubbleDataPath,
+    writeSharedBubbleData,
+    deleteSharedBubbleData,
+    readArchivedEntries,
+    writeArchivedEntries,
+    getArchiveFile,
+    searchArchiveEntries,
+    normalizeSharedBubblePayload,
+    readUIState,
+    writeUIState,
+    saveConfig,
+    getUserConfigRaw,
+    getUserConfigEffective,
+    getEnvOverrides,
+    ensureConfigFile,
+    readAppConfig,
+    ensureBusinessFiles,
+    getSharedDirInfo,
+    writeAppConfig,
+    startBubbleSharedWatching,
+    validateWritable,
+    migrateBusinessFilesToShared,
+    getResolvedPathsSummary,
+    getAhkExePath,
+    validateAhkExePath,
+  };
 
-ipcMain.handle('archive:save-bubble', (_evt, payload) => {
-  try {
-    const { bubble, meta, items } = payload || {};
-    if (!bubble || !bubble.id) return { ok: false, error: 'Missing bubble info' };
-    const archivedAt = new Date().toISOString();
-    const entry = {
-      id: bubble.id,
-      bubble: { ...bubble },
-      meta: { ...(meta || {}), accountingPath: 'ARCHIVED', archivedAt },
-      accountingPath: 'ARCHIVED',
-      archivedAt,
-      items: Array.isArray(items) ? items : [],
-    };
-    const existing = readArchivedEntries();
-    existing.push(entry);
-    writeArchivedEntries(existing);
-    return { ok: true, archivedAt, path: getArchiveFile() };
-  } catch (e) {
-    console.error('[archive:save-bubble]', e);
-    return { ok: false, error: e?.message || 'Failed to archive bubble' };
-  }
-});
-
-ipcMain.handle('archive:search', (_evt, query) => {
-  const normalize = (val) => (val ?? '').toString().trim().toLowerCase();
-  try {
-    const term = normalize(query?.term || query?.q);
-    const bubbleTerm = normalize(query?.bubbleName || query?.customerName);
-    if (!term && !bubbleTerm) return { ok: true, results: [], empty: true };
-
-    const entries = readArchivedEntries();
-    const results = [];
-
-    for (const entry of entries) {
-      const bubbleName = entry?.bubble?.name || entry?.bubbleName || '';
-      const customer = entry?.meta?.customer || entry?.meta?.customerName || '';
-      const archivedAt = entry?.archivedAt || entry?.meta?.archivedAt || '';
-      const bubbleMatches = bubbleTerm
-        ? [bubbleName, customer].some((val) => normalize(val).includes(bubbleTerm))
-        : true;
-      if (!bubbleMatches && !term) continue;
-
-      const items = Array.isArray(entry?.items) ? entry.items : [];
-      const matchedItems = items
-        .filter((it) => {
-          if (!term) return true;
-          const code = normalize(it?.itemcode || it?.partNumber || it?.partLineCode);
-          const desc = normalize(it?.notes1 || '') + ' ' + normalize(it?.notes2 || '') + ' ' + normalize(it?.description || '');
-          return code.includes(term) || desc.includes(term);
-        })
-        .map((it) => ({
-          itemcode: it?.itemcode || it?.partNumber || '',
-          description: it?.notes1 || it?.description || '',
-          notes2: it?.notes2 || '',
-          quantity: it?.quantity,
-          allocated_for: it?.allocated_for,
-          cost: it?.cost,
-          reference_num: it?.reference_num,
-        }));
-
-      if (!matchedItems.length) continue;
-      results.push({
-        bubbleId: entry?.id || entry?.bubble?.id || '',
-        bubbleName: bubbleName || 'Archived Bubble',
-        archivedAt,
-        items: matchedItems,
-      });
-    }
-
-    results.sort((a, b) => String(b.archivedAt || '').localeCompare(String(a.archivedAt || '')));
-    return { ok: true, results };
-  } catch (e) {
-    console.error('[archive:search]', e);
-    return { ok: false, error: e?.message || 'Failed to search archive' };
-  }
-});
-
-ipcMain.handle('archive:get-path', () => ({ ok: true, path: getArchiveFile() }));
-
-
-// Acquire a 20s lock on a specific item
-ipcMain.handle('items:lock-item', (_evt, uid) => {
-  let items = readItems();
-  const { items: cleaned, changed } = cleanExpiredLocks(items);
-  if (changed) {
-    items = cleaned;
-    writeItems(items);
-  }
-
-  const idx = items.findIndex((it) => it.uid === uid);
-  if (idx === -1) {
-    return { ok: false, reason: 'not-found' };
-  }
-
-  const it = items[idx];
-  const now = Date.now();
-
-  if (it.lock_expires_at && it.lock_expires_at > now) {
-    // Someone else holds a valid lock
-    return { ok: false, reason: 'locked' };
-  }
-
-  const lock_expires_at = now + LOCK_DURATION_MS;
-  items[idx] = { ...it, lock_expires_at };
-  writeItems(items);
-
-  return { ok: true, item: items[idx], lock_expires_at };
-});
-
-// Apply an edit to a locked item and remove the lock
-ipcMain.handle('items:apply-edit', (_evt, uid, patch) => {
-  let items = readItems();
-  const { items: cleaned, changed } = cleanExpiredLocks(items);
-  if (changed) {
-    items = cleaned;
-    writeItems(items);
-  }
-
-  const idx = items.findIndex((it) => it.uid === uid);
-  if (idx === -1) {
-    return { ok: false, reason: 'not-found' };
-  }
-
-  const it = items[idx];
-  const now = Date.now();
-
-  if (!it.lock_expires_at || it.lock_expires_at < now) {
-    // Lock expired or never existed
-    return { ok: false, reason: 'lock-expired' };
-  }
-
-  // Don’t keep the lock field in the final saved item
-  const { lock_expires_at, ...rest } = it;
-  const updated = { ...rest, ...(patch || {}) };
-  items[idx] = updated;
-
-  writeItems(items);
-  return { ok: true, item: updated };
-});
-
-// Optional: manual lock release (e.g., user cancels)
-ipcMain.handle('items:release-lock', (_evt, uid) => {
-  let items = readItems();
-  const idx = items.findIndex((it) => it.uid === uid);
-  if (idx === -1) return { ok: false, reason: 'not-found' };
-
-  const it = items[idx];
-  if (!it.lock_expires_at) {
-    return { ok: true, released: false }; // nothing to do
-  }
-
-  const { lock_expires_at, ...rest } = it;
-  items[idx] = rest;
-  writeItems(items);
-  return { ok: true, released: true };
-});
+  registerItemsIpc(ipcMain, deps);
+  registerOrdersIpc(ipcMain, deps);
+  registerStockFlowIpc(ipcMain, deps);
+  registerSettingsIpc(ipcMain, deps);
+  registerUpdatesIpc(ipcMain, deps);
+}
 function readUIState() {
   try {
     if (fs.existsSync(INSTANCE_PATHS.uiState)) {
