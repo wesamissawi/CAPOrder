@@ -95,6 +95,7 @@ export default function App() {
   const [ordersSaving, setOrdersSaving] = useState(false);
   const [ordersSearch, setOrdersSearch] = useState("");
   const [ordersPickupFilter, setOrdersPickupFilter] = useState("all");
+  const [ordersTodayOnly, setOrdersTodayOnly] = useState(false);
   const [sageIntegrationEnabled, setSageIntegrationEnabled] = useState(false);
   const [sageReadyOrders, setSageReadyOrders] = useState([]);
   const [sageWatchError, setSageWatchError] = useState("");
@@ -583,6 +584,9 @@ export default function App() {
         ) {
           setPrintExtraLinesByBubble(state.printExtraLinesByBubble);
         }
+        if (typeof state.ordersTodayOnly === "boolean") {
+          setOrdersTodayOnly(state.ordersTodayOnly);
+        }
         if (state.bubbleMeta && typeof state.bubbleMeta === "object") {
           setBubbleMeta((prev) => ({ ...(state.bubbleMeta || {}), ...prev }));
         }
@@ -688,6 +692,7 @@ export default function App() {
         bubbleZOrder,
         sageIntegrationEnabled,
         printExtraLinesByBubble,
+        ordersTodayOnly,
         bubbleMeta,
       })
       .catch((e) => console.warn("[ui-state] write failed", e));
@@ -697,6 +702,7 @@ export default function App() {
     bubbleZOrder,
     sageIntegrationEnabled,
     printExtraLinesByBubble,
+    ordersTodayOnly,
     bubbleMeta,
     uiStateReady,
   ]);
@@ -710,6 +716,7 @@ export default function App() {
         bubbleZOrder,
         sageIntegrationEnabled,
         printExtraLinesByBubble,
+        ordersTodayOnly,
         bubbleMeta: nextBubbleMeta || bubbleMeta,
       })
       .catch((e) => console.warn("[ui-state] write failed", e));
@@ -1788,8 +1795,21 @@ export default function App() {
       }
     });
 
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
+
+    const todayFiltered = ordersTodayOnly
+      ? pickupFiltered.filter((order) => {
+          const raw = order?.orderDate || order?.orderDateRaw;
+          const time = new Date(raw || 0).getTime();
+          if (Number.isNaN(time)) return false;
+          return time >= todayStart && time < todayEnd;
+        })
+      : pickupFiltered;
+
     // sort by orderDate descending (newest first), fallback to orderDateRaw string
-    return [...(pickupFiltered || [])].sort((a, b) => {
+    return [...(todayFiltered || [])].sort((a, b) => {
       const da = new Date(a?.orderDate || a?.orderDateRaw || 0).getTime();
       const db = new Date(b?.orderDate || b?.orderDateRaw || 0).getTime();
       if (Number.isNaN(da) && Number.isNaN(db)) return 0;
@@ -1797,7 +1817,7 @@ export default function App() {
       if (Number.isNaN(db)) return -1;
       return db - da;
     });
-  }, [orders, ordersSearch, ordersPickupFilter]);
+  }, [orders, ordersSearch, ordersPickupFilter, ordersTodayOnly]);
 
   const hasSearch = ordersSearch.trim().length > 0;
 
@@ -1936,6 +1956,8 @@ export default function App() {
             setOrdersSearch={setOrdersSearch}
             ordersPickupFilter={ordersPickupFilter}
             setOrdersPickupFilter={setOrdersPickupFilter}
+            ordersTodayOnly={ordersTodayOnly}
+            setOrdersTodayOnly={setOrdersTodayOnly}
             ordersDirty={ordersDirty}
             ordersSaving={ordersSaving}
             ordersLoading={ordersLoading}

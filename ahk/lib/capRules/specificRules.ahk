@@ -2,7 +2,7 @@ interchange(jsonFilePath, key) {
 
 	;MsgBox, path %jsonFilePath% key %key%
 	jsonFilePath := A_ScriptDir . "..\interchange\" . jsonFilePath
-    MsgBox, path %jsonFilePath% key %key%
+    ;MsgBox, path %jsonFilePath% key %key%
 
 	; Check if the file exists
 	if FileExist(jsonFilePath) {

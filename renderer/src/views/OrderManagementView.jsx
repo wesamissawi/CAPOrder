@@ -7,6 +7,8 @@ export default function OrderManagementView({
   setOrdersSearch,
   ordersPickupFilter,
   setOrdersPickupFilter,
+  ordersTodayOnly,
+  setOrdersTodayOnly,
   ordersDirty,
   ordersSaving,
   ordersLoading,
@@ -209,6 +211,17 @@ export default function OrderManagementView({
                     </button>
                   );
                 })}
+                <button
+                  type="button"
+                  onClick={() => setOrdersTodayOnly(!ordersTodayOnly)}
+                  className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold border transition ${
+                    ordersTodayOnly
+                      ? "bg-emerald-600 text-white border-emerald-600 shadow-sm"
+                      : "bg-white text-slate-700 border-slate-200 hover:bg-emerald-50"
+                  }`}
+                >
+                  Today
+                </button>
               </div>
               {ordersDirty && !ordersLoading && (
                 <span className="text-xs px-3 py-1 rounded-full bg-amber-100 text-amber-700 border border-amber-200">
