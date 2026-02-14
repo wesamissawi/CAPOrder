@@ -285,14 +285,21 @@ function saveOrdersToJson(filePath, orders) {
 
 function mergeOrders(existing = [], incoming = []) {
   const byRef = new Map();
+  const normalizeVendor = (order) =>
+    (order?.source || order?.warehouse || order?.seller || "").toString().trim().toLowerCase();
+  const scopedKey = (order) => {
+    const ref = order?.reference ? String(order.reference).trim().toUpperCase() : "";
+    const vendor = normalizeVendor(order);
+    return ref ? `${vendor || "unknown"}::${ref}` : "";
+  };
   (existing || []).forEach((o) => {
     if (!o) return;
-    const key = o.reference ? String(o.reference).trim().toUpperCase() : `EXISTING-${byRef.size}`;
+    const key = scopedKey(o) || `EXISTING-${byRef.size}`;
     byRef.set(key, o);
   });
   (incoming || []).forEach((o) => {
     if (!o) return;
-    const key = o.reference ? String(o.reference).trim().toUpperCase() : `NEW-${byRef.size}`;
+    const key = scopedKey(o) || `NEW-${byRef.size}`;
     const prev = byRef.get(key) || {};
     const next = {
       ...prev,
@@ -411,10 +418,18 @@ async function getCbkOrders(options = {}) {
   const headless = options.headless ?? DEFAULT_HEADLESS ?? false;
   const { storageStatePath, ordersJsonPath } = resolvePaths(options);
   const existingOrders = options.existingOrders || [];
+  const existingRefs = Array.isArray(options.existingRefs) ? options.existingRefs : [];
+  const isCbkOrder = (order) => {
+    const src = (order?.source || order?.warehouse || order?.seller || "").toString().trim().toLowerCase();
+    return src === "cbk";
+  };
   const existingRefSet = new Set(
-    (existingOrders || [])
-      .map((o) => (o && o.reference ? String(o.reference).trim().toUpperCase() : ""))
-      .filter(Boolean)
+    [
+      ...(existingOrders || [])
+        .filter(isCbkOrder)
+        .map((o) => (o && o.reference ? String(o.reference).trim().toUpperCase() : "")),
+      ...existingRefs.map((ref) => (ref ? String(ref).trim().toUpperCase() : "")),
+    ].filter(Boolean)
   );
 
   let browser;

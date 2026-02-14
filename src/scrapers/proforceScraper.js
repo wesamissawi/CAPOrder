@@ -287,10 +287,16 @@ async function getProforceOrders(options = {}) {
   const statusLog = [];
   const stepWaitMs = options.stepWaitMs ?? 800;
   const existingOrders = Array.isArray(options.existingOrders) ? options.existingOrders : [];
+  const existingRefs = Array.isArray(options.existingRefs) ? options.existingRefs : [];
   const existingByRef = new Map(
     existingOrders
       .filter((o) => o && o.reference)
       .map((o) => [String(o.reference).trim().toUpperCase(), o])
+  );
+  const existingRefSet = new Set(
+    existingRefs
+      .map((ref) => (ref ? String(ref).trim().toUpperCase() : ""))
+      .filter(Boolean)
   );
 
   const browser = await chromium.launch({
@@ -356,7 +362,7 @@ async function getProforceOrders(options = {}) {
     let detailFetched = 0;
     for (const order of orders) {
       const refKey = order.reference ? String(order.reference).trim().toUpperCase() : "";
-      if (refKey && existingByRef.has(refKey)) {
+      if (refKey && (existingByRef.has(refKey) || existingRefSet.has(refKey))) {
         order.detailStored = true;
         continue;
       }
@@ -403,6 +409,7 @@ async function getProforceOrders(options = {}) {
       const key = o?.reference ? String(o.reference).trim().toUpperCase() : "";
       if (!key) continue;
       if (mergedMap.has(key)) continue; // keep existing entry untouched
+      if (existingRefSet.has(key)) continue; // archived: skip re-adding
       const standardized = standardizeOrderForSage({
         ...o,
         source: "proforce",

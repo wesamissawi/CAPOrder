@@ -21,6 +21,7 @@ export default function OrderManagementView({
   onMarkForSage,
   onMarkComplete,
   onReconcileTotals,
+  onArchiveOrder,
   hasSearch,
 }) {
   const [invoiceEdits, setInvoiceEdits] = useState({});
@@ -169,6 +170,19 @@ export default function OrderManagementView({
   }
   `;
 
+  const canArchiveOrder = (order) =>
+    Boolean(
+      order &&
+        order.detailStored === true &&
+        order.pickedUp === true &&
+        order.hasInvoiceNum === true &&
+        order.totalVerified === true &&
+        order.enteredInSage === true &&
+        order.inStore === true &&
+        order.invoiceNeedsSync !== true &&
+        order.valueCheckAlert !== true
+    );
+
   return (
     <>
       <style>{valueCheckStyles}</style>
@@ -257,7 +271,7 @@ export default function OrderManagementView({
         ) : (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {filteredOrders.map((order, idx) => {
-              const key = `${order.reference || "order"}-${order.warehouse || idx}`;
+              const key = `${order.source || "unknown"}-${order.reference || order.__row || "order"}-${order.warehouse || "warehouse"}-${idx}`;
               const refKey = order.reference || order.__row || key;
               const isSageTriggered = Boolean(order.sage_trigger);
               const invoiceEntry = getInvoiceEntry(refKey, order.source_invoice || "");
@@ -398,13 +412,24 @@ export default function OrderManagementView({
                     })}
                   </div>
                   <div className="mt-2">
-                    <button
-                      type="button"
-                      onClick={() => onMarkComplete(refKey)}
-                      className="px-3 py-2 rounded-xl text-sm font-semibold border bg-emerald-600 text-white hover:bg-emerald-700"
-                    >
-                      Mark Complete
-                    </button>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onMarkComplete(refKey)}
+                        className="px-3 py-2 rounded-xl text-sm font-semibold border bg-emerald-600 text-white hover:bg-emerald-700"
+                      >
+                        Mark Complete
+                      </button>
+                      {canArchiveOrder(order) && (
+                        <button
+                          type="button"
+                          onClick={() => onArchiveOrder?.(refKey)}
+                          className="px-3 py-2 rounded-xl text-sm font-semibold border bg-slate-900 text-white hover:bg-slate-800"
+                        >
+                          Archive Order
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     <div className="flex flex-col gap-1">

@@ -64,6 +64,8 @@ contextBridge.exposeInMainWorld('api', {
   fetchBestBuyOrders: () => ipcRenderer.invoke('orders:fetch-bestbuy'),
   reconcileTotals: (refKey, order) => ipcRenderer.invoke('orders:reconcile-totals', refKey, order),
   addOrdersToOutstanding: () => ipcRenderer.invoke('orders:add-to-outstanding'),
+  archiveOrders: (payload) => ipcRenderer.invoke('orders:archive-completed', payload),
+  archiveOrder: (refKey) => ipcRenderer.invoke('orders:archive-one', refKey),
   archiveBubble: (payload) => ipcRenderer.invoke('archive:save-bubble', payload),
   searchArchive: (query) => ipcRenderer.invoke('archive:search', query),
   getArchivePath: () => ipcRenderer.invoke('archive:get-path'),

@@ -34,6 +34,7 @@ function standardizeOrderForSage(order = {}) {
   const reference = (order.source_invoice || order.reference || "").toString().trim();
   const warehouse = (order.warehouse || order.seller || order.source || "").toString().trim();
   const sage_source = (order.sage_source || order.source || warehouse || "").toString().trim();
+  const lastUpdatedAt = order.lastUpdatedAt || order.updatedAt || new Date().toISOString();
   return {
     ...order,
     warehouse: warehouse || order.warehouse || "",
@@ -41,6 +42,7 @@ function standardizeOrderForSage(order = {}) {
     sageDate: order.sageDate || order.sage_date || "",
     sage_reference: reference,
     sage_source,
+    lastUpdatedAt,
     sage_lineItems: Array.isArray(order.lineItems)
       ? order.lineItems.map((li) => normalizeLineItem(li || {}))
       : [],

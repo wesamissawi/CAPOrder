@@ -51,6 +51,9 @@ const BUSINESS_FILE_BASENAMES = {
   cashSales: 'cash_sales_items.json',
   orders: 'orders.json',
   ordersBackup: 'orders.json.bak',
+  ordersIndex: 'orders_index.json',
+  ordersArchive: 'orders_archive.json',
+  ordersArchiveBackup: 'orders_archive.json.bak',
   archived: 'archived_bubbles.json',
   archivedBackup: 'archived_bubbles.json.bak',
 };
@@ -170,6 +173,9 @@ function resolveBusinessPaths() {
     cashSales: path.join(queueDir, BUSINESS_FILE_BASENAMES.cashSales),
     orders: path.join(queueDir, BUSINESS_FILE_BASENAMES.orders),
     ordersBackup: path.join(queueDir, BUSINESS_FILE_BASENAMES.ordersBackup),
+    ordersIndex: path.join(queueDir, BUSINESS_FILE_BASENAMES.ordersIndex),
+    ordersArchive: path.join(queueDir, BUSINESS_FILE_BASENAMES.ordersArchive),
+    ordersArchiveBackup: path.join(queueDir, BUSINESS_FILE_BASENAMES.ordersArchiveBackup),
     archived: path.join(sharedDir, BUSINESS_FILE_BASENAMES.archived),
     archivedBackup: path.join(sharedDir, BUSINESS_FILE_BASENAMES.archivedBackup),
   };
@@ -182,6 +188,9 @@ function ensureBusinessFiles() {
     resolved.cashSales,
     resolved.orders,
     resolved.ordersBackup,
+    resolved.ordersIndex,
+    resolved.ordersArchive,
+    resolved.ordersArchiveBackup,
     resolved.archived,
     resolved.archivedBackup,
   ].forEach((file) => ensureDataFileAt(file));
@@ -194,6 +203,9 @@ function getResolvedPathsSummary() {
     cash_sales_items: { path: resolved.cashSales, exists: fs.existsSync(resolved.cashSales) },
     orders_json: { path: resolved.orders, exists: fs.existsSync(resolved.orders) },
     orders_json_bak: { path: resolved.ordersBackup, exists: fs.existsSync(resolved.ordersBackup) },
+    orders_index_json: { path: resolved.ordersIndex, exists: fs.existsSync(resolved.ordersIndex) },
+    orders_archive_json: { path: resolved.ordersArchive, exists: fs.existsSync(resolved.ordersArchive) },
+    orders_archive_bak: { path: resolved.ordersArchiveBackup, exists: fs.existsSync(resolved.ordersArchiveBackup) },
     archived_bubbles: { path: resolved.archived, exists: fs.existsSync(resolved.archived) },
     archived_bubbles_bak: { path: resolved.archivedBackup, exists: fs.existsSync(resolved.archivedBackup) },
   };
@@ -355,8 +367,22 @@ function getOrdersFile() {
   const resolved = resolveBusinessPaths();
   return resolved.orders;
 }
+function getOrdersIndexFile() {
+  const resolved = resolveBusinessPaths();
+  return resolved.ordersIndex;
+}
+function getOrdersArchiveFile() {
+  const resolved = resolveBusinessPaths();
+  return resolved.ordersArchive;
+}
 function readOrders() {
   return readItemsAt(getOrdersFile());
+}
+function readOrdersIndex() {
+  return readItemsAt(getOrdersIndexFile());
+}
+function readOrdersArchive() {
+  return readItemsAt(getOrdersArchiveFile());
 }
 function ensureArchiveFileAt(file) {
   ensureDataFileAt(file);
@@ -371,7 +397,251 @@ function writeOrdersAt(file, orders) {
   writeJsonAtomic(file, JSON.stringify(orders ?? [], null, 2));
 }
 function writeOrders(orders) {
-  return writeOrdersAt(getOrdersFile(), orders);
+  const res = writeOrdersAt(getOrdersFile(), orders);
+  refreshOrdersIndex(orders);
+  return res;
+}
+function writeOrdersArchive(orders) {
+  const file = getOrdersArchiveFile();
+  backupFile(file);
+  ensureDataFileAt(file);
+  writeJsonAtomic(file, JSON.stringify(orders ?? [], null, 2));
+  refreshOrdersIndex(readOrders(), orders);
+}
+function writeOrdersIndex(index) {
+  const file = getOrdersIndexFile();
+  ensureDataFileAt(file);
+  writeJsonAtomic(file, JSON.stringify(index ?? [], null, 2));
+}
+function buildOrdersIndex(activeOrders, archivedOrders) {
+  const indexByKey = new Map();
+  const add = (order, archived) => {
+    if (!order) return;
+    const key = normalizeOrderRef(order);
+    if (!key || indexByKey.has(key)) return;
+    const reference =
+      (order.reference || order.sage_reference || order.source_invoice || "").toString().trim();
+    const source = (order.source || getVendorName(order) || "").toString().trim();
+    indexByKey.set(key, {
+      key,
+      reference,
+      source,
+      archived: Boolean(archived),
+      archivedAt: archived ? order.archivedAt || null : null,
+    });
+  };
+
+  (activeOrders || []).forEach((o) => add(o, false));
+  (archivedOrders || []).forEach((o) => add(o, true));
+  return Array.from(indexByKey.values());
+}
+function refreshOrdersIndex(activeOrders, archivedOrders) {
+  const archive = Array.isArray(archivedOrders) ? archivedOrders : readOrdersArchive();
+  const active = Array.isArray(activeOrders) ? activeOrders : readOrders();
+  const index = buildOrdersIndex(active, archive);
+  writeOrdersIndex(index);
+}
+function getArchivedOrderRefs(activeOrders, options = {}) {
+  const vendor = (options.vendor || '').toString().trim().toLowerCase();
+  const preferReferenceVendors = new Set(['world', 'transbec', 'bestbuy', 'proforce']);
+  const preferReference = preferReferenceVendors.has(vendor);
+  const activeSet = new Set(
+    (activeOrders || [])
+      .map((o) => normalizeOrderRef(o))
+      .filter(Boolean)
+  );
+  const index = readOrdersIndex();
+  const refs = [];
+  const addRef = (val) => {
+    const key = val ? String(val).trim().toUpperCase() : '';
+    if (!key || activeSet.has(key)) return;
+    refs.push(key);
+  };
+  const sourceMatches = (entrySource) => {
+    if (!vendor) return true;
+    const source = (entrySource || '').toString().trim().toLowerCase();
+    if (!source) return false;
+    return source === vendor;
+  };
+  if (Array.isArray(index) && index.length) {
+    index.forEach((entry) => {
+      if (!entry) return;
+      if (!sourceMatches(entry.source)) return;
+      if (preferReference) {
+        addRef(entry.reference);
+        addRef(entry.key);
+      } else {
+        addRef(entry.key);
+        addRef(entry.reference);
+      }
+    });
+    return refs;
+  }
+  const archive = readOrdersArchive();
+  (archive || []).forEach((o) => {
+    if (vendor) {
+      const source = (o?.source || getVendorName(o) || '').toString().trim().toLowerCase();
+      if (source && source !== vendor) return;
+    }
+    if (preferReference) {
+      addRef(o?.reference);
+    }
+    const key = normalizeOrderRef(o);
+    if (key && !activeSet.has(key)) refs.push(key);
+  });
+  return refs;
+}
+function parseMoney(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const num = parseFloat(String(value).replace(/[^\d.-]/g, ''));
+  return Number.isFinite(num) ? num : null;
+}
+function parseDateMs(value) {
+  if (!value) return null;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
+}
+function getOrderLastUpdatedAt(order) {
+  if (!order) return null;
+  return (
+    order.lastUpdatedAt ||
+    order.last_updated_at ||
+    order.updatedAt ||
+    order.updated_at ||
+    order.sage_processed_at ||
+    order.detailFetchedAt ||
+    order.orderDate ||
+    order.orderDateRaw ||
+    null
+  );
+}
+function isOrderCompleteForArchive(order, minDays) {
+  if (!order) return false;
+  const updatedAt = getOrderLastUpdatedAt(order);
+  const updatedMs = parseDateMs(updatedAt);
+  if (!updatedMs) return false;
+  const minDaysNum = Number(minDays);
+  const cutoffDays = Number.isFinite(minDaysNum) && minDaysNum >= 0 ? minDaysNum : 2;
+  const cutoffMs = cutoffDays * 24 * 60 * 60 * 1000;
+  if (Date.now() - updatedMs < cutoffMs) return false;
+  const billed = parseMoney(order.billed_total ?? order.billedTotal);
+  const sage = parseMoney(order.sage_total_synced ?? order.sageTotalSynced);
+  if (!Number.isFinite(billed) || !Number.isFinite(sage)) return false;
+  const totalsMatch = Math.abs(billed - sage) < 0.01;
+  return (
+    order.detailStored === true &&
+    order.pickedUp === true &&
+    order.hasInvoiceNum === true &&
+    order.totalVerified === true &&
+    order.enteredInSage === true &&
+    order.inStore === true &&
+    order.invoiceNeedsSync === false &&
+    order.valueCheckAlert === false &&
+    totalsMatch
+  );
+}
+function meetsArchiveCriteria(order) {
+  if (!order) return false;
+  return (
+    order.detailStored === true &&
+    order.pickedUp === true &&
+    order.hasInvoiceNum === true &&
+    order.totalVerified === true &&
+    order.enteredInSage === true &&
+    order.inStore === true &&
+    order.invoiceNeedsSync !== true &&
+    order.valueCheckAlert !== true
+  );
+}
+function archiveCompletedOrders(options = {}) {
+  let minDays = options;
+  if (options && typeof options === 'object') {
+    minDays = options.minDays ?? options.archiveMinDays ?? options.archiveCleanupDays;
+  }
+  if (minDays === undefined || minDays === null) {
+    try {
+      const uiState = readUIState();
+      if (uiState && typeof uiState.archiveCleanupDays === 'number') {
+        minDays = uiState.archiveCleanupDays;
+      }
+    } catch {}
+  }
+  const active = readOrders();
+  const archive = readOrdersArchive();
+  const archiveByKey = new Map();
+  (archive || []).forEach((o) => {
+    const key = normalizeOrderRef(o);
+    if (!key || archiveByKey.has(key)) return;
+    archiveByKey.set(key, o);
+  });
+
+  const keepActive = [];
+  let archivedCount = 0;
+  const nowIso = new Date().toISOString();
+
+  (active || []).forEach((order) => {
+    if (isOrderCompleteForArchive(order, minDays)) {
+      const key = normalizeOrderRef(order);
+      if (key && !archiveByKey.has(key)) {
+        archiveByKey.set(key, { ...order, archivedAt: nowIso });
+        archivedCount += 1;
+      }
+    } else {
+      keepActive.push(order);
+    }
+  });
+
+  const mergedArchive = Array.from(archiveByKey.values());
+  writeOrdersArchive(mergedArchive);
+  writeOrders(keepActive);
+
+  return {
+    ok: true,
+    archived: archivedCount,
+    remaining: keepActive.length,
+    archiveCount: mergedArchive.length,
+  };
+}
+function archiveOrderByKey(refKeyRaw) {
+  const key = (refKeyRaw || '').toString().trim().toUpperCase();
+  if (!key) return { ok: false, error: 'Missing reference key.' };
+
+  const active = readOrders();
+  const archive = readOrdersArchive();
+  const archiveByKey = new Map();
+  (archive || []).forEach((o) => {
+    const k = normalizeOrderRef(o);
+    if (!k || archiveByKey.has(k)) return;
+    archiveByKey.set(k, o);
+  });
+
+  let found = null;
+  const keepActive = [];
+  (active || []).forEach((order) => {
+    if (!order) return;
+    if (orderMatchesKey(order, key)) {
+      found = order;
+      return;
+    }
+    keepActive.push(order);
+  });
+
+  if (!found) return { ok: false, error: 'Order not found.' };
+  if (!meetsArchiveCriteria(found)) {
+    return { ok: false, error: 'Order does not meet archive criteria.' };
+  }
+
+  const normKey = normalizeOrderRef(found);
+  if (normKey && !archiveByKey.has(normKey)) {
+    archiveByKey.set(normKey, { ...found, archivedAt: new Date().toISOString() });
+  }
+
+  const mergedArchive = Array.from(archiveByKey.values());
+  writeOrdersArchive(mergedArchive);
+  writeOrders(keepActive);
+
+  return { ok: true, archived: 1, remaining: keepActive.length };
 }
 
 const sageDomain = createSageDomain({ readOrders, writeOrders, orderMatchesKey });
@@ -382,6 +652,7 @@ const vendorOrdersService = createVendorOrdersService({
   VENDOR_PATHS,
   readOrders,
   writeOrders,
+  getArchivedOrderRefs,
   getOrdersFile,
   loadConfig,
   getWorldOrders,
@@ -715,12 +986,18 @@ app.whenReady().then(async () => {
   } catch (e) {
     console.warn('[app-config] prompt for shared folder failed', e);
   }
-  try {
-    await maybeOfferMigrationToShared();
-  } catch (e) {
-    console.warn('[app-config] migration prompt failed', e);
-  }
   ensureBusinessFiles();
+  try {
+    refreshOrdersIndex();
+  } catch (e) {
+    console.warn('[orders] refresh index failed', e);
+  }
+  try {
+    const res = archiveCompletedOrders();
+    console.log('[orders] startup archive completed', res);
+  } catch (e) {
+    console.warn('[orders] startup archive failed', e);
+  }
   createWindow();
 });
 
@@ -765,6 +1042,8 @@ function registerAllIpc() {
     readOrders,
     writeOrders,
     getOrdersFile,
+    archiveCompletedOrders,
+    archiveOrderByKey,
     resetSageQueue,
     stopOrdersWatching,
     startOrdersWatching,

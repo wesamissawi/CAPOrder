@@ -96,6 +96,10 @@ export default function App() {
   const [ordersSearch, setOrdersSearch] = useState("");
   const [ordersPickupFilter, setOrdersPickupFilter] = useState("all");
   const [ordersTodayOnly, setOrdersTodayOnly] = useState(false);
+  const [ordersArchiveRunning, setOrdersArchiveRunning] = useState(false);
+  const [ordersArchiveStatus, setOrdersArchiveStatus] = useState("");
+  const [ordersArchiveError, setOrdersArchiveError] = useState("");
+  const [archiveCleanupDays, setArchiveCleanupDays] = useState(2);
   const [sageIntegrationEnabled, setSageIntegrationEnabled] = useState(false);
   const [sageReadyOrders, setSageReadyOrders] = useState([]);
   const [sageWatchError, setSageWatchError] = useState("");
@@ -223,6 +227,7 @@ export default function App() {
 
     return () => off && off();
   }, []);
+
 
   // === Autosave after 10s of inactivity ===
   useEffect(() => {
@@ -578,6 +583,9 @@ export default function App() {
         if (typeof state.sageIntegrationEnabled === "boolean") {
           setSageIntegrationEnabled(state.sageIntegrationEnabled);
         }
+        if (typeof state.archiveCleanupDays === "number") {
+          setArchiveCleanupDays(state.archiveCleanupDays);
+        }
         if (
           state.printExtraLinesByBubble &&
           typeof state.printExtraLinesByBubble === "object"
@@ -686,39 +694,42 @@ export default function App() {
   useEffect(() => {
     if (!uiStateReady || !api?.writeUIState) return;
     api
-      .writeUIState({
-        bubblePositions,
-        bubbleSizes,
-        bubbleZOrder,
-        sageIntegrationEnabled,
-        printExtraLinesByBubble,
-        ordersTodayOnly,
-        bubbleMeta,
-      })
+        .writeUIState({
+          bubblePositions,
+          bubbleSizes,
+          bubbleZOrder,
+          sageIntegrationEnabled,
+          archiveCleanupDays,
+          printExtraLinesByBubble,
+          ordersTodayOnly,
+          bubbleMeta,
+        })
       .catch((e) => console.warn("[ui-state] write failed", e));
   }, [
     bubblePositions,
-    bubbleSizes,
-    bubbleZOrder,
-    sageIntegrationEnabled,
-    printExtraLinesByBubble,
-    ordersTodayOnly,
-    bubbleMeta,
-    uiStateReady,
-  ]);
+      bubbleSizes,
+      bubbleZOrder,
+      sageIntegrationEnabled,
+      archiveCleanupDays,
+      printExtraLinesByBubble,
+      ordersTodayOnly,
+      bubbleMeta,
+      uiStateReady,
+    ]);
 
   function persistUIState(nextBubbleMeta) {
     if (!uiStateReady || !api?.writeUIState) return;
-    api
-      .writeUIState({
-        bubblePositions,
-        bubbleSizes,
-        bubbleZOrder,
-        sageIntegrationEnabled,
-        printExtraLinesByBubble,
-        ordersTodayOnly,
-        bubbleMeta: nextBubbleMeta || bubbleMeta,
-      })
+      api
+        .writeUIState({
+          bubblePositions,
+          bubbleSizes,
+          bubbleZOrder,
+          sageIntegrationEnabled,
+          archiveCleanupDays,
+          printExtraLinesByBubble,
+          ordersTodayOnly,
+          bubbleMeta: nextBubbleMeta || bubbleMeta,
+        })
       .catch((e) => console.warn("[ui-state] write failed", e));
   }
   useEffect(() => {
@@ -1387,11 +1398,16 @@ export default function App() {
           o.reference &&
           String(o.reference).trim().toUpperCase() === String(key).trim().toUpperCase();
         const rowMatch = o.__row && String(o.__row) === String(key);
-        if (!refMatch && !rowMatch) return o;
-        changed = true;
-        const patchVal = typeof patch === "function" ? patch(o) : patch || {};
-        return { ...o, ...(patchVal || {}), _localDirty: true };
-      });
+          if (!refMatch && !rowMatch) return o;
+          changed = true;
+          const patchVal = typeof patch === "function" ? patch(o) : patch || {};
+          return {
+            ...o,
+            ...(patchVal || {}),
+            lastUpdatedAt: new Date().toISOString(),
+            _localDirty: true,
+          };
+        });
       if (changed) setOrdersDirty(true);
       return next;
     });
@@ -1497,6 +1513,35 @@ export default function App() {
       setOrdersError(e?.message || "Failed to save orders.");
     } finally {
       setOrdersSaving(false);
+    }
+  }
+
+  async function handleArchiveOrders() {
+    if (!api?.archiveOrders) return;
+    try {
+      setOrdersArchiveRunning(true);
+      setOrdersArchiveError("");
+      setOrdersArchiveStatus("");
+      const res = await api.archiveOrders({ minDays: archiveCleanupDays });
+      if (!res?.ok) throw new Error(res?.error || "Failed to archive completed orders.");
+      setOrdersArchiveStatus(`Archived ${res.archived || 0} order(s).`);
+      await loadOrders();
+    } catch (e) {
+      setOrdersArchiveError(e?.message || "Failed to archive completed orders.");
+    } finally {
+      setOrdersArchiveRunning(false);
+    }
+  }
+
+  async function handleArchiveOrder(refKey) {
+    if (!api?.archiveOrder) return;
+    try {
+      setOrdersError(null);
+      const res = await api.archiveOrder(refKey);
+      if (!res?.ok) throw new Error(res?.error || "Failed to archive order.");
+      await loadOrders();
+    } catch (e) {
+      setOrdersError(e?.message || "Failed to archive order.");
     }
   }
 
@@ -1881,6 +1926,12 @@ export default function App() {
             outstandingRunning={outstandingRunning}
             outstandingStatus={outstandingStatus}
             outstandingError={outstandingError}
+            onArchiveOrders={handleArchiveOrders}
+            ordersArchiveRunning={ordersArchiveRunning}
+            ordersArchiveStatus={ordersArchiveStatus}
+            ordersArchiveError={ordersArchiveError}
+            archiveCleanupDays={archiveCleanupDays}
+            setArchiveCleanupDays={setArchiveCleanupDays}
             sageIntegrationEnabled={sageIntegrationEnabled}
             setSageIntegrationEnabled={handleSageIntegrationToggleClick}
             sageReadyOrders={sageReadyOrders}
@@ -1970,6 +2021,7 @@ export default function App() {
             onMarkForSage={handleOrderSageTrigger}
             onMarkComplete={handleMarkComplete}
             onReconcileTotals={handleReconcileTotals}
+            onArchiveOrder={handleArchiveOrder}
             hasSearch={hasSearch}
           />
         ) : currentView === "archive-search" ? (

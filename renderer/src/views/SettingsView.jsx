@@ -76,11 +76,14 @@ export default function SettingsView() {
 
   const fileEntries = useMemo(() => {
     if (!summary?.files) return [];
-    const labels = {
-      orders_json: "orders.json",
-      orders_json_bak: "orders.json.bak",
-      outstanding_items: "outstanding_items.json",
-      sage_ar_items: "sage_ar_items.json",
+      const labels = {
+        orders_json: "orders.json",
+        orders_json_bak: "orders.json.bak",
+        orders_index_json: "orders_index.json",
+        orders_archive_json: "orders_archive.json",
+        orders_archive_bak: "orders_archive.json.bak",
+        outstanding_items: "outstanding_items.json",
+        sage_ar_items: "sage_ar_items.json",
       cash_sales_items: "cash_sales_items.json",
       archived_bubbles: "archived_bubbles.json",
       archived_bubbles_bak: "archived_bubbles.json.bak",

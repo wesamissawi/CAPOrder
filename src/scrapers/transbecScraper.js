@@ -562,10 +562,16 @@ async function getTransbecOrders(options = {}) {
   const headless = options.headless ?? DEFAULT_HEADLESS;
   const maxPages = options.maxPages ?? 1; // default: only scrape first page
   const existingOrders = Array.isArray(options.existingOrders) ? options.existingOrders : [];
+  const existingRefs = Array.isArray(options.existingRefs) ? options.existingRefs : [];
   const existingByRef = new Map(
     existingOrders
       .filter((o) => o && o.reference)
       .map((o) => [String(o.reference).trim().toUpperCase(), o])
+  );
+  const existingRefSet = new Set(
+    existingRefs
+      .map((ref) => (ref ? String(ref).trim().toUpperCase() : ""))
+      .filter(Boolean)
   );
   const statusLog = [];
   const stepWaitMs = options.stepWaitMs ?? 1200;
@@ -623,7 +629,7 @@ async function getTransbecOrders(options = {}) {
     let detailFetched = 0;
     for (const order of orders) {
       const refKey = order.reference ? String(order.reference).trim().toUpperCase() : "";
-      if (refKey && existingByRef.has(refKey)) {
+      if (refKey && (existingByRef.has(refKey) || existingRefSet.has(refKey))) {
         // Keep existing version; skip detail fetch
         order.detailStored = true;
         continue;
@@ -655,6 +661,7 @@ async function getTransbecOrders(options = {}) {
       const key = o?.reference ? String(o.reference).trim().toUpperCase() : "";
       if (!key) continue;
       if (mergedMap.has(key)) continue; // leave existing untouched
+      if (existingRefSet.has(key)) continue; // archived: skip re-adding
       const standardized = standardizeOrderForSage({
         ...o,
         source: "transbec",

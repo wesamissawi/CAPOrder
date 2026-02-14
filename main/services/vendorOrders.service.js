@@ -4,6 +4,7 @@ const createVendorOrdersService = (deps) => {
     VENDOR_PATHS,
     readOrders,
     writeOrders,
+    getArchivedOrderRefs,
     getOrdersFile,
     loadConfig,
     getWorldOrders,
@@ -17,6 +18,7 @@ const createVendorOrdersService = (deps) => {
     try {
       ensureDir(VENDOR_PATHS.world.dataDir);
       const existing = readOrders();
+      const archivedRefs = getArchivedOrderRefs(existing, { vendor: 'world' });
       const targetOrdersPath = getOrdersFile();
       const config = loadConfig();
       const worldUser = typeof config.WORLD_USER === 'string' ? config.WORLD_USER : '';
@@ -29,6 +31,7 @@ const createVendorOrdersService = (deps) => {
         storageStatePath: VENDOR_PATHS.world.storageState,
         ordersPath: targetOrdersPath,
         existingOrders: existing,
+        existingRefs: archivedRefs,
         credentials: { user: worldUser, pass: worldPass },
       });
       if (res?.ok && Array.isArray(res.orders)) {
@@ -46,6 +49,7 @@ const createVendorOrdersService = (deps) => {
       ensureDir(VENDOR_PATHS.transbec.dataDir);
       const targetOrdersPath = getOrdersFile();
       const existing = readOrders();
+      const archivedRefs = getArchivedOrderRefs(existing, { vendor: 'transbec' });
       const config = loadConfig();
       const transbecUser = typeof config.TRANSBEC_USER === 'string' ? config.TRANSBEC_USER : '';
       const transbecPass = typeof config.TRANSBEC_PASS === 'string' ? config.TRANSBEC_PASS : '';
@@ -58,6 +62,7 @@ const createVendorOrdersService = (deps) => {
         ordersPath: targetOrdersPath,
         productsPath: VENDOR_PATHS.transbec.products,
         existingOrders: existing,
+        existingRefs: archivedRefs,
         maxPages: 1, // limit to first page as requested
         credentials: { user: transbecUser, pass: transbecPass },
       });
@@ -104,11 +109,13 @@ const createVendorOrdersService = (deps) => {
       ensureDir(VENDOR_PATHS.proforce.dataDir);
       const targetOrdersPath = getOrdersFile();
       const existing = readOrders();
+      const archivedRefs = getArchivedOrderRefs(existing, { vendor: 'proforce' });
       const res = await getProforceOrders({
         storageDir: VENDOR_PATHS.proforce.dataDir,
         storageStatePath: VENDOR_PATHS.proforce.storageState,
         ordersPath: targetOrdersPath,
         existingOrders: existing,
+        existingRefs: archivedRefs,
         credentials: { store, customer, pass },
       });
       if (res?.ok && Array.isArray(res.orders)) {
@@ -132,11 +139,13 @@ const createVendorOrdersService = (deps) => {
       ensureDir(VENDOR_PATHS.cbk.dataDir);
       const targetOrdersPath = getOrdersFile();
       const existing = readOrders();
+      const archivedRefs = getArchivedOrderRefs(existing, { vendor: 'cbk' });
       const res = await getCbkOrders({
         storageDir: VENDOR_PATHS.cbk.dataDir,
         storageStatePath: VENDOR_PATHS.cbk.storageState,
         ordersPath: targetOrdersPath,
         existingOrders: existing,
+        existingRefs: archivedRefs,
         credentials: { user: cbkUser, pass: cbkPass },
       });
       if (res?.ok && Array.isArray(res.orders)) {
@@ -160,11 +169,13 @@ const createVendorOrdersService = (deps) => {
       ensureDir(VENDOR_PATHS.bestbuy.dataDir);
       const targetOrdersPath = getOrdersFile();
       const existing = readOrders();
+      const archivedRefs = getArchivedOrderRefs(existing, { vendor: 'bestbuy' });
       const res = await getBestBuyOrders({
         storageDir: VENDOR_PATHS.bestbuy.dataDir,
         storageStatePath: VENDOR_PATHS.bestbuy.storageState,
         ordersPath: targetOrdersPath,
         existingOrders: existing,
+        existingRefs: archivedRefs,
         credentials: { user: bestUser, pass: bestPass },
       });
       if (res?.ok && Array.isArray(res.orders)) {

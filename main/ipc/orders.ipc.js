@@ -21,6 +21,8 @@ const registerOrdersIpc = (ipcMain, deps) => {
     orderMatchesKey,
     runSageReconcile,
     applyReconcileResult,
+    archiveCompletedOrders,
+    archiveOrderByKey,
   } = deps;
 
   ipcMain.handle('orders:read', () => readOrders());
@@ -107,6 +109,25 @@ const registerOrdersIpc = (ipcMain, deps) => {
   ipcMain.handle('orders:fetch-bestbuy', async () => {
     return fetchBestBuyOrders();
   });
+
+  ipcMain.handle('orders:archive-completed', async (_evt, payload) => {
+    try {
+      return archiveCompletedOrders(payload);
+    } catch (e) {
+      console.error('[orders:archive-completed]', e);
+      return { ok: false, error: e?.message || 'Failed to archive completed orders.' };
+    }
+  });
+
+  ipcMain.handle('orders:archive-one', async (_evt, refKey) => {
+    try {
+      return archiveOrderByKey(refKey);
+    } catch (e) {
+      console.error('[orders:archive-one]', e);
+      return { ok: false, error: e?.message || 'Failed to archive order.' };
+    }
+  });
+
 
   ipcMain.handle('orders:reconcile-totals', async (_event, refKeyRaw, providedOrder) => {
     try {

@@ -93,6 +93,7 @@ const createSageDomain = (deps) => {
         sage_total_synced: nextSageTotal,
         sage_trigger: false,
         sage_processed_at: nowIso,
+        lastUpdatedAt: nowIso,
         totalVerified: verified ? true : o.totalVerified,
         valueCheckAlert: needsValueCheck ? true : verified ? false : o.valueCheckAlert,
       };
@@ -109,6 +110,7 @@ const createSageDomain = (deps) => {
         sage_total_synced: Number.isFinite(sageTotal) ? sageTotal : fallbackOrder.sage_total_synced,
         sage_trigger: false,
         sage_processed_at: nowIso,
+        lastUpdatedAt: nowIso,
         totalVerified: (() => {
           const billedNum = Number.isFinite(fallbackOrder?.billed_total)
             ? fallbackOrder.billed_total
@@ -152,10 +154,22 @@ const createSageDomain = (deps) => {
     const nowIso = new Date().toISOString();
     const billedNum = Number.isFinite(billedTotal) ? billedTotal : null;
     let found = false;
+    const matchesKey = (order, targetKey) => {
+      if (!order || !targetKey) return false;
+      const candidates = [
+        order.sage_reference_synced,
+        order.sage_reference,
+        order.source_invoice,
+        order.reference,
+      ];
+      return candidates.some((val) => {
+        if (val === null || val === undefined) return false;
+        return String(val).trim().toUpperCase() === targetKey;
+      });
+    };
     const updated = list.map((o) => {
       if (!o) return o;
-      const cand = (o.sage_reference || o.reference || o.__row || "").toString().trim().toUpperCase();
-      if (!cand || cand !== key) return o;
+      if (!matchesKey(o, key)) return o;
       found = true;
       const resolvedSageTotal = Number.isFinite(sageTotalOverride)
         ? sageTotalOverride
@@ -180,6 +194,7 @@ const createSageDomain = (deps) => {
         reconciliation_delta: delta,
         journalEntry: resolvedJournal,
         journal_entry: resolvedJournal,
+        lastUpdatedAt: nowIso,
         totalVerified: verified ? true : o.totalVerified,
         valueCheckAlert: needsValueCheck ? true : verified ? false : o.valueCheckAlert,
       };
@@ -208,6 +223,7 @@ const createSageDomain = (deps) => {
         reconciliation_delta: delta,
         journalEntry: resolvedJournal,
         journal_entry: resolvedJournal,
+        lastUpdatedAt: nowIso,
         totalVerified: verified ? true : fallbackOrder.totalVerified,
         valueCheckAlert: needsValueCheck ? true : verified ? false : fallbackOrder.valueCheckAlert,
       };
@@ -242,6 +258,7 @@ const createSageDomain = (deps) => {
         sage_processed_at: nowIso,
         journalEntry: nextJournal,
         journal_entry: nextJournal,
+        lastUpdatedAt: nowIso,
       };
     });
     if (changed) writeOrders(updated);

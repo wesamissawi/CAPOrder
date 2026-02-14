@@ -428,7 +428,7 @@ function saveOrdersToJson(orders, ordersJsonPath) {
   fs.writeFileSync(ordersJsonPath, JSON.stringify(orders, null, 2), "utf8");
 }
 
-function loadExistingOrders(ordersJsonPath, existingOrdersOption) {
+function loadExistingOrders(ordersJsonPath, existingOrdersOption, existingRefsOption) {
   const normalizeRef = (ref) => (ref ? String(ref).trim().toUpperCase() : "");
   const existingOrders = [];
   const refMap = new Map();
@@ -455,6 +455,14 @@ function loadExistingOrders(ordersJsonPath, existingOrdersOption) {
     existingOrdersOption.forEach(addIfNew);
   }
 
+  if (Array.isArray(existingRefsOption)) {
+    existingRefsOption.forEach((ref) => {
+      const key = normalizeRef(ref);
+      if (!key || refMap.has(key)) return;
+      refMap.set(key, true);
+    });
+  }
+
   return { existingOrders, refMap, normalizeRef };
 }
 
@@ -463,7 +471,8 @@ async function getWorldOrders(options = {}) {
   const { storageStatePath, ordersJsonPath } = resolvePaths(options);
   const { existingOrders, refMap, normalizeRef } = loadExistingOrders(
     ordersJsonPath,
-    options.existingOrders
+    options.existingOrders,
+    options.existingRefs
   );
   const headless = options.headless ?? DEFAULT_HEADLESS;
   const statusLog = [];

@@ -387,10 +387,14 @@ async function getBestBuyOrders(options = {}) {
   const headless = options.headless ?? DEFAULT_HEADLESS ?? false;
   const { storageStatePath, ordersJsonPath } = resolvePaths(options);
   const existingOrders = options.existingOrders || [];
+  const existingRefs = Array.isArray(options.existingRefs) ? options.existingRefs : [];
   const existingRefSet = new Set(
-    (existingOrders || [])
-      .map((o) => (o && o.reference ? String(o.reference).trim().toUpperCase() : ""))
-      .filter(Boolean)
+    [
+      ...(existingOrders || []).map((o) =>
+        o && o.reference ? String(o.reference).trim().toUpperCase() : ""
+      ),
+      ...existingRefs.map((ref) => (ref ? String(ref).trim().toUpperCase() : "")),
+    ].filter(Boolean)
   );
 
   let browser;

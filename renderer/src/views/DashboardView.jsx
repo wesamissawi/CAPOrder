@@ -38,6 +38,12 @@ export default function DashboardView({
   outstandingRunning,
   outstandingStatus,
   outstandingError,
+  onArchiveOrders,
+  ordersArchiveRunning,
+  ordersArchiveStatus,
+  ordersArchiveError,
+  archiveCleanupDays,
+  setArchiveCleanupDays,
   sageIntegrationEnabled,
   setSageIntegrationEnabled,
   sageReadyOrders,
@@ -77,6 +83,48 @@ export default function DashboardView({
             {sageIntegrationEnabled ? "Sage On" : "Sage Off"}
           </button>
         </div>
+      </Card>
+
+      <Card className="bg-white/80">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-lg font-semibold text-slate-800">Orders archive cleanup</p>
+            <p className="text-sm text-slate-500">
+              Move completed orders into the archive after the cooldown window.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onArchiveOrders}
+            disabled={ordersArchiveRunning}
+            className="px-4 py-2 rounded-full bg-slate-900 text-white text-sm font-semibold disabled:opacity-60"
+          >
+            {ordersArchiveRunning ? "Archiving..." : "Archive Completed"}
+          </button>
+        </div>
+        <div className="mt-4 flex items-center gap-4">
+          <input
+            type="range"
+            min={0}
+            max={14}
+            value={archiveCleanupDays}
+            onChange={(e) => setArchiveCleanupDays(Number(e.target.value) || 0)}
+            className="flex-1 accent-indigo-600"
+          />
+          <div className="text-sm text-slate-700 w-24 text-right">
+            {archiveCleanupDays} day{archiveCleanupDays === 1 ? "" : "s"}
+          </div>
+        </div>
+        {ordersArchiveError && (
+          <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+            {ordersArchiveError}
+          </div>
+        )}
+        {ordersArchiveStatus && !ordersArchiveError && (
+          <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700">
+            {ordersArchiveStatus}
+          </div>
+        )}
       </Card>
 
       <Card className="bg-white/80">
