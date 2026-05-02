@@ -11,7 +11,8 @@ const createItemsService = (deps) => {
     return byQueue;
   }
 
-  function writeItems(items) {
+  function writeItems(items, options = {}) {
+    const { replaceAll = true } = options;
     const queues = ['OUTSTANDING', 'SAGE_AR', 'CASH_SALE'];
 
     // 1) Read current state of all queues
@@ -37,11 +38,13 @@ const createItemsService = (deps) => {
     });
 
     // 3b) Remove items that are no longer present (honor deletions)
-    Array.from(map.keys()).forEach((uid) => {
-      if (!incomingUids.has(uid)) {
-        map.delete(uid);
-      }
-    });
+    if (replaceAll) {
+      Array.from(map.keys()).forEach((uid) => {
+        if (!incomingUids.has(uid)) {
+          map.delete(uid);
+        }
+      });
+    }
 
     // 4) Split merged list back into queues
     const mergedList = Array.from(map.values());

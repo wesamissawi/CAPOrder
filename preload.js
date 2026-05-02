@@ -57,6 +57,9 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('orders:updated', listener);
   },
   getOrdersPath: () => ipcRenderer.invoke('orders:get-path'),
+  readPayments: () => ipcRenderer.invoke('payments:read'),
+  writePayments: (payments) => ipcRenderer.invoke('payments:write', payments),
+  getPaymentsPath: () => ipcRenderer.invoke('payments:get-path'),
   fetchWorldOrders: () => ipcRenderer.invoke('orders:fetch-world'),
   fetchTransbecOrders: () => ipcRenderer.invoke('orders:fetch-transbec'),
   fetchProforceOrders: () => ipcRenderer.invoke('orders:fetch-proforce'),

@@ -39,6 +39,12 @@ export default function StockFlowView({
   onMoveBubbleToCashSales,
   archivableBubbleIds,
   onArchiveBubble,
+  showCashSalesMetrics = false,
+  payments = [],
+  paymentsLoading = false,
+  paymentsError = "",
+  bubblePaymentAssignments = {},
+  onUpdateBubblePayments,
 }) {
   const createBubbleRef = useRef(null);
   const workspaceSize = useMemo(() => {
@@ -162,6 +168,12 @@ export default function StockFlowView({
                   onMoveToCashSales={onMoveBubbleToCashSales}
                   canArchive={canArchive}
                   onArchiveBubble={onArchiveBubble}
+                  showCashSalesMetrics={showCashSalesMetrics}
+                  payments={payments}
+                  paymentsLoading={paymentsLoading}
+                  paymentsError={paymentsError}
+                  assignedPaymentIds={bubblePaymentAssignments[b.id] || []}
+                  onUpdateAssignedPayments={onUpdateBubblePayments}
                 />
               </div>
             );

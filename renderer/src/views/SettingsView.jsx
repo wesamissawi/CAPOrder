@@ -52,6 +52,8 @@ export default function SettingsView() {
   const [ahkPath, setAhkPath] = useState("");
   const [ahkValid, setAhkValid] = useState(false);
   const [ahkStatus, setAhkStatus] = useState("Not set");
+  const [sageTimeoutSeconds, setSageTimeoutSeconds] = useState(300);
+  const [itemsReplaceAll, setItemsReplaceAll] = useState(true);
   const [updateStatus, setUpdateStatus] = useState("idle");
   const [updateMessage, setUpdateMessage] = useState("");
   const [updateVersion, setUpdateVersion] = useState("");
@@ -63,6 +65,7 @@ export default function SettingsView() {
   const [worldPass, setWorldPass] = useState("");
   const [transbecUser, setTransbecUser] = useState("");
   const [transbecPass, setTransbecPass] = useState("");
+  const [transbecMaxPages, setTransbecMaxPages] = useState(1);
   const [cbkUser, setCbkUser] = useState("");
   const [cbkPass, setCbkPass] = useState("");
   const [bestbuyUser, setBestbuyUser] = useState("");
@@ -73,6 +76,7 @@ export default function SettingsView() {
   const [credStatus, setCredStatus] = useState("");
   const [credError, setCredError] = useState("");
   const [credSaving, setCredSaving] = useState(false);
+  const [timeoutError, setTimeoutError] = useState("");
 
   const fileEntries = useMemo(() => {
     if (!summary?.files) return [];
@@ -132,6 +136,12 @@ export default function SettingsView() {
       setConfigPath(res.path || "");
       const incomingAhk = res.config?.ahkExePath || "";
       setAhkPath(incomingAhk);
+      if (typeof res.config?.sageAhkTimeoutMs === "number") {
+        setSageTimeoutSeconds(Math.round(res.config.sageAhkTimeoutMs / 1000));
+      } else {
+        setSageTimeoutSeconds(300);
+      }
+      setItemsReplaceAll(res.config?.itemsReplaceAll !== false);
       await refreshAhkStatus(incomingAhk);
       setStatus("");
       await refreshSummary();
@@ -167,6 +177,10 @@ export default function SettingsView() {
           setWorldPass(cfg.WORLD_PASS || "");
           setTransbecUser(cfg.TRANSBEC_USER || "");
           setTransbecPass(cfg.TRANSBEC_PASS || "");
+          const pagesRaw = Number(cfg.TRANSBEC_MAX_PAGES);
+          setTransbecMaxPages(
+            Number.isFinite(pagesRaw) && pagesRaw >= 1 ? Math.floor(pagesRaw) : 1
+          );
           setCbkUser(cfg.CBK_USER || "");
           setCbkPass(cfg.CBK_PASS || "");
           setBestbuyUser(cfg.BESTBUY_USER || "");
@@ -218,10 +232,27 @@ export default function SettingsView() {
   async function handleSave() {
     setError("");
     setStatus("");
+    setTimeoutError("");
     try {
       const trimmedAhk = (ahkPath || "").trim();
       setAhkPath(trimmedAhk);
-      const res = await api.setAppConfig({ sharedDataDir: sharedPath, ahkExePath: trimmedAhk });
+      const parsedTimeout = Number(sageTimeoutSeconds);
+      if (!Number.isFinite(parsedTimeout)) {
+        setTimeoutError("Timeout must be a number.");
+        return;
+      }
+      if (parsedTimeout < 10) {
+        setTimeoutError("Timeout must be at least 10 seconds.");
+        return;
+      }
+      const nextTimeoutMs =
+        Math.round(parsedTimeout * 1000);
+      const res = await api.setAppConfig({
+        sharedDataDir: sharedPath,
+        ahkExePath: trimmedAhk,
+        sageAhkTimeoutMs: nextTimeoutMs,
+        itemsReplaceAll: Boolean(itemsReplaceAll),
+      });
       if (!res?.ok) throw new Error(res?.error || "Failed to save app config.");
       setStatus("Saved.");
       await load();
@@ -240,6 +271,10 @@ export default function SettingsView() {
         WORLD_PASS: worldPass || "",
         TRANSBEC_USER: transbecUser || "",
         TRANSBEC_PASS: transbecPass || "",
+        TRANSBEC_MAX_PAGES:
+          Number.isFinite(Number(transbecMaxPages)) && Number(transbecMaxPages) >= 1
+            ? Math.floor(Number(transbecMaxPages))
+            : 1,
         CBK_USER: cbkUser || "",
         CBK_PASS: cbkPass || "",
         BESTBUY_USER: bestbuyUser || "",
@@ -459,6 +494,22 @@ export default function SettingsView() {
               />
             </div>
             <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">
+                Transbec Max Pages
+              </label>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={transbecMaxPages}
+                onChange={(e) => setTransbecMaxPages(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+              <div className="text-xs text-slate-500">
+                How many order list pages to fetch each run.
+              </div>
+            </div>
+            <div className="flex flex-col gap-1">
               <label className="text-xs uppercase tracking-wide text-slate-500">CBK Username</label>
               <input
                 type="text"
@@ -557,6 +608,59 @@ export default function SettingsView() {
             >
               Browse...
             </button>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="space-y-4">
+          <div>
+            <h2 className="text-xl font-semibold text-slate-800">Automation</h2>
+            <p className="text-sm text-slate-500">
+              Control Sage automation timeouts and item write behavior.
+            </p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">
+                Sage AHK Timeout (seconds)
+              </label>
+              <input
+                type="number"
+                min="10"
+                step="1"
+                value={sageTimeoutSeconds}
+                onChange={(e) => setSageTimeoutSeconds(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+              {timeoutError && (
+                <div className="text-xs text-red-600">{timeoutError}</div>
+              )}
+              <div className="text-xs text-slate-500">
+                Minimum 10 seconds. Default is 300 seconds (5 minutes).
+              </div>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">
+                Replace Items On Write
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={itemsReplaceAll}
+                  onChange={(e) => setItemsReplaceAll(e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                <span
+                  title="If you send a partial list of items while this is enabled, any items missing from the list will be deleted from disk."
+                >
+                  When enabled, incoming items replace the full queue set.
+                </span>
+              </label>
+              <div className="text-xs text-slate-500">
+                Disable for partial updates that should not delete missing items.
+              </div>
+            </div>
           </div>
         </div>
       </Card>

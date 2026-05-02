@@ -47,6 +47,7 @@ export function normalizeItems(arr) {
       uid: it.uid,
       accountingPath: it.accountingPath || "OUTSTANDING",
       allocated_for: it.allocated_for ?? "",
+      discounted_price: it.discounted_price ?? it.discountedPrice ?? "",
       allocated_to: allocatedTo,
       cost: String(it.cost ?? ""),
       date: String(it.date ?? ""),

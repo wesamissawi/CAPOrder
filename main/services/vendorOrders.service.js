@@ -53,6 +53,8 @@ const createVendorOrdersService = (deps) => {
       const config = loadConfig();
       const transbecUser = typeof config.TRANSBEC_USER === 'string' ? config.TRANSBEC_USER : '';
       const transbecPass = typeof config.TRANSBEC_PASS === 'string' ? config.TRANSBEC_PASS : '';
+      const maxPagesRaw = Number(config.TRANSBEC_MAX_PAGES);
+      const maxPages = Number.isFinite(maxPagesRaw) && maxPagesRaw >= 1 ? Math.floor(maxPagesRaw) : 1;
       if (!transbecUser || !transbecPass) {
         return { ok: false, error: 'Missing TRANSBEC credentials. Set them in Settings.' };
       }
@@ -63,7 +65,7 @@ const createVendorOrdersService = (deps) => {
         productsPath: VENDOR_PATHS.transbec.products,
         existingOrders: existing,
         existingRefs: archivedRefs,
-        maxPages: 1, // limit to first page as requested
+        maxPages,
         credentials: { user: transbecUser, pass: transbecPass },
       });
       let merged = Array.isArray(res?.orders) ? res.orders : [];

@@ -54,6 +54,8 @@ const BUSINESS_FILE_BASENAMES = {
   ordersIndex: 'orders_index.json',
   ordersArchive: 'orders_archive.json',
   ordersArchiveBackup: 'orders_archive.json.bak',
+  payments: 'payments.json',
+  paymentsBackup: 'payments.json.bak',
   archived: 'archived_bubbles.json',
   archivedBackup: 'archived_bubbles.json.bak',
 };
@@ -110,7 +112,12 @@ let dataFileOverride = null;
 function normalizeAppConfig(raw = {}) {
   const sharedDataDir = typeof raw.sharedDataDir === 'string' ? raw.sharedDataDir.trim() : '';
   const ahkExePath = typeof raw.ahkExePath === 'string' ? raw.ahkExePath.trim() : '';
-  return { sharedDataDir, ahkExePath, instanceDataDir: INSTANCE_DIR };
+  const timeoutMsRaw = Number(raw.sageAhkTimeoutMs);
+  const sageAhkTimeoutMs =
+    Number.isFinite(timeoutMsRaw) && timeoutMsRaw >= 10000 ? Math.round(timeoutMsRaw) : 5 * 60 * 1000;
+  const itemsReplaceAll =
+    typeof raw.itemsReplaceAll === 'boolean' ? raw.itemsReplaceAll : true;
+  return { sharedDataDir, ahkExePath, sageAhkTimeoutMs, itemsReplaceAll, instanceDataDir: INSTANCE_DIR };
 }
 function ensureAppConfigFile() {
   try { ensureDir(path.dirname(INSTANCE_PATHS.appConfig)); } catch {}
@@ -155,6 +162,16 @@ function getAhkExePath() {
   const cfg = readAppConfig();
   return (cfg.ahkExePath || '').trim();
 }
+function getSageAhkTimeoutMs() {
+  const cfg = readAppConfig();
+  const val = Number(cfg?.sageAhkTimeoutMs);
+  if (Number.isFinite(val) && val >= 10000) return Math.round(val);
+  return 5 * 60 * 1000;
+}
+function getItemsReplaceAll() {
+  const cfg = readAppConfig();
+  return cfg?.itemsReplaceAll !== false;
+}
 function validateAhkExePath(targetPath) {
   const candidate = (targetPath || '').trim();
   const exists = Boolean(candidate) && fs.existsSync(candidate);
@@ -176,6 +193,8 @@ function resolveBusinessPaths() {
     ordersIndex: path.join(queueDir, BUSINESS_FILE_BASENAMES.ordersIndex),
     ordersArchive: path.join(queueDir, BUSINESS_FILE_BASENAMES.ordersArchive),
     ordersArchiveBackup: path.join(queueDir, BUSINESS_FILE_BASENAMES.ordersArchiveBackup),
+    payments: path.join(queueDir, BUSINESS_FILE_BASENAMES.payments),
+    paymentsBackup: path.join(queueDir, BUSINESS_FILE_BASENAMES.paymentsBackup),
     archived: path.join(sharedDir, BUSINESS_FILE_BASENAMES.archived),
     archivedBackup: path.join(sharedDir, BUSINESS_FILE_BASENAMES.archivedBackup),
   };
@@ -191,6 +210,8 @@ function ensureBusinessFiles() {
     resolved.ordersIndex,
     resolved.ordersArchive,
     resolved.ordersArchiveBackup,
+    resolved.payments,
+    resolved.paymentsBackup,
     resolved.archived,
     resolved.archivedBackup,
   ].forEach((file) => ensureDataFileAt(file));
@@ -206,6 +227,8 @@ function getResolvedPathsSummary() {
     orders_index_json: { path: resolved.ordersIndex, exists: fs.existsSync(resolved.ordersIndex) },
     orders_archive_json: { path: resolved.ordersArchive, exists: fs.existsSync(resolved.ordersArchive) },
     orders_archive_bak: { path: resolved.ordersArchiveBackup, exists: fs.existsSync(resolved.ordersArchiveBackup) },
+    payments_json: { path: resolved.payments, exists: fs.existsSync(resolved.payments) },
+    payments_json_bak: { path: resolved.paymentsBackup, exists: fs.existsSync(resolved.paymentsBackup) },
     archived_bubbles: { path: resolved.archived, exists: fs.existsSync(resolved.archived) },
     archived_bubbles_bak: { path: resolved.archivedBackup, exists: fs.existsSync(resolved.archivedBackup) },
   };
@@ -412,6 +435,20 @@ function writeOrdersIndex(index) {
   const file = getOrdersIndexFile();
   ensureDataFileAt(file);
   writeJsonAtomic(file, JSON.stringify(index ?? [], null, 2));
+}
+function getPaymentsFile() {
+  const resolved = resolveBusinessPaths();
+  return resolved.payments;
+}
+function readPayments() {
+  return readItemsAt(getPaymentsFile());
+}
+function writePayments(payments) {
+  const file = getPaymentsFile();
+  backupFile(file);
+  ensureDataFileAt(file);
+  writeJsonAtomic(file, JSON.stringify(payments ?? [], null, 2));
+  return { ok: true, path: file };
 }
 function buildOrdersIndex(activeOrders, archivedOrders) {
   const indexByKey = new Map();
@@ -812,6 +849,7 @@ const sageService = createSageService({
   backupFile,
   writeTempOrder,
   getAhkExePath,
+  getSageAhkTimeoutMs,
   extractJournalLine,
   extractSageTotal,
   extractReconcileApplied,
@@ -1013,11 +1051,7 @@ function registerAllIpc() {
   if (ipcRegistered) return;
   ipcRegistered = true;
 
-  const { registerItemsIpc } = require('./main/ipc/items.ipc');
-  const { registerOrdersIpc } = require('./main/ipc/orders.ipc');
-  const { registerStockFlowIpc } = require('./main/ipc/stockflow.ipc');
-  const { registerSettingsIpc } = require('./main/ipc/settings.ipc');
-  const { registerUpdatesIpc } = require('./main/ipc/updates.ipc');
+  const { registerAllIpc: registerAllIpcByDomain } = require('./main/ipc/ipc.registry');
 
   const deps = {
     getWin: () => win,
@@ -1042,6 +1076,9 @@ function registerAllIpc() {
     readOrders,
     writeOrders,
     getOrdersFile,
+    readPayments,
+    writePayments,
+    getPaymentsFile,
     archiveCompletedOrders,
     archiveOrderByKey,
     resetSageQueue,
@@ -1081,6 +1118,7 @@ function registerAllIpc() {
     ensureBusinessFiles,
     getSharedDirInfo,
     writeAppConfig,
+    getItemsReplaceAll,
     startBubbleSharedWatching,
     validateWritable,
     migrateBusinessFilesToShared,
@@ -1089,11 +1127,7 @@ function registerAllIpc() {
     validateAhkExePath,
   };
 
-  registerItemsIpc(ipcMain, deps);
-  registerOrdersIpc(ipcMain, deps);
-  registerStockFlowIpc(ipcMain, deps);
-  registerSettingsIpc(ipcMain, deps);
-  registerUpdatesIpc(ipcMain, deps);
+  registerAllIpcByDomain(ipcMain, deps);
 }
 function readUIState() {
   try {

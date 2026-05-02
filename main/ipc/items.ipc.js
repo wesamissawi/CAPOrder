@@ -13,6 +13,7 @@ const registerItemsIpc = (ipcMain, deps) => {
     setDataFileOverride,
     LOCK_DURATION_MS,
     cleanExpiredLocks,
+    getItemsReplaceAll,
   } = deps;
 
   ipcMain.handle('items:read', () => readItems());
@@ -21,7 +22,10 @@ const registerItemsIpc = (ipcMain, deps) => {
     const current = readItems();                // existing array
     const a = JSON.stringify(current);
     const b = JSON.stringify(items ?? []);
-    if (a !== b) writeItems(items);             // only write if actually different
+    if (a !== b) {
+      const replaceAll = typeof getItemsReplaceAll === 'function' ? getItemsReplaceAll() : true;
+      writeItems(items, { replaceAll });        // only write if actually different
+    }
     return { ok: true };
   });
   ipcMain.handle('items:export', async (_evt, items) => {

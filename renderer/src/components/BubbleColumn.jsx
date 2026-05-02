@@ -50,12 +50,22 @@ export default function BubbleColumn({
   onFieldBlur,
   showPrintAction = false,
   onRequestPrint,
+  showCashSalesMetrics = false,
+  payments = [],
+  paymentsLoading = false,
+  paymentsError = "",
+  assignedPaymentIds = [],
+  onUpdateAssignedPayments,
 }) {
   const { id, name, notes } = bubble;
   const bubbleKey = name || id;
   const list = items || [];
   const [splitDrafts, setSplitDrafts] = React.useState({});
   const [showAdvancedTools, setShowAdvancedTools] = React.useState(false);
+  const [selectedPaymentId, setSelectedPaymentId] = React.useState("");
+  const [showDiscountMetrics, setShowDiscountMetrics] = React.useState(false);
+  const [activeDiscountPct, setActiveDiscountPct] = React.useState(null);
+  const [activePricingLabel, setActivePricingLabel] = React.useState("");
   const allowDelete = !!onDeleteBubble && !isDefaultBubble;
   const deleteOptions = React.useMemo(() => {
     if (!allowDelete) return [];
@@ -97,6 +107,45 @@ export default function BubbleColumn({
   const bubbleSubtotal = rows.reduce((sum, row) => sum + row.extension, 0);
   const bubbleTax = rows.reduce((sum, row) => (row.taxable ? sum + row.extension : sum), 0) * 0.13;
   const bubbleTotal = bubbleSubtotal + bubbleTax;
+  const cashSalesTotals = showCashSalesMetrics
+    ? list.reduce(
+        (acc, it) => {
+          const qty = toNumber(it.quantity);
+          const baseSales = toNumber(it.allocated_for);
+          const cost = toNumber(it.cost);
+          acc.sales += qty * baseSales;
+          acc.cost += qty * cost;
+          return acc;
+        },
+        { sales: 0, cost: 0 }
+      )
+    : { sales: 0, cost: 0 };
+  const cashSalesProfit = cashSalesTotals.sales - cashSalesTotals.cost;
+  const cashSalesMargin =
+    cashSalesTotals.sales > 0 ? (cashSalesProfit / cashSalesTotals.sales) * 100 : null;
+  const discountedTotals = showCashSalesMetrics
+    ? list.reduce(
+        (acc, it) => {
+          const qty = toNumber(it.quantity);
+          const baseSales = toNumber(it.allocated_for);
+          const discounted =
+            it.discounted_price !== undefined && it.discounted_price !== null && it.discounted_price !== ""
+              ? toNumber(it.discounted_price)
+              : baseSales;
+          const cost = toNumber(it.cost);
+          acc.sales += qty * discounted;
+          acc.cost += qty * cost;
+          return acc;
+        },
+        { sales: 0, cost: 0 }
+      )
+    : { sales: 0, cost: 0 };
+  const discountedProfit = discountedTotals.sales - discountedTotals.cost;
+  const discountedMargin =
+    discountedTotals.sales > 0 ? (discountedProfit / discountedTotals.sales) * 100 : null;
+  const discountedSubtotal = discountedTotals.sales;
+  const discountedTax = discountedSubtotal * 0.13;
+  const discountedTotal = discountedSubtotal + discountedTax;
   const hiddenCount = extraLineRows.length;
   const countLabelText = `${list.length} items${hiddenCount ? ` (${hiddenCount} hidden)` : ""}`;
   const showSummary = !isDefaultBubble;
@@ -162,6 +211,123 @@ export default function BubbleColumn({
   function handleActivate(e) {
     onActivateBubble?.(bubbleKey);
   }
+
+  const applyMarkupToBubble = (pct) => {
+    if (!onUpdateItem) return;
+    const factor = 1 + pct / 100;
+    list.forEach((it) => {
+      const uid = itemKey(it);
+      const baseCost = toNumber(it.cost);
+      if (!Number.isFinite(baseCost)) return;
+      const markedUp = Number((baseCost * factor).toFixed(2));
+      onUpdateItem(uid, { discounted_price: String(markedUp) });
+    });
+    setShowDiscountMetrics(true);
+    setActiveDiscountPct(pct);
+    setActivePricingLabel(`+${pct}%`);
+  };
+
+  const applyRegularPricing = () => {
+    if (!onUpdateItem) return;
+    list.forEach((it) => {
+      const uid = itemKey(it);
+      onUpdateItem(uid, { discounted_price: it.allocated_for ?? "" });
+    });
+    setShowDiscountMetrics(false);
+    setActiveDiscountPct(null);
+    setActivePricingLabel("");
+  };
+
+  const applyCapAddToBubble = () => {
+    if (!onUpdateItem) return;
+    const computeCapAdd = (base) => {
+      if (base < 2) return 1;
+      if (base < 5) return 2;
+      if (base < 15) return 3;
+      if (base < 20) return 5;
+      if (base < 50) return 10;
+      if (base < 70) return 15;
+      if (base < 150) return 20;
+      if (base < 220) return 30;
+      return 0;
+    };
+    list.forEach((it) => {
+      const uid = itemKey(it);
+      const baseCost = toNumber(it.cost);
+      if (!Number.isFinite(baseCost)) return;
+      const add = computeCapAdd(baseCost);
+      const nextPrice = Math.round(baseCost + add);
+      onUpdateItem(uid, { discounted_price: String(nextPrice) });
+    });
+    setShowDiscountMetrics(true);
+    setActiveDiscountPct(null);
+    setActivePricingLabel("CAP add");
+  };
+
+  const paymentOptions = Array.isArray(payments) ? payments : [];
+  const assignedPayments = assignedPaymentIds
+    .map((id) => paymentOptions.find((p) => p?.id === id))
+    .filter(Boolean);
+  const availablePayments = paymentOptions.filter((p) => p?.id && !assignedPaymentIds.includes(p.id));
+  const formatPaymentLabel = (p) => {
+    const date = p?.date || "No date";
+    const type = p?.type || "Unknown";
+    const amount = currencyFormatter.format(Number(p?.amount || 0));
+    const note = p?.note ? ` • ${p.note}` : "";
+    return `${date} • ${type} • ${amount}${note}`;
+  };
+
+  const handleAssignPayment = () => {
+    if (!selectedPaymentId || !onUpdateAssignedPayments) return;
+    const next = Array.from(new Set([...(assignedPaymentIds || []), selectedPaymentId]));
+    onUpdateAssignedPayments(bubble.id, next);
+    setSelectedPaymentId("");
+  };
+
+  const handleRemovePayment = (paymentId) => {
+    if (!onUpdateAssignedPayments) return;
+    const next = (assignedPaymentIds || []).filter((id) => id !== paymentId);
+    onUpdateAssignedPayments(bubble.id, next);
+  };
+
+  const applyMatchPaymentsToBubble = () => {
+    if (!onUpdateItem) return;
+    const paymentSum = assignedPayments.reduce((sum, p) => sum + toNumber(p?.amount), 0);
+    if (!Number.isFinite(paymentSum) || paymentSum <= 0) return;
+    const targetSubtotal = paymentSum / 1.13;
+    const rows = list
+      .map((it) => {
+        const qty = toNumber(it.quantity);
+        const baseSales = toNumber(it.allocated_for);
+        const discounted =
+          it.discounted_price !== undefined && it.discounted_price !== null && it.discounted_price !== ""
+            ? toNumber(it.discounted_price)
+            : baseSales;
+        const subtotal = qty * discounted;
+        return { it, qty, discounted, subtotal };
+      })
+      .filter((r) => r.qty > 0);
+    const currentSubtotal = rows.reduce((sum, r) => sum + r.subtotal, 0);
+    if (currentSubtotal <= 0) return;
+
+    const diff = targetSubtotal - currentSubtotal;
+    let remainder = diff;
+
+    rows.forEach((row, idx) => {
+      const share = row.subtotal / currentSubtotal;
+      const allocation = idx === rows.length - 1 ? remainder : diff * share;
+      const nextSubtotal = row.subtotal + allocation;
+      const nextUnit = row.qty > 0 ? nextSubtotal / row.qty : row.discounted;
+      const roundedUnit = Math.round(nextUnit * 100) / 100;
+      const roundedSubtotal = roundedUnit * row.qty;
+      remainder -= roundedSubtotal - row.subtotal;
+      onUpdateItem(itemKey(row.it), { discounted_price: String(roundedUnit.toFixed(2)) });
+    });
+
+    setShowDiscountMetrics(true);
+    setActiveDiscountPct(null);
+    setActivePricingLabel("Match payment");
+  };
 
   return (
     <div
@@ -243,8 +409,17 @@ export default function BubbleColumn({
           const uid = itemKey(it);
           const qty = toNumber(it.quantity);
           const salesPrice = toNumber(it.allocated_for);
+          const discountedPrice =
+            it.discounted_price !== undefined && it.discounted_price !== null && it.discounted_price !== ""
+              ? toNumber(it.discounted_price)
+              : salesPrice;
           const cost = toNumber(it.cost);
+          const diff = salesPrice - cost;
+          const marginPct = salesPrice > 0 ? (diff / salesPrice) * 100 : null;
           const itemSubtotal = qty * salesPrice;
+          const discountedTotal = qty * discountedPrice;
+          const profitTotal = discountedTotal - qty * cost;
+          const profitMargin = discountedTotal > 0 ? (profitTotal / discountedTotal) * 100 : null;
           const showWarning =
             !["NEW STOCK RETURNS", "SHELF"].includes((name || "").toUpperCase()) && cost > salesPrice;
           const splitDraft = splitDrafts[uid] || {};
@@ -301,6 +476,32 @@ export default function BubbleColumn({
                     onBlur={onFieldBlur}
                   />
                 </div>
+                {showCashSalesMetrics && (
+                  <div className="flex items-center gap-1 text-sm text-slate-600">
+                    <span className="text-xs font-semibold text-slate-500">Disc</span>
+                    <input
+                      type="text"
+                      step="0.01"
+                      inputMode="decimal"
+                      className="w-16 border rounded-lg p-1 text-sm text-center"
+                      onFocus={(e) => {
+                        e.target.select();
+                        onFieldFocus?.(e);
+                      }}
+                      value={
+                        it.discounted_price !== undefined && it.discounted_price !== null
+                          ? it.discounted_price
+                          : it.allocated_for ?? ""
+                      }
+                      onChange={(e) =>
+                        onUpdateItem(uid, {
+                          discounted_price: e.target.value,
+                        })
+                      }
+                      onBlur={onFieldBlur}
+                    />
+                  </div>
+                )}
                 <div className="flex items-center gap-2 ml-auto text-sm font-semibold text-slate-800">
                   <span className={showWarning ? "text-red-500" : "text-slate-400"}>→</span>
                   <span
@@ -320,6 +521,25 @@ export default function BubbleColumn({
                   )}
                 </div>
               </div>
+
+              {showCashSalesMetrics && (
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                  <span className="px-2 py-0.5 rounded-full bg-slate-100 border">
+                    Diff: {currencyFormatter.format(diff)}
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full bg-slate-100 border">
+                    Margin: {marginPct === null ? "--" : `${marginPct.toFixed(1)}%`}
+                  </span>
+                </div>
+              )}
+
+              {showCashSalesMetrics && showDiscountMetrics && (
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-yellow-800 bg-yellow-50 border border-yellow-200 rounded-xl px-2 py-1">
+                  <span>Total: {currencyFormatter.format(discountedTotal)}</span>
+                  <span>Profit: {currencyFormatter.format(profitTotal)}</span>
+                  <span>Margin: {profitMargin === null ? "--" : `${profitMargin.toFixed(1)}%`}</span>
+                </div>
+              )}
 
               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600">
                 {it.invoice_num && (
@@ -499,6 +719,176 @@ export default function BubbleColumn({
           );
         })}
       </div>
+
+      {showCashSalesMetrics && (
+        <div className="mt-2 rounded-2xl border border-slate-200 bg-white/80 p-3 text-sm text-slate-700">
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex flex-col">
+              <span className="text-xs uppercase tracking-wide text-slate-400">
+                Profit
+              </span>
+              <span className="font-semibold">
+                {currencyFormatter.format(cashSalesProfit)}
+              </span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-xs uppercase tracking-wide text-slate-400">
+                Margin
+              </span>
+              <span className="font-semibold">
+                {cashSalesMargin === null ? "--" : `${cashSalesMargin.toFixed(1)}%`}
+              </span>
+            </div>
+          </div>
+          {showDiscountMetrics && (
+            <div className="mt-3 flex flex-wrap gap-4 rounded-xl border border-yellow-200 bg-yellow-50 px-3 py-2 text-yellow-800">
+              <div className="flex flex-col">
+                <span className="text-xs uppercase tracking-wide text-yellow-700">
+                  Discount Subtotal
+                </span>
+                <span className="font-semibold">
+                  {currencyFormatter.format(discountedSubtotal)}
+                </span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-xs uppercase tracking-wide text-yellow-700">
+                  Discount Tax
+                </span>
+                <span className="font-semibold">
+                  {currencyFormatter.format(discountedTax)}
+                </span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-xs uppercase tracking-wide text-yellow-700">
+                  Discount Total
+                </span>
+                <span className="font-semibold">
+                  {currencyFormatter.format(discountedTotal)}
+                </span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-xs uppercase tracking-wide text-yellow-700">
+                  Discount Profit
+                </span>
+                <span className="font-semibold">
+                  {currencyFormatter.format(discountedProfit)}
+                </span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-xs uppercase tracking-wide text-yellow-700">
+                  Discount Margin
+                </span>
+                <span className="font-semibold">
+                  {discountedMargin === null ? "--" : `${discountedMargin.toFixed(1)}%`}
+                </span>
+              </div>
+            </div>
+          )}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 text-amber-700 text-xs font-semibold"
+              onClick={() => applyMarkupToBubble(10)}
+            >
+              +10%
+            </button>
+            <button
+              type="button"
+              className="px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 text-amber-700 text-xs font-semibold"
+              onClick={() => applyMarkupToBubble(20)}
+            >
+              +20%
+            </button>
+            <button
+              type="button"
+              className="px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 text-amber-700 text-xs font-semibold"
+              onClick={applyCapAddToBubble}
+            >
+              CAP add
+            </button>
+            <button
+              type="button"
+              className="px-3 py-2 rounded-xl border border-amber-200 bg-amber-50 text-amber-700 text-xs font-semibold"
+              onClick={applyMatchPaymentsToBubble}
+              disabled={assignedPayments.length === 0}
+            >
+              Match payment
+            </button>
+            <button
+              type="button"
+              className="px-3 py-2 rounded-xl border border-slate-200 bg-white text-slate-700 text-xs font-semibold"
+              onClick={applyRegularPricing}
+            >
+              Regular Price
+            </button>
+            {(activeDiscountPct !== null || activePricingLabel) && (
+              <span className="text-xs text-slate-500 self-center">
+                Active: {activePricingLabel || `+${activeDiscountPct}%`} (highlight on)
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showCashSalesMetrics && (
+        <div className="rounded-2xl border border-slate-200 bg-white/80 p-3 text-sm text-slate-700">
+          <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Payments</div>
+          {paymentsError && (
+            <div className="mb-2 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-700">
+              {paymentsError}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              className="min-w-[220px] border rounded-xl px-3 py-2 text-xs bg-white"
+              value={selectedPaymentId}
+              onChange={(e) => setSelectedPaymentId(e.target.value)}
+              disabled={paymentsLoading || availablePayments.length === 0}
+            >
+              <option value="">
+                {paymentsLoading
+                  ? "Loading payments..."
+                  : availablePayments.length
+                  ? "Select payment"
+                  : "No available payments"}
+              </option>
+              {availablePayments.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {formatPaymentLabel(p)}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={handleAssignPayment}
+              disabled={!selectedPaymentId || paymentsLoading}
+              className="px-3 py-2 rounded-xl bg-indigo-600 text-white text-xs font-semibold disabled:opacity-50"
+            >
+              Assign
+            </button>
+          </div>
+          {assignedPayments.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {assignedPayments.map((p) => (
+                <div
+                  key={p.id}
+                  className="flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-700"
+                >
+                  <span>{formatPaymentLabel(p)}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleRemovePayment(p.id)}
+                    className="text-slate-400 hover:text-slate-700"
+                    title="Remove payment"
+                  >
+                    x
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {hasAdvancedActions && (
         <div className="mt-auto pt-1">

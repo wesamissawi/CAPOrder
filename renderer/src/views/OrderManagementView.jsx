@@ -157,6 +157,8 @@ export default function OrderManagementView({
     { value: "totals-not-verified", label: "Totals Not Verified" },
     { value: "no-invoice", label: "No Invoice #" },
   ];
+  const primaryFilter = filters[0];
+  const secondaryFilters = filters.slice(1);
 
   const valueCheckStyles = `
   @keyframes valueCheckPulse {
@@ -208,7 +210,32 @@ export default function OrderManagementView({
                 className="w-full sm:w-56 border rounded-xl px-3 py-2 text-sm bg-white"
               />
               <div className="flex flex-wrap gap-2">
-                {filters.map((filter) => {
+                {primaryFilter && (
+                  <button
+                    key={primaryFilter.value}
+                    type="button"
+                    onClick={() => setOrdersPickupFilter(primaryFilter.value)}
+                    className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold border transition ${
+                      ordersPickupFilter === primaryFilter.value
+                        ? "bg-indigo-600 text-white border-indigo-600 shadow-sm"
+                        : "bg-white text-slate-700 border-slate-200 hover:bg-indigo-50"
+                    }`}
+                  >
+                    {primaryFilter.label}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setOrdersTodayOnly(!ordersTodayOnly)}
+                  className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold border transition ${
+                    ordersTodayOnly
+                      ? "bg-emerald-600 text-white border-emerald-600 shadow-sm"
+                      : "bg-white text-slate-700 border-slate-200 hover:bg-emerald-50"
+                  }`}
+                >
+                  Today
+                </button>
+                {secondaryFilters.map((filter) => {
                   const isActive = ordersPickupFilter === filter.value;
                   return (
                     <button
@@ -225,17 +252,6 @@ export default function OrderManagementView({
                     </button>
                   );
                 })}
-                <button
-                  type="button"
-                  onClick={() => setOrdersTodayOnly(!ordersTodayOnly)}
-                  className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold border transition ${
-                    ordersTodayOnly
-                      ? "bg-emerald-600 text-white border-emerald-600 shadow-sm"
-                      : "bg-white text-slate-700 border-slate-200 hover:bg-emerald-50"
-                  }`}
-                >
-                  Today
-                </button>
               </div>
               {ordersDirty && !ordersLoading && (
                 <span className="text-xs px-3 py-1 rounded-full bg-amber-100 text-amber-700 border border-amber-200">

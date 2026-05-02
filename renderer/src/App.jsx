@@ -102,6 +102,9 @@ export default function App() {
   const [archiveCleanupDays, setArchiveCleanupDays] = useState(2);
   const [sageIntegrationEnabled, setSageIntegrationEnabled] = useState(false);
   const [sageReadyOrders, setSageReadyOrders] = useState([]);
+  const [payments, setPayments] = useState([]);
+  const [paymentsLoading, setPaymentsLoading] = useState(false);
+  const [paymentsError, setPaymentsError] = useState("");
   const [sageWatchError, setSageWatchError] = useState("");
   const [printExtraLinesByBubble, setPrintExtraLinesByBubble] = useState({});
   const [bubbleMeta, setBubbleMeta] = useState({});
@@ -228,6 +231,30 @@ export default function App() {
     return () => off && off();
   }, []);
 
+  async function loadPayments() {
+    if (!api?.readPayments) return;
+    try {
+      setPaymentsLoading(true);
+      setPaymentsError("");
+      const list = await api.readPayments();
+      setPayments(Array.isArray(list) ? list : []);
+    } catch (e) {
+      setPaymentsError(e?.message || "Failed to load payments.");
+    } finally {
+      setPaymentsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadPayments();
+  }, []);
+
+  useEffect(() => {
+    if (currentView === "cash-sale-flow" || currentView === "payment-management") {
+      loadPayments();
+    }
+  }, [currentView]);
+
 
   // === Autosave after 10s of inactivity ===
   useEffect(() => {
@@ -284,18 +311,25 @@ export default function App() {
     const bubble = bubbles.find((b) => b.id === bubbleId) || bubbles.find((b) => b.name === overrides?.name);
     const hasNotes = Object.prototype.hasOwnProperty.call(overrides, "notes");
     const hasExtras = Object.prototype.hasOwnProperty.call(overrides, "extraLines");
+    const hasPayments = Object.prototype.hasOwnProperty.call(overrides, "paymentIds");
     const nextNotes = hasNotes ? overrides.notes : bubble?.notes || "";
     const nextExtras = hasExtras
       ? overrides.extraLines || []
       : printExtraLinesByBubble[bubbleId] || [];
+    const meta = bubbleMeta[bubbleId] || bubbleMeta[bubble?.name] || {};
+    const nextPaymentIds = hasPayments ? overrides.paymentIds : meta.paymentIds;
+    const payload = {
+      bubbleId,
+      name: bubble?.name || "",
+      notes: nextNotes || "",
+      extraLines: nextExtras,
+      deleted: overrides?.deleted === true,
+    };
+    if (Array.isArray(nextPaymentIds)) {
+      payload.paymentIds = nextPaymentIds;
+    }
     api
-      .writeSharedBubbleData({
-        bubbleId,
-        name: bubble?.name || "",
-        notes: nextNotes || "",
-        extraLines: nextExtras,
-        deleted: overrides?.deleted === true,
-      })
+      .writeSharedBubbleData(payload)
       .catch((e) => console.warn("[shared-bubble] write failed", e));
   }
 
@@ -314,6 +348,7 @@ export default function App() {
     const deleteIds = new Set();
     const deleteNames = new Set();
     const extras = {};
+    const paymentAssignments = {};
     const createdIds = [];
     const sharedLowerNames = new Set(entries.map((e) => norm(e.name || e.id)));
     const itemsLowerNames = new Set((items || []).map((it) => norm(it.allocated_to)));
@@ -353,6 +388,10 @@ export default function App() {
             ? indexById.get(id)
             : undefined) ?? (indexByLower.has(lower) ? indexByLower.get(lower) : undefined);
         extras[id] = Array.isArray(entry.extraLines) ? entry.extraLines : [];
+        if (Array.isArray(entry.paymentIds)) {
+          paymentAssignments[id] = entry.paymentIds.filter(Boolean);
+          if (entry.name) paymentAssignments[entry.name] = entry.paymentIds.filter(Boolean);
+        }
         if (existingIdx !== undefined) {
           const merged = {
             ...next[existingIdx],
@@ -401,7 +440,7 @@ export default function App() {
       return merged;
     });
 
-    if (createdIds.length || deleteIds.size || keptIds.size) {
+    if (createdIds.length || deleteIds.size || keptIds.size || Object.keys(paymentAssignments).length) {
       setBubbleMeta((prev) => {
         const next = { ...prev };
         createdIds.forEach((id) => {
@@ -410,6 +449,10 @@ export default function App() {
         deleteIds.forEach((id) => delete next[id]);
         Object.keys(next).forEach((id) => {
           if (!keptIds.has(id)) delete next[id];
+        });
+        Object.keys(paymentAssignments).forEach((id) => {
+          if (!next[id]) next[id] = {};
+          next[id] = { ...next[id], paymentIds: paymentAssignments[id] };
         });
         return next;
       });
@@ -794,6 +837,14 @@ export default function App() {
     if (!printBubble) return [];
     return printExtraLinesByBubble[printBubble.id] || [];
   }, [printBubble, printExtraLinesByBubble]);
+  const bubblePaymentAssignments = useMemo(() => {
+    const map = {};
+    bubbles.forEach((b) => {
+      const meta = bubbleMeta[b.id] || bubbleMeta[b.name] || {};
+      map[b.id] = Array.isArray(meta.paymentIds) ? meta.paymentIds : [];
+    });
+    return map;
+  }, [bubbles, bubbleMeta]);
 
   useEffect(() => {
     function handlePointerMove(e) {
@@ -945,6 +996,10 @@ export default function App() {
   function handleDeleteBubble(bubbleId, fallbackTargetName) {
     const bubble = bubbles.find((b) => b.id === bubbleId);
     if (!bubble) return;
+    const paymentMeta = bubbleMeta[bubbleId] || bubbleMeta[bubble.name] || {};
+    if (Array.isArray(paymentMeta.paymentIds) && paymentMeta.paymentIds.length) {
+      handleUpdateBubblePayments(bubbleId, []);
+    }
     const validTargets = DELETE_DESTINATIONS.filter((name) => name !== bubble.name);
       const fallback =
         validTargets.includes(fallbackTargetName) && fallbackTargetName
@@ -1087,6 +1142,26 @@ export default function App() {
     }
   }
 
+  function handleUpdateBubblePayments(bubbleId, paymentIds) {
+    if (!bubbleId) return;
+    const bubble = bubbles.find((b) => b.id === bubbleId);
+    const nameKey = bubble?.name;
+    const cleanIds = Array.from(new Set((paymentIds || []).filter(Boolean)));
+    const meta = bubbleMeta[bubbleId] || bubbleMeta[nameKey] || {};
+    const nextMeta = {
+      ...meta,
+      paymentIds: cleanIds,
+    };
+    const nextBubbleMeta = {
+      ...bubbleMeta,
+      ...(nameKey ? { [nameKey]: nextMeta } : {}),
+      [bubbleId]: nextMeta,
+    };
+    setBubbleMeta(nextBubbleMeta);
+    persistUIState(nextBubbleMeta);
+    persistSharedBubbleSnapshot(bubbleId, { paymentIds: cleanIds });
+  }
+
   async function handleArchiveBubble(bubbleId) {
     const bubble = bubbles.find((b) => b.id === bubbleId);
     if (!bubble) return;
@@ -1115,6 +1190,10 @@ export default function App() {
       setItems(remainingItems);
       lastSavedRef.current = JSON.stringify(remainingItems);
       await api.writeItems(remainingItems);
+      const paymentMeta = bubbleMeta[bubbleId] || bubbleMeta[bubble.name] || {};
+      if (Array.isArray(paymentMeta.paymentIds) && paymentMeta.paymentIds.length) {
+        handleUpdateBubblePayments(bubbleId, []);
+      }
       setBubbles((prev) => prev.filter((b) => b.id !== bubbleId));
 
       const cleanedBubbleMeta = { ...bubbleMeta };
@@ -1979,6 +2058,12 @@ export default function App() {
             }
             archivableBubbleIds={archivableBubbleIds}
             onArchiveBubble={handleArchiveBubble}
+            showCashSalesMetrics={currentView === "cash-sale-flow"}
+            payments={payments}
+            paymentsLoading={paymentsLoading}
+            paymentsError={paymentsError}
+            bubblePaymentAssignments={bubblePaymentAssignments}
+            onUpdateBubblePayments={handleUpdateBubblePayments}
           />
         ) : currentView === "manage-stock" ? (
           <ManageStockView
