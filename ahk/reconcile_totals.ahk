@@ -142,6 +142,9 @@ if (!result) {
     ExitApp, 9
 }
 
+; Wait for Sage to finish recalculating the invoice total after the tax change
+Sleep, 800
+
 ; Capture updated Sage total
 WinGetTitle, nowTitle, A
 sage_total := GetSageTotal(nowTitle, 15)

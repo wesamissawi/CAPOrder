@@ -46,9 +46,14 @@ export default function DashboardView({
   setArchiveCleanupDays,
   sageIntegrationEnabled,
   setSageIntegrationEnabled,
+  sageLockInfo,
   sageReadyOrders,
   sageWatchError,
 }) {
+  const lockOwner = sageLockInfo?.lock?.machineId || null;
+  const ownMachineId = sageLockInfo?.ownMachineId || null;
+  const lockedByOther = lockOwner && ownMachineId && lockOwner !== ownMachineId;
+  const lockIsRunning = sageLockInfo?.lock?.running === true;
   return (
     <section className="grid gap-4 lg:grid-cols-2 items-start text-left">
       <Card className="bg-white/80">
@@ -65,6 +70,13 @@ export default function DashboardView({
                 for Sage.
               </p>
             )}
+            {lockedByOther && (
+              <p className={`text-xs rounded-xl px-3 py-2 border ${lockIsRunning ? "text-red-700 bg-red-50 border-red-200" : "text-amber-700 bg-amber-50 border-amber-200"}`}>
+                {lockIsRunning
+                  ? `🔒 Sage is running on ${lockOwner} — cannot enable here.`
+                  : `🔒 Sage Interface is held by ${lockOwner}. You can still take it.`}
+              </p>
+            )}
             {sageWatchError && (
               <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
                 {sageWatchError}
@@ -73,10 +85,13 @@ export default function DashboardView({
           </div>
           <button
             type="button"
+            disabled={lockedByOther && lockIsRunning}
             onClick={() => setSageIntegrationEnabled((v) => !v)}
             className={`px-4 py-2 rounded-full text-sm font-semibold border transition ${
               sageIntegrationEnabled
                 ? "bg-emerald-100 text-emerald-700 border-emerald-200"
+                : lockedByOther && lockIsRunning
+                ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed"
                 : "bg-white text-slate-700 border-slate-200"
             }`}
           >

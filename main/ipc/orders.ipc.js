@@ -23,19 +23,44 @@ const registerOrdersIpc = (ipcMain, deps) => {
     applyReconcileResult,
     archiveCompletedOrders,
     archiveOrderByKey,
+    readSageLock,
+    writeSageLock,
+    clearSageLock,
+    getMachineId,
   } = deps;
+
+  ipcMain.handle('sage:get-lock', () => {
+    try {
+      const lock = readSageLock?.() || null;
+      return { ok: true, lock, ownMachineId: getMachineId?.() || null };
+    } catch (e) {
+      return { ok: false, lock: null, ownMachineId: null };
+    }
+  });
 
   ipcMain.handle('orders:read', () => readOrders());
   ipcMain.handle('orders:get-path', () => ({ path: getOrdersFile() }));
   ipcMain.handle('orders:watch', (_evt, enable = true) => {
     try {
-      setSageIntegrationActive(enable !== false);
-
       if (enable === false) {
+        setSageIntegrationActive(false);
         resetSageQueue();
         stopOrdersWatching();
+        clearSageLock?.();
         return { ok: true, watching: false };
       }
+
+      // Check if another machine holds the lock and is actively running scripts
+      const lock = readSageLock?.();
+      const ownId = getMachineId?.();
+      if (lock && lock.machineId && lock.machineId !== ownId && lock.running === true) {
+        console.warn('[orders:watch] sage lock held by running machine', lock.machineId);
+        return { ok: false, error: 'sage-locked', lockedBy: lock.machineId };
+      }
+
+      // Claim the lock (overwrites a stale/non-running lock from another machine)
+      writeSageLock?.({ machineId: ownId, lockedAt: Date.now(), running: false });
+      setSageIntegrationActive(true);
       startOrdersWatching(deps.getWin());
       scheduleSageProcessing();
       return { ok: true, watching: true, path: getOrdersFile() };
@@ -87,6 +112,36 @@ const registerOrdersIpc = (ipcMain, deps) => {
     } catch (e) {
       console.error('[orders:add-to-outstanding]', e);
       return { ok: false, error: e?.message || 'Failed to add outstanding items.' };
+    }
+  });
+
+  ipcMain.handle('orders:bubblify-order', (_evt, refKey, bubbleName) => {
+    try {
+      const orders = readOrders();
+      const items = readItems();
+      const newItems = [];
+
+      const updatedOrders = orders.map((order) => {
+        if (!orderMatchesKey(order, refKey)) return order;
+        if (!Array.isArray(order.lineItems)) return order;
+        const updatedLineItems = order.lineItems.map((line) => {
+          if (!line || line.addedToOutstanding === true) return line;
+          const outItem = { ...makeOutstandingFromLine(order, line), allocated_to: bubbleName };
+          newItems.push(outItem);
+          return { ...line, addedToOutstanding: true };
+        });
+        return { ...order, lineItems: updatedLineItems };
+      });
+
+      if (newItems.length > 0) {
+        writeItems(items.concat(newItems));
+        writeOrders(updatedOrders);
+      }
+
+      return { ok: true, added: newItems.length };
+    } catch (e) {
+      console.error('[orders:bubblify-order]', e);
+      return { ok: false, error: e?.message || 'Failed to bubblify order.' };
     }
   });
 

@@ -1,3 +1,37 @@
+// Single global AHK queue — one script runs at a time across all entry points.
+let _ahkQueueRunning = false;
+const _ahkQueue = [];
+let _onQueueStart = null;
+let _onQueueDone = null;
+
+function configureSageQueue({ onStart, onDone } = {}) {
+  if (onStart !== undefined) _onQueueStart = onStart;
+  if (onDone !== undefined) _onQueueDone = onDone;
+}
+
+function _drainAhkQueue() {
+  if (_ahkQueue.length === 0) {
+    _ahkQueueRunning = false;
+    try { _onQueueDone?.(); } catch (e) { console.error('[ahk-queue] onDone error', e); }
+    return;
+  }
+  const { task, resolve, reject, label } = _ahkQueue.shift();
+  console.log(`[ahk-queue] starting — ${label} (${_ahkQueue.length} remaining)`);
+  task().then(resolve, reject).finally(_drainAhkQueue);
+}
+
+function _enqueueAhk(label, task) {
+  return new Promise((resolve, reject) => {
+    _ahkQueue.push({ task, resolve, reject, label });
+    console.log(`[ahk-queue] enqueued — ${label} (queue depth now ${_ahkQueue.length})`);
+    if (!_ahkQueueRunning) {
+      _ahkQueueRunning = true;
+      try { _onQueueStart?.(); } catch (e) { console.error('[ahk-queue] onStart error', e); }
+      _drainAhkQueue();
+    }
+  });
+}
+
 const createSageActions = (deps) => {
   const {
     fs,
@@ -7,6 +41,7 @@ const createSageActions = (deps) => {
     SAGE_AHK_SCRIPT,
     SAGE_RECONCILE_SCRIPT,
     SAGE_INVOICE_SCRIPT,
+    SAGE_SALES_SCRIPT,
     getOrdersFile,
     backupFile,
     writeTempOrder,
@@ -18,7 +53,7 @@ const createSageActions = (deps) => {
     getSageAhkTimeoutMs,
   } = deps;
 
-  function runAhkScript({
+  function _runAhkScriptNow({
     scriptPath,
     args = [],
     logPrefix = 'sage',
@@ -73,6 +108,11 @@ const createSageActions = (deps) => {
         complete({ ok: code === 0, code, stdout, stderr });
       });
     });
+  }
+
+  function runAhkScript({ scriptPath, args = [], logPrefix = 'sage', timeoutMs = 5 * 60 * 1000 }) {
+    const label = `${logPrefix} ${path.basename(scriptPath || '')}`;
+    return _enqueueAhk(label, () => _runAhkScriptNow({ scriptPath, args, logPrefix, timeoutMs }));
   }
 
   function safeUnlink(filePath) {
@@ -277,11 +317,106 @@ const createSageActions = (deps) => {
     });
   }
 
+  function runSageSalesInvoice(items, customerCode, notes) {
+    return new Promise((resolve) => {
+      if (!fs.existsSync(SAGE_SALES_SCRIPT)) {
+        console.error('[sage-sales] AHK script not found', { path: SAGE_SALES_SCRIPT });
+        return resolve({ ok: false, code: 'ahk-script-missing', error: 'AHK script not found', path: SAGE_SALES_SCRIPT });
+      }
+
+      const ahkExecutable = getAhkExePath();
+      const resolvedExecutable = ahkExecutable ? path.resolve(ahkExecutable) : '';
+      const ahkExists = Boolean(ahkExecutable) && fs.existsSync(ahkExecutable);
+
+      if (!ahkExecutable || !ahkExists) {
+        console.error('[sage-sales] AHK executable path missing or invalid', { ahkExecutable });
+        return resolve({
+          ok: false,
+          code: ahkExecutable ? 'ahk-path-invalid' : 'ahk-path-not-set',
+          error: 'AutoHotkey executable path is not configured or not found.',
+        });
+      }
+
+      const itemsForAhk = (items || []).map((i) => {
+        const raw = String(i.itemcode || '').trim();
+        const spaceIdx = raw.indexOf(' ');
+        const linecode  = spaceIdx > -1 ? raw.slice(0, spaceIdx) : raw;
+        const partnumber = spaceIdx > -1 ? raw.slice(spaceIdx + 1).trim() : '';
+        return {
+          linecode,
+          partnumber,
+          warehouse:   String(i.warehouse   || ''),
+          description: String(i.notes1      || ''),
+          quantity:         Number(i.quantity)        || 1,
+          price:            Number(i.allocated_for)    || 0,
+          discounted_price: Number(i.discounted_price) || 0,
+        };
+      });
+
+      if (!itemsForAhk.length) {
+        return resolve({ ok: false, code: 'no-items', error: 'No items to send.' });
+      }
+
+      const hasDiscount = itemsForAhk.some(
+        (it) => it.discounted_price > 0 && it.discounted_price !== it.price
+      );
+      const priceTotal = hasDiscount
+        ? itemsForAhk.reduce((sum, it) => sum + it.quantity * it.price, 0)
+        : null;
+      const grandTotal = (() => {
+        if (priceTotal === null) return '';
+        const [intPart, decPart] = (priceTotal * 1.13).toFixed(2).split('.');
+        const r = () => Math.floor(Math.random() * 10);
+        return `${r()}${r()}${r()}-${intPart}x${decPart}${r()}${r()}${r()}`;
+      })();
+
+      let tempPath;
+      try {
+        tempPath = path.join(app.getPath('temp'), 'cap_order_sales_items.json');
+        const payload = { notes: notes || '', grandTotal, items: itemsForAhk };
+        fs.writeFileSync(tempPath, JSON.stringify(payload, null, 2), 'utf-8');
+      } catch (e) {
+        console.error('[sage-sales] failed to write temp items file', e);
+        return resolve({ ok: false, code: 'temp-write-failed', error: e.message });
+      }
+
+      const args = [SAGE_SALES_SCRIPT, tempPath, customerCode || ''];
+
+      console.log('[sage-sales] preparing to spawn AHK', {
+        timestamp: new Date().toISOString(),
+        itemCount: itemsForAhk.length,
+        customerCode,
+        tempPath,
+        scriptPath: SAGE_SALES_SCRIPT,
+        ahkExecutable,
+      });
+
+      runAhkScript({
+        scriptPath: resolvedExecutable,
+        args,
+        logPrefix: 'sage-sales',
+        timeoutMs: typeof getSageAhkTimeoutMs === 'function' ? getSageAhkTimeoutMs() : 5 * 60 * 1000,
+      }).then((res) => {
+        const testComplete = (res.stdout || '').includes('TEST_MODE_COMPLETE');
+        console.log('[sage-sales] AHK finished', {
+          ok: res.ok,
+          testComplete,
+          stdout: (res.stdout || '').trim(),
+          stderr: (res.stderr || '').trim(),
+        });
+        resolve({ ...res, testComplete });
+      }).finally(() => {
+        safeUnlink(tempPath);
+      });
+    });
+  }
+
   return {
     runSagePurchase,
     runSageReconcile,
     runUpdateInvoice,
+    runSageSalesInvoice,
   };
 };
 
-module.exports = { createSageActions };
+module.exports = { createSageActions, configureSageQueue };

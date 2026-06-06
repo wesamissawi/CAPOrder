@@ -67,12 +67,14 @@ contextBridge.exposeInMainWorld('api', {
   fetchBestBuyOrders: () => ipcRenderer.invoke('orders:fetch-bestbuy'),
   reconcileTotals: (refKey, order) => ipcRenderer.invoke('orders:reconcile-totals', refKey, order),
   addOrdersToOutstanding: () => ipcRenderer.invoke('orders:add-to-outstanding'),
+  bubblifyOrder: (refKey, bubbleName) => ipcRenderer.invoke('orders:bubblify-order', refKey, bubbleName),
   archiveOrders: (payload) => ipcRenderer.invoke('orders:archive-completed', payload),
   archiveOrder: (refKey) => ipcRenderer.invoke('orders:archive-one', refKey),
   archiveBubble: (payload) => ipcRenderer.invoke('archive:save-bubble', payload),
   searchArchive: (query) => ipcRenderer.invoke('archive:search', query),
   getArchivePath: () => ipcRenderer.invoke('archive:get-path'),
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
+  sageSalesInvoice: (bubbleName, customerCode, notes) => ipcRenderer.invoke('items:sage-sales-invoice', bubbleName, customerCode, notes),
   getAhkExePath: () => ipcRenderer.invoke('ahk:get-path'),
   setAhkExePath: (pathStr) => ipcRenderer.invoke('ahk:set-path', pathStr),
   chooseAhkExePath: () => ipcRenderer.invoke('ahk:choose-path'),
@@ -83,5 +85,21 @@ contextBridge.exposeInMainWorld('api', {
     const listener = (_e, data) => cb?.(data);
     ipcRenderer.on('updates:status', listener);
     return () => ipcRenderer.removeListener('updates:status', listener);
+  },
+  getSageLock: () => ipcRenderer.invoke('sage:get-lock'),
+  onSageLockChanged: (cb) => {
+    const listener = (_e, data) => cb?.(data);
+    ipcRenderer.on('sage:lock-changed', listener);
+    return () => ipcRenderer.removeListener('sage:lock-changed', listener);
+  },
+  getBubbleLocks: () => ipcRenderer.invoke('bubble-lock:get-all'),
+  claimBubbleLock: (bubbleId, bubbleName, opts) => ipcRenderer.invoke('bubble-lock:claim', bubbleId, bubbleName, opts),
+  releaseBubbleLock: (bubbleId, opts) => ipcRenderer.invoke('bubble-lock:release', bubbleId, opts),
+  heartbeatBubbleLock: (bubbleId) => ipcRenderer.invoke('bubble-lock:heartbeat', bubbleId),
+  respondToBubbleRequest: (bubbleId, allow) => ipcRenderer.invoke('bubble-lock:respond', bubbleId, allow),
+  onBubbleLocksUpdated: (cb) => {
+    const listener = (_e, data) => cb?.(data);
+    ipcRenderer.on('bubble-lock:updated', listener);
+    return () => ipcRenderer.removeListener('bubble-lock:updated', listener);
   },
 });

@@ -11,6 +11,12 @@ const createWatchersService = (deps) => {
     readSharedBubbleData,
     scheduleSageProcessing,
     getSageIntegrationActive,
+    getSageLockFile,
+    readSageLock,
+    getMachineId,
+    onSageLockForcedOff,
+    getBubbleLocksFile,
+    readBubbleLocks,
   } = deps;
 
   const chokidar = (() => {
@@ -22,6 +28,8 @@ const createWatchersService = (deps) => {
   let itemsWatchers = [];
   let ordersWatcher = null;
   let bubbleSharedWatcher = null;
+  let sageLockWatcher = null;
+  let bubbleLockWatcher = null;
   const debounceTimers = new Map();
 
   function debounce(key, fn, wait = 200) {
@@ -137,11 +145,61 @@ const createWatchersService = (deps) => {
     ordersWatcher = null;
   }
 
+  function startSageLockWatching() {
+    if (!getSageLockFile || !readSageLock || !getMachineId) return;
+    try {
+      if (typeof sageLockWatcher === 'function') sageLockWatcher();
+      else if (sageLockWatcher && typeof sageLockWatcher.close === 'function') sageLockWatcher.close();
+    } catch {}
+    const file = getSageLockFile();
+    if (!file) return;
+    sageLockWatcher = createFileWatcher(file, () => {
+      const lock = readSageLock();
+      const ownId = getMachineId();
+      const win = getWin();
+      const lockedByOther = lock && lock.machineId && lock.machineId !== ownId;
+      if (lockedByOther && getSageIntegrationActive()) {
+        console.log('[sage-lock] another machine claimed the lock — forcing local OFF', lock.machineId);
+        onSageLockForcedOff?.();
+      }
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('sage:lock-changed', {
+          lock: lock || null,
+          ownMachineId: ownId,
+          lockedByOther: Boolean(lockedByOther),
+          forcedOff: Boolean(lockedByOther && getSageIntegrationActive()),
+        });
+      }
+    }, 'sage-lock');
+  }
+
+  function startBubbleLockWatching() {
+    if (!getBubbleLocksFile || !readBubbleLocks) return;
+    try {
+      if (typeof bubbleLockWatcher === 'function') bubbleLockWatcher();
+      else if (bubbleLockWatcher && typeof bubbleLockWatcher.close === 'function') bubbleLockWatcher.close();
+    } catch {}
+    const file = getBubbleLocksFile();
+    if (!file) return;
+    bubbleLockWatcher = createFileWatcher(file, () => {
+      const locks = readBubbleLocks();
+      const win = getWin();
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('bubble-lock:updated', {
+          locks,
+          ownMachineId: getMachineId ? getMachineId() : null,
+        });
+      }
+    }, 'bubble-lock');
+  }
+
   return {
     startWatching,
     startBubbleSharedWatching,
     startOrdersWatching,
     stopOrdersWatching,
+    startSageLockWatching,
+    startBubbleLockWatching,
   };
 };
 

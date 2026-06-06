@@ -14,6 +14,7 @@ const registerItemsIpc = (ipcMain, deps) => {
     LOCK_DURATION_MS,
     cleanExpiredLocks,
     getItemsReplaceAll,
+    runSageSalesInvoice,
   } = deps;
 
   ipcMain.handle('items:read', () => readItems());
@@ -117,6 +118,18 @@ const registerItemsIpc = (ipcMain, deps) => {
 
     writeItems(items);
     return { ok: true, item: updated };
+  });
+
+  ipcMain.handle('items:sage-sales-invoice', async (_evt, bubbleName, customerCode, notes) => {
+    if (typeof runSageSalesInvoice !== 'function') {
+      return { ok: false, code: 'not-configured', error: 'Sage sales invoice action not available.' };
+    }
+    const all = readItems();
+    const items = (all || []).filter((i) => i.allocated_to === bubbleName);
+    if (!items.length) {
+      return { ok: false, code: 'no-items', error: `No items found in bubble "${bubbleName}".` };
+    }
+    return runSageSalesInvoice(items, customerCode || '', notes || '');
   });
 
   // Optional: manual lock release (e.g., user cancels)

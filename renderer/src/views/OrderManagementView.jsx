@@ -19,6 +19,7 @@ export default function OrderManagementView({
   handleOrderCheckboxChange,
   handleOrderFieldChange,
   onMarkForSage,
+  onBubblifyOrder,
   onMarkComplete,
   onReconcileTotals,
   onArchiveOrder,
@@ -304,6 +305,10 @@ export default function OrderManagementView({
                 Number.isFinite(sageNum) &&
                 Math.abs(billedNum - sageNum) > 0.009;
               const needsValueCheck = Boolean(order.valueCheckAlert);
+              const allBubblified =
+                Array.isArray(order.lineItems) &&
+                order.lineItems.length > 0 &&
+                order.lineItems.every((li) => li?.addedToOutstanding === true);
               const cardTone = needsValueCheck
                 ? "value-check-alert border-indigo-400"
                 : isDirty
@@ -340,20 +345,36 @@ export default function OrderManagementView({
                           </span>
                         )}
                       </div>
-                      {!order.enteredInSage && (
-                        <button
-                          type="button"
-                          onClick={() => onMarkForSage(refKey)}
-                          disabled={isSageTriggered}
-                          className={`px-3 py-1 rounded-full text-xs font-semibold border ${
-                            isSageTriggered
-                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                              : "bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50"
-                          }`}
-                        >
-                          {isSageTriggered ? "Ready for Sage" : "Send to Sage"}
-                        </button>
-                      )}
+                      <div className="flex flex-row items-center gap-2">
+                        {onBubblifyOrder && (
+                          <button
+                            type="button"
+                            disabled={allBubblified}
+                            onClick={() => !allBubblified && onBubblifyOrder(refKey)}
+                            className={`px-3 py-1 rounded-full text-xs font-semibold border ${
+                              allBubblified
+                                ? "bg-teal-50 text-teal-600 border-teal-200 cursor-default opacity-75"
+                                : "bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50"
+                            }`}
+                          >
+                            {allBubblified ? "Bubblified" : "Bubblify"}
+                          </button>
+                        )}
+                        {!order.enteredInSage && (
+                          <button
+                            type="button"
+                            onClick={() => onMarkForSage(refKey)}
+                            disabled={isSageTriggered}
+                            className={`px-3 py-1 rounded-full text-xs font-semibold border ${
+                              isSageTriggered
+                                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                : "bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50"
+                            }`}
+                          >
+                            {isSageTriggered ? "Ready for Sage" : "Send to Sage"}
+                          </button>
+                        )}
+                      </div>
                       {showReconcile && (
                         <button
                           type="button"

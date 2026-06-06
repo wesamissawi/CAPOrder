@@ -14,6 +14,7 @@ const { createItemsService } = require('./main/services/items.service');
 const { createWatchersService } = require('./main/services/watchers.service');
 const { createVendorOrdersService } = require('./main/services/vendorOrders.service');
 const { createSageService } = require('./main/services/sage.service');
+const { configureSageQueue } = require('./main/services/sage.actions');
 const { createAppConfigService } = require('./main/services/appConfig.service');
 const { createUpdatesService } = require('./main/services/updates.service');
 
@@ -106,6 +107,9 @@ const SAGE_INVOICE_SCRIPT = app.isPackaged
 const SAGE_RECONCILE_SCRIPT = app.isPackaged
   ? path.join(process.resourcesPath, 'ahk', 'reconcile_totals.ahk')
   : path.join(__dirname, 'ahk', 'reconcile_totals.ahk');
+const SAGE_SALES_SCRIPT = app.isPackaged
+  ? path.join(process.resourcesPath, 'ahk', 'sage_sales_invoice.ahk')
+  : path.join(__dirname, 'ahk', 'sage_sales_invoice.ahk');
 
 let dataFileOverride = null;
 
@@ -268,7 +272,91 @@ function backupFile(srcPath, suffix = '.bak') {
 console.log('[main] preload path =', PRELOAD, 'exists?', fs.existsSync(PRELOAD));
 
 // ---- data helpers ----
+const os = require('os');
 let sageIntegrationActive = false;
+
+function getMachineId() {
+  return os.hostname() || 'unknown';
+}
+
+function getSageLockFile() {
+  return path.join(getSharedDataDir(), 'sage_lock.json');
+}
+
+function readSageLock() {
+  try {
+    const f = getSageLockFile();
+    if (!fs.existsSync(f)) return null;
+    return JSON.parse(fs.readFileSync(f, 'utf-8'));
+  } catch { return null; }
+}
+
+function writeSageLock(data) {
+  try {
+    const f = getSageLockFile();
+    ensureDir(path.dirname(f));
+    fs.writeFileSync(f, JSON.stringify(data, null, 2), 'utf-8');
+  } catch (e) {
+    console.error('[sage-lock] write failed', e);
+  }
+}
+
+function clearSageLock() {
+  try {
+    const lock = readSageLock();
+    if (lock && lock.machineId && lock.machineId !== getMachineId()) return;
+    const f = getSageLockFile();
+    if (fs.existsSync(f)) fs.unlinkSync(f);
+  } catch (e) {
+    console.error('[sage-lock] clear failed', e);
+  }
+}
+
+// ---- bubble edit locks ----
+const BUBBLE_LOCKS_FILE = 'bubble_locks.json';
+
+function getBubbleLocksFile() {
+  return path.join(getSharedDataDir(), BUBBLE_LOCKS_FILE);
+}
+
+function ensureBubbleLocksFile() {
+  const f = getBubbleLocksFile();
+  ensureDir(path.dirname(f));
+  if (!fs.existsSync(f)) fs.writeFileSync(f, JSON.stringify({}, null, 2), 'utf-8');
+  return f;
+}
+
+function readBubbleLocks() {
+  try {
+    const f = ensureBubbleLocksFile();
+    const raw = JSON.parse(fs.readFileSync(f, 'utf-8'));
+    // Prune entries with no heartbeat for 60s — definitely abandoned
+    const now = Date.now();
+    const cleaned = {};
+    Object.entries(raw || {}).forEach(([id, lock]) => {
+      if (lock && (now - (lock.lastActive || 0)) < 60000) cleaned[id] = lock;
+    });
+    return cleaned;
+  } catch { return {}; }
+}
+
+function writeBubbleLock(bubbleId, data) {
+  try {
+    const f = ensureBubbleLocksFile();
+    const locks = readBubbleLocks();
+    locks[bubbleId] = data;
+    writeJsonAtomic(f, JSON.stringify(locks, null, 2));
+  } catch (e) { console.error('[bubble-lock] write failed', e); }
+}
+
+function releaseBubbleLock(bubbleId) {
+  try {
+    const f = ensureBubbleLocksFile();
+    const locks = readBubbleLocks();
+    delete locks[bubbleId];
+    writeJsonAtomic(f, JSON.stringify(locks, null, 2));
+  } catch (e) { console.error('[bubble-lock] release failed', e); }
+}
 
 function readConfig() {
   try { if (fs.existsSync(INSTANCE_PATHS.windowConfig)) return JSON.parse(fs.readFileSync(INSTANCE_PATHS.windowConfig, 'utf-8')); } catch {}
@@ -844,6 +932,7 @@ const sageService = createSageService({
   SAGE_AHK_SCRIPT,
   SAGE_RECONCILE_SCRIPT,
   SAGE_INVOICE_SCRIPT,
+  SAGE_SALES_SCRIPT,
   SAGE_TEMP_ORDER,
   getOrdersFile,
   backupFile,
@@ -865,11 +954,32 @@ const {
   runSagePurchase,
   runSageReconcile,
   runUpdateInvoice,
+  runSageSalesInvoice,
   processSageOrdersQueue,
   processInvoiceUpdateQueue,
   scheduleSageProcessing,
   resetSageQueue,
 } = sageService;
+
+// Wire AHK queue running-state into the shared lock file
+configureSageQueue({
+  onStart: () => {
+    try {
+      const lock = readSageLock();
+      if (lock && lock.machineId === getMachineId()) {
+        writeSageLock({ ...lock, running: true });
+      }
+    } catch (e) { console.error('[sage-lock] onStart update failed', e); }
+  },
+  onDone: () => {
+    try {
+      const lock = readSageLock();
+      if (lock && lock.machineId === getMachineId()) {
+        writeSageLock({ ...lock, running: false });
+      }
+    } catch (e) { console.error('[sage-lock] onDone update failed', e); }
+  },
+});
 
 const watchersService = createWatchersService({
   fs,
@@ -883,12 +993,22 @@ const watchersService = createWatchersService({
   readSharedBubbleData,
   scheduleSageProcessing,
   getSageIntegrationActive: () => sageIntegrationActive,
+  getSageLockFile,
+  readSageLock,
+  getMachineId,
+  onSageLockForcedOff: () => {
+    sageIntegrationActive = false;
+  },
+  getBubbleLocksFile,
+  readBubbleLocks,
 });
 const {
   startWatching,
   startBubbleSharedWatching,
   startOrdersWatching,
   stopOrdersWatching,
+  startSageLockWatching,
+  startBubbleLockWatching,
 } = watchersService;
 
 const updatesService = createUpdatesService({
@@ -1097,6 +1217,7 @@ function registerAllIpc() {
     fetchBestBuyOrders,
     orderMatchesKey,
     runSageReconcile,
+    runSageSalesInvoice,
     applyReconcileResult,
     readSharedBubbleData,
     getSharedBubbleDataPath,
@@ -1125,8 +1246,18 @@ function registerAllIpc() {
     getResolvedPathsSummary,
     getAhkExePath,
     validateAhkExePath,
+    readSageLock,
+    writeSageLock,
+    clearSageLock,
+    getMachineId,
+    readBubbleLocks,
+    writeBubbleLock,
+    releaseBubbleLock,
+    getBubbleLocksFile,
   };
 
+  startSageLockWatching();
+  startBubbleLockWatching();
   registerAllIpcByDomain(ipcMain, deps);
 }
 function readUIState() {

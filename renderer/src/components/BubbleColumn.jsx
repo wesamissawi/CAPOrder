@@ -56,16 +56,54 @@ export default function BubbleColumn({
   paymentsError = "",
   assignedPaymentIds = [],
   onUpdateAssignedPayments,
+  showSageSalesAction = false,
+  defaultSageCustomerCode = "",
+  onSageSalesInvoice,
+  onDeleteBubbleItems,
+  onRenameBubble,
+  // bubble edit lock props
+  isEditing = false,
+  lockOwner = null,       // machine name that owns the lock, null if free
+  incomingRequest = null, // { from, requestedAt } — another machine wants in
+  outgoingRequest = null, // { startedAt } — we sent a request, waiting
+  onRequestEdit,
+  onDoneEditing,
+  onRespondToRequest,
 }) {
   const { id, name, notes } = bubble;
   const bubbleKey = name || id;
   const list = items || [];
+  // Default bubbles (New Stock, Shelf, etc.) are always editable — no lock needed.
+  // User-created bubbles require clicking Edit first.
+  const canEdit = isEditing || isDefaultBubble;
   const [splitDrafts, setSplitDrafts] = React.useState({});
+  const [renameDraft, setRenameDraft] = React.useState(null);
+  const [requestCountdown, setRequestCountdown] = React.useState(null);
+
+  // Cancel any in-progress rename if edit access is lost
+  React.useEffect(() => {
+    if (!isEditing) setRenameDraft(null);
+  }, [isEditing]);
+
+  // Countdown timer driven by incomingRequest or outgoingRequest
+  React.useEffect(() => {
+    const startedAt = incomingRequest?.requestedAt || outgoingRequest?.startedAt;
+    if (!startedAt) { setRequestCountdown(null); return; }
+    const tick = () => {
+      const remaining = Math.max(0, 5 - Math.floor((Date.now() - startedAt) / 1000));
+      setRequestCountdown(remaining);
+    };
+    tick();
+    const id = setInterval(tick, 500);
+    return () => clearInterval(id);
+  }, [incomingRequest, outgoingRequest]);
   const [showAdvancedTools, setShowAdvancedTools] = React.useState(false);
   const [selectedPaymentId, setSelectedPaymentId] = React.useState("");
   const [showDiscountMetrics, setShowDiscountMetrics] = React.useState(false);
   const [activeDiscountPct, setActiveDiscountPct] = React.useState(null);
   const [activePricingLabel, setActivePricingLabel] = React.useState("");
+  const [arCustomerCode, setArCustomerCode] = React.useState("");
+  const [sageSalesRunning, setSageSalesRunning] = React.useState(false);
   const allowDelete = !!onDeleteBubble && !isDefaultBubble;
   const deleteOptions = React.useMemo(() => {
     if (!allowDelete) return [];
@@ -191,6 +229,7 @@ export default function BubbleColumn({
 
   function handleDrop(e) {
     e.preventDefault();
+    if (!canEdit) return;
     onDropOnBubble(name);
   }
 
@@ -337,15 +376,108 @@ export default function BubbleColumn({
       onMouseDownCapture={handleActivate}
       onTouchStartCapture={handleActivate}
     >
+      {/* Incoming request banner */}
+      {incomingRequest && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 flex flex-wrap items-center gap-2">
+          <span className="font-semibold">{incomingRequest.from}</span>
+          <span>wants edit access</span>
+          {requestCountdown !== null && (
+            <span className="font-mono text-amber-600">({requestCountdown}s)</span>
+          )}
+          <div className="ml-auto flex gap-2">
+            <button
+              type="button"
+              className="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700"
+              onClick={() => onRespondToRequest?.(true)}
+            >
+              Allow
+            </button>
+            <button
+              type="button"
+              className="px-3 py-1 rounded-full text-xs font-semibold bg-red-500 text-white hover:bg-red-600"
+              onClick={() => onRespondToRequest?.(false)}
+            >
+              Deny
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded-full bg-indigo-400 animate-pulse" />
-          <h2 className="text-xl font-semibold text-slate-800">{name}</h2>
+          <div className={`w-3 h-3 rounded-full ${isEditing ? 'bg-emerald-400 animate-pulse' : 'bg-slate-300'}`} />
+          {onRenameBubble && !isDefaultBubble && isEditing && renameDraft !== null ? (
+            <input
+              autoFocus
+              className="text-xl font-semibold text-slate-800 border-b-2 border-indigo-400 bg-transparent outline-none w-40"
+              value={renameDraft}
+              onChange={(e) => setRenameDraft(e.target.value)}
+              onBlur={() => {
+                const trimmed = renameDraft.trim();
+                if (trimmed && trimmed !== name) onRenameBubble(id, trimmed);
+                setRenameDraft(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.target.blur();
+                if (e.key === 'Escape') setRenameDraft(null);
+              }}
+            />
+          ) : (
+            <h2
+              className={`text-xl font-semibold text-slate-800 ${onRenameBubble && !isDefaultBubble && isEditing ? 'cursor-pointer hover:text-indigo-600' : ''}`}
+              title={onRenameBubble && !isDefaultBubble && isEditing ? 'Click to rename' : undefined}
+              onClick={() => { if (onRenameBubble && !isDefaultBubble && isEditing) setRenameDraft(name); }}
+            >
+              {name}
+            </h2>
+          )}
           <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 border border-indigo-200">
             {countLabelText}
           </span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap justify-end">
+          {/* Lock status indicators */}
+          {isEditing && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200">
+              Editing
+            </span>
+          )}
+          {!isEditing && lockOwner && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 border border-slate-200">
+              🔒 {lockOwner}
+            </span>
+          )}
+          {outgoingRequest && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-200">
+              Waiting{requestCountdown !== null ? ` ${requestCountdown}s` : '...'}
+            </span>
+          )}
+
+          {/* Edit / Done toggle — not shown for default bubbles */}
+          {!isDefaultBubble && onRequestEdit && !outgoingRequest && (
+            isEditing ? (
+              <button
+                type="button"
+                className="text-xs font-semibold px-3 py-1 rounded-full border border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                onClick={() => onDoneEditing?.()}
+              >
+                Done
+              </button>
+            ) : (
+              <button
+                type="button"
+                className={`text-xs font-semibold px-3 py-1 rounded-full border ${
+                  lockOwner
+                    ? 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100'
+                    : 'border-indigo-200 bg-white text-indigo-700 hover:bg-indigo-50'
+                }`}
+                onClick={() => onRequestEdit?.()}
+              >
+                {lockOwner ? 'Request Edit' : 'Edit'}
+              </button>
+            )
+          )}
+
           <button
             type="button"
             className="text-xs font-semibold uppercase tracking-wide px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-white cursor-move"
@@ -393,14 +525,15 @@ export default function BubbleColumn({
       )}
       <textarea
         rows={2}
-        className="mt-2 w-full rounded-xl border border-slate-300 p-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
-        placeholder="Bubble notes…"
+        className={`mt-2 w-full rounded-xl border p-2 text-sm focus:outline-none ${canEdit ? 'border-slate-300 focus:ring-2 focus:ring-indigo-300' : 'border-slate-200 bg-slate-50 text-slate-500 cursor-default'}`}
+        placeholder={canEdit ? "Bubble notes…" : ""}
         value={notes}
-        onChange={(e) => onUpdateBubbleNotes(id, e.target.value)}
+        readOnly={!canEdit}
+        onChange={(e) => canEdit && onUpdateBubbleNotes(id, e.target.value)}
         onFocus={onFieldFocus}
         onBlur={(e) => {
           onFieldBlur?.(e);
-          onBubbleNotesBlur?.(id);
+          if (canEdit) onBubbleNotesBlur?.(id);
         }}
       />
 
@@ -436,14 +569,15 @@ export default function BubbleColumn({
           return (
             <Card
               key={uid}
-              className={`relative bg-white hover:shadow-xl transition-shadow duration-200 cursor-grab ${
+              className={`relative bg-white transition-shadow duration-200 ${canEdit ? 'hover:shadow-xl cursor-grab' : 'cursor-default'} ${
                 !["NEW STOCK RETURNS", "SHELF"].includes((name || "").toUpperCase()) &&
                 toNumber(it.cost) > toNumber(it.allocated_for || 0)
                   ? "border-2 border-red-300 shadow-red-200"
                   : ""
               }`}
-              draggable
+              draggable={canEdit}
               onDragStart={(e) => {
+                if (!canEdit) { e.preventDefault(); return; }
                 e.stopPropagation();
                 onDragStartItem(uid);
               }}
@@ -462,18 +596,12 @@ export default function BubbleColumn({
                     type="text"
                     step="0.01"
                     inputMode="decimal"
-                    className="w-14 border rounded-lg p-1 text-sm text-center"
-                    onFocus={(e) => {
-                      e.target.select();
-                      onFieldFocus?.(e);
-                    }}
+                    className={`w-14 border rounded-lg p-1 text-sm text-center ${!canEdit ? 'bg-slate-50 text-slate-500' : ''}`}
+                    readOnly={!canEdit}
+                    onFocus={(e) => { if (canEdit) { e.target.select(); onFieldFocus?.(e); } }}
                     value={it.allocated_for ?? ""}
-                    onChange={(e) =>
-                      onUpdateItem(uid, {
-                        allocated_for: e.target.value,
-                      })
-                    }
-                    onBlur={onFieldBlur}
+                    onChange={(e) => canEdit && onUpdateItem(uid, { allocated_for: e.target.value })}
+                    onBlur={canEdit ? onFieldBlur : undefined}
                   />
                 </div>
                 {showCashSalesMetrics && (
@@ -483,22 +611,16 @@ export default function BubbleColumn({
                       type="text"
                       step="0.01"
                       inputMode="decimal"
-                      className="w-16 border rounded-lg p-1 text-sm text-center"
-                      onFocus={(e) => {
-                        e.target.select();
-                        onFieldFocus?.(e);
-                      }}
+                      className={`w-16 border rounded-lg p-1 text-sm text-center ${!canEdit ? 'bg-slate-50 text-slate-500' : ''}`}
+                      readOnly={!canEdit}
+                      onFocus={(e) => { if (canEdit) { e.target.select(); onFieldFocus?.(e); } }}
                       value={
                         it.discounted_price !== undefined && it.discounted_price !== null
                           ? it.discounted_price
                           : it.allocated_for ?? ""
                       }
-                      onChange={(e) =>
-                        onUpdateItem(uid, {
-                          discounted_price: e.target.value,
-                        })
-                      }
-                      onBlur={onFieldBlur}
+                      onChange={(e) => canEdit && onUpdateItem(uid, { discounted_price: e.target.value })}
+                      onBlur={canEdit ? onFieldBlur : undefined}
                     />
                   </div>
                 )}
@@ -575,15 +697,12 @@ export default function BubbleColumn({
                   <LabeledField label="Allocated To (bubble)">
                   
                     <select
-                      className="w-full border rounded-lg p-2 bg-white"
+                      className={`w-full border rounded-lg p-2 ${canEdit ? 'bg-white' : 'bg-slate-50 text-slate-500'}`}
                       value={it.allocated_to}
-                      onChange={(e) =>
-                        onUpdateItem(itemKey(it), {
-                          allocated_to: e.target.value,
-                        })
-                      }
-                      onFocus={onFieldFocus}
-                      onBlur={onFieldBlur}
+                      disabled={!canEdit}
+                      onChange={(e) => canEdit && onUpdateItem(itemKey(it), { allocated_to: e.target.value })}
+                      onFocus={canEdit ? onFieldFocus : undefined}
+                      onBlur={canEdit ? onFieldBlur : undefined}
                     >
                       {bubbles.map((b) => (
                         <option key={b.id} value={b.name}>
@@ -659,15 +778,11 @@ export default function BubbleColumn({
                   </LabeledField>
 
                   <LabeledInput label="Sold Status"
-                    
                     value={it.sold_status}
-                    onChange={(e) =>
-                      onUpdateItem(itemKey(it), {
-                        sold_status: e.target.value,
-                      })
-                    }
-                    onFocus={onFieldFocus}
-                    onBlur={onFieldBlur}
+                    readOnly={!canEdit}
+                    onChange={(e) => canEdit && onUpdateItem(itemKey(it), { sold_status: e.target.value })}
+                    onFocus={canEdit ? onFieldFocus : undefined}
+                    onBlur={canEdit ? onFieldBlur : undefined}
                   />
                
 
@@ -686,28 +801,26 @@ export default function BubbleColumn({
                   <LabeledField label="Notes 1">
                   
                     <textarea
-                      className="w-full border rounded-lg p-2"
+                      className={`w-full border rounded-lg p-2 ${!canEdit ? 'bg-slate-50 text-slate-500' : ''}`}
                       rows={2}
+                      readOnly={!canEdit}
                       value={it.notes1}
-                      onChange={(e) =>
-                        onUpdateItem(itemKey(it), { notes1: e.target.value })
-                      }
-                      onFocus={onFieldFocus}
-                      onBlur={onFieldBlur}
+                      onChange={(e) => canEdit && onUpdateItem(itemKey(it), { notes1: e.target.value })}
+                      onFocus={canEdit ? onFieldFocus : undefined}
+                      onBlur={canEdit ? onFieldBlur : undefined}
                     />
-                  
+
                   </LabeledField>
                   <LabeledField label="Notes 2">
-                 
+
                     <textarea
-                      className="w-full border rounded-lg p-2"
+                      className={`w-full border rounded-lg p-2 ${!canEdit ? 'bg-slate-50 text-slate-500' : ''}`}
                       rows={2}
+                      readOnly={!canEdit}
                       value={it.notes2}
-                      onChange={(e) =>
-                        onUpdateItem(itemKey(it), { notes2: e.target.value })
-                      }
-                      onFocus={onFieldFocus}
-                      onBlur={onFieldBlur}
+                      onChange={(e) => canEdit && onUpdateItem(itemKey(it), { notes2: e.target.value })}
+                      onFocus={canEdit ? onFieldFocus : undefined}
+                      onBlur={canEdit ? onFieldBlur : undefined}
                     />
 
                   
@@ -1000,6 +1113,52 @@ export default function BubbleColumn({
           )}
         </div>
       )}
+      {showSageSalesAction && (
+        <div className="mt-2 pt-2 border-t border-slate-200 flex flex-col gap-2">
+          {!defaultSageCustomerCode && (
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-slate-500 whitespace-nowrap">Customer code:</label>
+              <input
+                type="text"
+                className="flex-1 rounded border border-slate-200 px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-green-400"
+                value={arCustomerCode}
+                onChange={(e) => setArCustomerCode(e.target.value)}
+                placeholder="e.g. CUST001"
+                onFocus={onFieldFocus}
+                onBlur={onFieldBlur}
+              />
+            </div>
+          )}
+          <button
+            type="button"
+            disabled={!canEdit || sageSalesRunning || (!defaultSageCustomerCode && !arCustomerCode.trim()) || list.length === 0}
+            className="w-full rounded-lg border border-green-300 px-3 py-2 text-sm text-green-800 font-semibold hover:bg-green-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            onClick={async () => {
+              const code = defaultSageCustomerCode || arCustomerCode.trim();
+              if (!code || !onSageSalesInvoice) return;
+              setSageSalesRunning(true);
+              try {
+                await onSageSalesInvoice(name, code, notes || "");
+              } finally {
+                setSageSalesRunning(false);
+              }
+            }}
+          >
+            {sageSalesRunning ? "Sending to Sage..." : "Send to Sage Sales"}
+          </button>
+          {onDeleteBubbleItems && (
+            <button
+              type="button"
+              disabled={list.length === 0}
+              className="w-full rounded-lg border border-red-300 px-3 py-2 text-sm text-red-700 font-semibold hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              onClick={() => onDeleteBubbleItems(id)}
+            >
+              Delete Parts
+            </button>
+          )}
+        </div>
+      )}
+
       <button
         type="button"
         className="absolute right-2 bottom-2 w-5 h-5 rounded-full bg-slate-300 text-white text-[10px] flex items-center justify-center cursor-ew-resize shadow"

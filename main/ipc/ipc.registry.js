@@ -4,6 +4,7 @@ const { registerPaymentsIpc } = require('./payments.ipc');
 const { registerStockFlowIpc } = require('./stockflow.ipc');
 const { registerSettingsIpc } = require('./settings.ipc');
 const { registerUpdatesIpc } = require('./updates.ipc');
+const { registerBubbleLocksIpc } = require('./bubbleLocks.ipc');
 
 function registerAllIpc(ipcMain, deps) {
   registerItemsIpc(ipcMain, {
@@ -21,6 +22,7 @@ function registerAllIpc(ipcMain, deps) {
     LOCK_DURATION_MS: deps.LOCK_DURATION_MS,
     cleanExpiredLocks: deps.cleanExpiredLocks,
     getItemsReplaceAll: deps.getItemsReplaceAll,
+    runSageSalesInvoice: deps.runSageSalesInvoice,
   });
 
   registerOrdersIpc(ipcMain, {
@@ -48,6 +50,10 @@ function registerAllIpc(ipcMain, deps) {
     archiveCompletedOrders: deps.archiveCompletedOrders,
     archiveOrderByKey: deps.archiveOrderByKey,
     getWin: deps.getWin,
+    readSageLock: deps.readSageLock,
+    writeSageLock: deps.writeSageLock,
+    clearSageLock: deps.clearSageLock,
+    getMachineId: deps.getMachineId,
   });
 
   registerPaymentsIpc(ipcMain, {
@@ -104,6 +110,13 @@ function registerAllIpc(ipcMain, deps) {
     app: deps.app,
     autoUpdater: deps.autoUpdater,
     sendUpdateStatus: deps.sendUpdateStatus,
+  });
+
+  registerBubbleLocksIpc(ipcMain, {
+    readBubbleLocks: deps.readBubbleLocks,
+    writeBubbleLock: deps.writeBubbleLock,
+    releaseBubbleLock: deps.releaseBubbleLock,
+    getMachineId: deps.getMachineId,
   });
 }
 

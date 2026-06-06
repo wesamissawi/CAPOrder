@@ -39,12 +39,24 @@ export default function StockFlowView({
   onMoveBubbleToCashSales,
   archivableBubbleIds,
   onArchiveBubble,
+  onDeleteBubbleItems,
+  onRenameBubble,
+  // bubble edit lock props
+  bubbleLocks = {},
+  myEditingBubbleIds,
+  pendingRequestBubbles,
+  onRequestBubbleEdit,
+  onDoneBubbleEdit,
+  onRespondToBubbleRequest,
   showCashSalesMetrics = false,
   payments = [],
   paymentsLoading = false,
   paymentsError = "",
   bubblePaymentAssignments = {},
   onUpdateBubblePayments,
+  showSageSalesAction = false,
+  defaultSageCustomerCode = "",
+  onSageSalesInvoice,
 }) {
   const createBubbleRef = useRef(null);
   const workspaceSize = useMemo(() => {
@@ -127,6 +139,16 @@ export default function StockFlowView({
                 ? zIndexBase + orderIndex
                 : zIndexBase + index;
             const canArchive = !!archivableBubbleIds?.has(b.id);
+
+            // Bubble lock derived props
+            const STALE_MS = 10000;
+            const now = Date.now();
+            const bLock = bubbleLocks?.[b.id];
+            const lockIsStale = bLock && (now - (bLock.lastActive || 0)) > STALE_MS;
+            const isEditingBubble = myEditingBubbleIds?.has(b.id) ?? false;
+            const lockOwnerDisplay = bLock && !lockIsStale && !isEditingBubble ? bLock.owner : null;
+            const incomingReq = isEditingBubble && bLock?.request?.status === 'pending' ? bLock.request : null;
+            const outgoingReq = pendingRequestBubbles?.has(b.id) ? { startedAt: Date.now() - 0 } : null;
             return (
               <div
                 key={b.id}
@@ -168,12 +190,24 @@ export default function StockFlowView({
                   onMoveToCashSales={onMoveBubbleToCashSales}
                   canArchive={canArchive}
                   onArchiveBubble={onArchiveBubble}
+                  onDeleteBubbleItems={onDeleteBubbleItems}
+                  onRenameBubble={onRenameBubble}
+                  isEditing={isEditingBubble}
+                  lockOwner={lockOwnerDisplay}
+                  incomingRequest={incomingReq}
+                  outgoingRequest={outgoingReq}
+                  onRequestEdit={onRequestBubbleEdit ? () => onRequestBubbleEdit(b.id, b.name) : undefined}
+                  onDoneEditing={onDoneBubbleEdit ? () => onDoneBubbleEdit(b.id) : undefined}
+                  onRespondToRequest={onRespondToBubbleRequest ? (allow) => onRespondToBubbleRequest(b.id, allow) : undefined}
                   showCashSalesMetrics={showCashSalesMetrics}
                   payments={payments}
                   paymentsLoading={paymentsLoading}
                   paymentsError={paymentsError}
                   assignedPaymentIds={bubblePaymentAssignments[b.id] || []}
                   onUpdateAssignedPayments={onUpdateBubblePayments}
+                  showSageSalesAction={showSageSalesAction}
+                  defaultSageCustomerCode={defaultSageCustomerCode}
+                  onSageSalesInvoice={onSageSalesInvoice}
                 />
               </div>
             );

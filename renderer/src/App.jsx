@@ -101,6 +101,12 @@ export default function App() {
   const [ordersArchiveError, setOrdersArchiveError] = useState("");
   const [archiveCleanupDays, setArchiveCleanupDays] = useState(2);
   const [sageIntegrationEnabled, setSageIntegrationEnabled] = useState(false);
+  const [sageLockInfo, setSageLockInfo] = useState(null); // { lock, ownMachineId }
+  // Bubble edit locks
+  const [bubbleLocks, setBubbleLocks] = useState({});
+  const [ownMachineId, setOwnMachineId] = useState('');
+  const [pendingRequestBubbles, setPendingRequestBubbles] = useState(new Set());
+  const pendingRequestsRef = React.useRef({}); // { [bubbleId]: { startedAt, timeoutId } }
   const [sageReadyOrders, setSageReadyOrders] = useState([]);
   const [payments, setPayments] = useState([]);
   const [paymentsLoading, setPaymentsLoading] = useState(false);
@@ -1054,6 +1060,7 @@ export default function App() {
         api.deleteSharedBubbleData(bubble.name).catch(() => {});
       }
     }
+    _releaseBubbleLockOnDelete(bubbleId);
     markSharedBubbleDeleted(bubble);
   }
 
@@ -1228,10 +1235,62 @@ export default function App() {
           api.deleteSharedBubbleData(bubble.name).catch(() => {});
         }
       }
+      _releaseBubbleLockOnDelete(bubbleId);
       markSharedBubbleDeleted(bubble);
     } catch (e) {
       console.error("[archive] failed", e);
       alert(e?.message || "Failed to archive bubble.");
+    }
+  }
+
+  async function handleDeleteBubbleItems(bubbleId) {
+    const bubble = bubbles.find((b) => b.id === bubbleId);
+    if (!bubble) return;
+    const bubbleItems = items.filter((it) => it.allocated_to === bubble.name);
+    const confirmed = window.confirm(
+      `Permanently delete "${bubble.name}" and ${bubbleItems.length} item(s)? This cannot be undone.`
+    );
+    if (!confirmed) return;
+    try {
+      const remainingItems = items.filter((it) => it.allocated_to !== bubble.name);
+      setItems(remainingItems);
+      lastSavedRef.current = JSON.stringify(remainingItems);
+      await api.writeItems(remainingItems);
+      const paymentMeta = bubbleMeta[bubbleId] || bubbleMeta[bubble.name] || {};
+      if (Array.isArray(paymentMeta.paymentIds) && paymentMeta.paymentIds.length) {
+        handleUpdateBubblePayments(bubbleId, []);
+      }
+      setBubbles((prev) => prev.filter((b) => b.id !== bubbleId));
+      const cleanedBubbleMeta = { ...bubbleMeta };
+      delete cleanedBubbleMeta[bubbleId];
+      if (bubble.name) delete cleanedBubbleMeta[bubble.name];
+      const cleanedPositions = { ...bubblePositions };
+      delete cleanedPositions[bubbleId];
+      if (bubble.name) delete cleanedPositions[bubble.name];
+      const cleanedSizes = { ...bubbleSizes };
+      delete cleanedSizes[bubbleId];
+      if (bubble.name) delete cleanedSizes[bubble.name];
+      const cleanedZOrder = bubbleZOrder.filter(
+        (key) => key !== bubbleId && key !== bubble.name
+      );
+      const cleanedPrintExtras = { ...printExtraLinesByBubble };
+      delete cleanedPrintExtras[bubbleId];
+      setBubbleMeta(cleanedBubbleMeta);
+      setBubblePositions(cleanedPositions);
+      setBubbleSizes(cleanedSizes);
+      setBubbleZOrder(cleanedZOrder);
+      setPrintExtraLinesByBubble(cleanedPrintExtras);
+      setActiveBubbleKey((prev) => (prev === bubbleId || prev === bubble.name ? null : prev));
+      persistUIState(cleanedBubbleMeta);
+      if (api?.deleteSharedBubbleData) {
+        api.deleteSharedBubbleData(bubbleId).catch((e) => console.warn("[shared-bubble] delete failed", e));
+        if (bubble?.name) api.deleteSharedBubbleData(bubble.name).catch(() => {});
+      }
+      _releaseBubbleLockOnDelete(bubbleId);
+      markSharedBubbleDeleted(bubble);
+    } catch (e) {
+      console.error("[delete-bubble] failed", e);
+      alert(e?.message || "Failed to delete bubble.");
     }
   }
 
@@ -1523,6 +1582,78 @@ export default function App() {
   }
   function handleOrderSageTrigger(referenceKey) {
     updateOrderByKey(referenceKey, { sage_trigger: true });
+  }
+
+  function handleRenameBubble(bubbleId, newName) {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    const bubble = bubbles.find((b) => b.id === bubbleId);
+    if (!bubble) return;
+    const oldName = bubble.name;
+    if (trimmed === oldName) return;
+    if (DEFAULT_BUBBLE_NAMES.has(trimmed.toUpperCase())) return;
+    const taken = bubbles.some((b) => b.id !== bubbleId && (b.name || '').toUpperCase() === trimmed.toUpperCase());
+    if (taken) { alert(`A bubble named "${trimmed}" already exists.`); return; }
+
+    const renamedItems = items.map((it) =>
+      it.allocated_to === oldName ? { ...it, allocated_to: trimmed } : it
+    );
+    lastSavedRef.current = JSON.stringify(renamedItems);
+    setItems(renamedItems);
+    setBubbles((prev) => prev.map((b) => b.id === bubbleId ? { ...b, name: trimmed } : b));
+    api.writeItems(renamedItems).catch((e) => console.error('[rename] writeItems failed', e));
+    setBubblePositions((prev) => {
+      if (!prev[oldName]) return prev;
+      const next = { ...prev, [trimmed]: prev[oldName] };
+      delete next[oldName];
+      return next;
+    });
+    setBubbleSizes((prev) => {
+      if (!prev[oldName]) return prev;
+      const next = { ...prev, [trimmed]: prev[oldName] };
+      delete next[oldName];
+      return next;
+    });
+    if (api?.writeSharedBubbleData) {
+      api.writeSharedBubbleData({ bubbleId, name: trimmed, notes: bubble.notes || '', extraLines: [] })
+        .catch(() => {});
+      api.deleteSharedBubbleData?.(oldName).catch(() => {});
+    }
+  }
+
+  async function handleBubblifyOrder(refKey) {
+    const base = (refKey || 'ORDER').toUpperCase();
+    const existingNames = new Set(bubbles.map((b) => (b.name || '').toUpperCase()));
+    const bubbleName = uniqueName(base, existingNames);
+    const id = makeUid();
+    const nb = { id, name: bubbleName, notes: '' };
+    setBubbles((prev) => [...prev, nb]);
+    setBubbleMeta((prev) => ({
+      ...prev,
+      [id]: { ...(prev[id] || {}), accountingPath: ACCOUNTING_PATHS.OUTSTANDING },
+    }));
+    if (api?.writeSharedBubbleData) {
+      api.writeSharedBubbleData({ bubbleId: id, name: bubbleName, notes: '', extraLines: [] })
+        .catch((e) => console.warn('[shared-bubble] write failed', e));
+    }
+    const res = await api.bubblifyOrder(refKey, bubbleName);
+    if (!res?.ok) {
+      alert(res?.error || 'Failed to bubblify order.');
+      setBubbles((prev) => prev.filter((b) => b.id !== id));
+      setBubbleMeta((prev) => { const n = { ...prev }; delete n[id]; return n; });
+      return;
+    }
+    if (res.added === 0) {
+      alert('All items in this order have already been added to outstanding.');
+      setBubbles((prev) => prev.filter((b) => b.id !== id));
+      setBubbleMeta((prev) => { const n = { ...prev }; delete n[id]; return n; });
+      return;
+    }
+    const freshItems = await api.readItems();
+    if (Array.isArray(freshItems)) {
+      setItems(freshItems);
+      lastSavedRef.current = JSON.stringify(freshItems);
+    }
   }
 
   async function handleReconcileTotals(referenceKey) {
@@ -1849,7 +1980,18 @@ export default function App() {
 
     async function bootstrapWatch() {
       try {
-        await api.watchOrders(true);
+        const res = await api.watchOrders(true);
+        if (res && !res.ok) {
+          if (!cancelled) {
+            if (res.error === 'sage-locked') {
+              setSageWatchError(`Sage Interface is active on another machine (${res.lockedBy || 'unknown'}). Turn it off there first.`);
+            } else {
+              setSageWatchError(res.error || "Failed to watch orders file.");
+            }
+            setSageIntegrationEnabled(false);
+          }
+          return;
+        }
         const latest = await api.readOrders();
         if (!cancelled) {
           handleOrdersUpdatedExternally(latest);
@@ -1867,6 +2009,152 @@ export default function App() {
       api.watchOrders(false).catch(() => {});
     };
   }, [sageIntegrationEnabled, ordersDirty]);
+
+  // Subscribe to sage lock changes pushed from main process
+  useEffect(() => {
+    if (!api?.onSageLockChanged) return;
+    const off = api.onSageLockChanged((data) => {
+      setSageLockInfo(data ? { lock: data.lock, ownMachineId: data.ownMachineId } : null);
+      if (data?.lockedByOther && sageIntegrationEnabled) {
+        setSageIntegrationEnabled(false);
+        setSageWatchError(`Sage Interface was claimed by ${data.lock?.machineId || 'another machine'}.`);
+      }
+    });
+    // Load initial lock state
+    api.getSageLock?.().then((res) => {
+      if (res?.ok) setSageLockInfo({ lock: res.lock, ownMachineId: res.ownMachineId });
+    }).catch(() => {});
+    return () => off?.();
+  }, []);
+
+  // ---- Bubble edit locks ----
+  const BUBBLE_LOCK_STALE_MS = 10000;
+
+  // Which bubble IDs this machine currently owns (derived from lock file)
+  const myEditingBubbleIds = React.useMemo(() => {
+    if (!ownMachineId) return new Set();
+    const now = Date.now();
+    return new Set(
+      Object.entries(bubbleLocks)
+        .filter(([, l]) => l.owner === ownMachineId && (now - (l.lastActive || 0)) < BUBBLE_LOCK_STALE_MS)
+        .map(([id]) => id)
+    );
+  }, [bubbleLocks, ownMachineId]);
+
+  // Load initial lock state
+  useEffect(() => {
+    if (!api?.getBubbleLocks) return;
+    api.getBubbleLocks().then((res) => {
+      if (res?.locks) setBubbleLocks(res.locks);
+      if (res?.ownMachineId) setOwnMachineId(res.ownMachineId);
+    }).catch(() => {});
+  }, []);
+
+  // Subscribe to lock file changes pushed from main process
+  useEffect(() => {
+    if (!api?.onBubbleLocksUpdated) return;
+    const off = api.onBubbleLocksUpdated(({ locks, ownMachineId: mid }) => {
+      setBubbleLocks(locks || {});
+      if (mid) setOwnMachineId(mid);
+
+      const pending = pendingRequestsRef.current;
+      Object.entries(pending).forEach(([bubbleId, req]) => {
+        const lock = (locks || {})[bubbleId];
+        if (!lock) return;
+        if (lock.owner === mid) {
+          // Our request was granted (or force-claim was confirmed)
+          clearTimeout(req.timeoutId);
+          delete pending[bubbleId];
+          setPendingRequestBubbles((prev) => { const n = new Set(prev); n.delete(bubbleId); return n; });
+        } else if (lock.request?.status === 'denied' && lock.request?.from === mid) {
+          // Explicitly denied
+          clearTimeout(req.timeoutId);
+          delete pending[bubbleId];
+          setPendingRequestBubbles((prev) => { const n = new Set(prev); n.delete(bubbleId); return n; });
+          alert(`Access to bubble "${lock.bubbleName || bubbleId}" was denied.`);
+        }
+      });
+    });
+    return () => off?.();
+  }, []);
+
+  // Heartbeat — keep owned bubbles fresh every 3s
+  useEffect(() => {
+    const ids = Array.from(myEditingBubbleIds);
+    if (ids.length === 0) return;
+    const interval = setInterval(() => {
+      ids.forEach((id) => api.heartbeatBubbleLock?.(id).catch(() => {}));
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [myEditingBubbleIds]);
+
+  // Release all locks when window closes
+  useEffect(() => {
+    const release = () => {
+      myEditingBubbleIds.forEach((id) => api.releaseBubbleLock?.(id).catch(() => {}));
+    };
+    window.addEventListener('beforeunload', release);
+    return () => window.removeEventListener('beforeunload', release);
+  }, [myEditingBubbleIds]);
+
+  async function handleRequestBubbleEdit(bubbleId, bubbleName) {
+    try {
+      const res = await api.claimBubbleLock(bubbleId, bubbleName);
+      if (res?.ok && res?.claimed) {
+        setBubbleLocks((prev) => ({
+          ...prev,
+          [bubbleId]: { owner: ownMachineId, bubbleName, lastActive: Date.now(), request: null },
+        }));
+        return;
+      }
+      if (!res?.ok && res?.requested) {
+        // Start 5-second countdown then force-claim
+        const timeoutId = setTimeout(async () => {
+          try {
+            const r = await api.claimBubbleLock(bubbleId, bubbleName, { force: true });
+            if (r?.ok) {
+              setBubbleLocks((prev) => ({
+                ...prev,
+                [bubbleId]: { owner: ownMachineId, bubbleName, lastActive: Date.now(), request: null },
+              }));
+            }
+          } catch {}
+          delete pendingRequestsRef.current[bubbleId];
+          setPendingRequestBubbles((prev) => { const n = new Set(prev); n.delete(bubbleId); return n; });
+        }, 5000);
+        pendingRequestsRef.current[bubbleId] = { startedAt: Date.now(), timeoutId };
+        setPendingRequestBubbles((prev) => new Set([...prev, bubbleId]));
+      }
+    } catch (e) {
+      console.error('[bubble-lock] claim error', e);
+    }
+  }
+
+  async function handleDoneBubbleEdit(bubbleId) {
+    try { await api.releaseBubbleLock(bubbleId); } catch {}
+    _clearBubbleLockLocally(bubbleId);
+  }
+
+  // Called when a bubble is destroyed — force-removes the lock regardless of who owns it
+  function _releaseBubbleLockOnDelete(bubbleId) {
+    api.releaseBubbleLock?.(bubbleId, { force: true }).catch(() => {});
+    _clearBubbleLockLocally(bubbleId);
+  }
+
+  function _clearBubbleLockLocally(bubbleId) {
+    setBubbleLocks((prev) => { const n = { ...prev }; delete n[bubbleId]; return n; });
+    const pending = pendingRequestsRef.current;
+    if (pending[bubbleId]) {
+      clearTimeout(pending[bubbleId].timeoutId);
+      delete pending[bubbleId];
+      setPendingRequestBubbles((prev) => { const n = new Set(prev); n.delete(bubbleId); return n; });
+    }
+  }
+
+  async function handleRespondToBubbleRequest(bubbleId, allow) {
+    try { await api.respondToBubbleRequest(bubbleId, allow); } catch {}
+    // If we denied, we keep ownership; if we allowed, watcher will update our locks
+  }
 
   useEffect(() => {
     const needsOrders = currentView === "order-management" || currentView === "ref-to-inv";
@@ -2013,6 +2301,7 @@ export default function App() {
             setArchiveCleanupDays={setArchiveCleanupDays}
             sageIntegrationEnabled={sageIntegrationEnabled}
             setSageIntegrationEnabled={handleSageIntegrationToggleClick}
+            sageLockInfo={sageLockInfo}
             sageReadyOrders={sageReadyOrders}
             sageWatchError={sageWatchError}
           />
@@ -2058,12 +2347,29 @@ export default function App() {
             }
             archivableBubbleIds={archivableBubbleIds}
             onArchiveBubble={handleArchiveBubble}
+            onDeleteBubbleItems={currentView === "cash-sale-flow" ? handleDeleteBubbleItems : undefined}
+            onRenameBubble={handleRenameBubble}
+            bubbleLocks={bubbleLocks}
+            myEditingBubbleIds={myEditingBubbleIds}
+            pendingRequestBubbles={pendingRequestBubbles}
+            onRequestBubbleEdit={handleRequestBubbleEdit}
+            onDoneBubbleEdit={handleDoneBubbleEdit}
+            onRespondToBubbleRequest={handleRespondToBubbleRequest}
             showCashSalesMetrics={currentView === "cash-sale-flow"}
             payments={payments}
             paymentsLoading={paymentsLoading}
             paymentsError={paymentsError}
             bubblePaymentAssignments={bubblePaymentAssignments}
             onUpdateBubblePayments={handleUpdateBubblePayments}
+            showSageSalesAction={currentView === "sage-ar-queue" || currentView === "cash-sale-flow"}
+            defaultSageCustomerCode={currentView === "cash-sale-flow" ? "CAS202" : ""}
+            onSageSalesInvoice={async (bubbleName, customerCode, notes) => {
+              const res = await api.sageSalesInvoice(bubbleName, customerCode, notes || "");
+              if (!res?.ok) {
+                console.error("[sage-sales] invoice failed", res);
+                alert(res?.error || "Sage Sales Invoice failed. Check the console for details.");
+              }
+            }}
           />
         ) : currentView === "manage-stock" ? (
           <ManageStockView
@@ -2104,6 +2410,7 @@ export default function App() {
             handleOrderCheckboxChange={handleOrderCheckboxChange}
             handleOrderFieldChange={handleOrderFieldChange}
             onMarkForSage={handleOrderSageTrigger}
+            onBubblifyOrder={handleBubblifyOrder}
             onMarkComplete={handleMarkComplete}
             onReconcileTotals={handleReconcileTotals}
             onArchiveOrder={handleArchiveOrder}

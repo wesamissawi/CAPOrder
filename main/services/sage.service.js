@@ -16,7 +16,7 @@ const createSageService = (deps) => {
   let invoicePendingRun = false;
   const invoiceProcessingRefs = new Set();
 
-  const { runSagePurchase, runSageReconcile, runUpdateInvoice } = createSageActions(deps);
+  const { runSagePurchase, runSageReconcile, runUpdateInvoice, runSageSalesInvoice } = createSageActions(deps);
 
   async function processSageOrdersQueue() {
     if (!getSageIntegrationActive()) return;
@@ -143,6 +143,7 @@ const createSageService = (deps) => {
     runSagePurchase,
     runSageReconcile,
     runUpdateInvoice,
+    runSageSalesInvoice,
     processSageOrdersQueue,
     processInvoiceUpdateQueue,
     scheduleSageProcessing,
