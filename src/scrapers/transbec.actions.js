@@ -42,7 +42,9 @@ function parseTransbecDate(txt) {
     mai: "05",
     may: "05",
     jun: "06",
+    juin: "06",
     jui: "07",
+    juil: "07",
     jul: "07",
     aug: "08",
     aou: "08",
@@ -57,7 +59,8 @@ function parseTransbecDate(txt) {
     /([A-Za-z\u00c0-\u017f]{3,})\.?\s*(\d{1,2}),\s*(\d{4})(?:\s*at\s*(\d{1,2}):(\d{2})\s*(AM|PM|EST|EDT)?)?/i
   );
   if (!match) return { iso: null, sageDate: "" };
-  const monthKey = normalizeMonthToken(match[1]).slice(0, 3);
+  const normalized = normalizeMonthToken(match[1]);
+  const monthKey = monthMap[normalized.slice(0, 4)] ? normalized.slice(0, 4) : normalized.slice(0, 3);
   const month = monthMap[monthKey] || "";
   const day = match[2].padStart(2, "0");
   const year = match[3];
@@ -414,7 +417,9 @@ async function fetchOrderDetail(context, detailUrl, refLabel = "") {
         mai: "05",
         may: "05",
         jun: "06",
+        juin: "06",
         jui: "07",
+        juil: "07",
         jul: "07",
         aug: "08",
         aou: "08",
@@ -447,7 +452,8 @@ async function fetchOrderDetail(context, detailUrl, refLabel = "") {
       let sageDate = "";
       if (dateMatch) {
         orderDateRaw = dateMatch[0];
-        const monthKey = normalizeMonthToken(dateMatch[1]).slice(0, 3);
+        const normalizedMonth = normalizeMonthToken(dateMatch[1]);
+        const monthKey = monthMap[normalizedMonth.slice(0, 4)] ? normalizedMonth.slice(0, 4) : normalizedMonth.slice(0, 3);
         const month = monthMap[monthKey] || "";
         const day = dateMatch[2].padStart(2, "0");
         const year = dateMatch[3];
