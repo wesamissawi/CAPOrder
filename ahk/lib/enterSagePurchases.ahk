@@ -491,6 +491,20 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
     ;Exit, 7
     Sleep, 1000
 
+    ; Sage sometimes shows a "date precedes session date" confirmation before posting.
+    ; Poll for up to ~6s: dismiss it with Y (Yes), then let GetSageTxnNumber wait.
+    Loop, 20 {
+        if WinExist("Sage 50 - Confirmation") {
+            WinActivate, Sage 50 - Confirmation
+            Send, y
+            Sleep, 500
+            break
+        }
+        if WinExist("Sage 50 - Transaction Confirmation")
+            break
+        Sleep, 300
+    }
+
     journal_entry := GetSageTxnNumber(10)
 
     if (journal_entry = ""){

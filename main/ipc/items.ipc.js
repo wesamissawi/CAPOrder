@@ -120,7 +120,7 @@ const registerItemsIpc = (ipcMain, deps) => {
     return { ok: true, item: updated };
   });
 
-  ipcMain.handle('items:sage-sales-invoice', async (_evt, bubbleName, customerCode, notes) => {
+  ipcMain.handle('items:sage-sales-invoice', async (_evt, bubbleName, customerCode, notes, paymentType) => {
     if (typeof runSageSalesInvoice !== 'function') {
       return { ok: false, code: 'not-configured', error: 'Sage sales invoice action not available.' };
     }
@@ -129,7 +129,7 @@ const registerItemsIpc = (ipcMain, deps) => {
     if (!items.length) {
       return { ok: false, code: 'no-items', error: `No items found in bubble "${bubbleName}".` };
     }
-    return runSageSalesInvoice(items, customerCode || '', notes || '');
+    return runSageSalesInvoice(items, customerCode || '', notes || '', paymentType || '');
   });
 
   // Optional: manual lock release (e.g., user cancels)

@@ -56,6 +56,7 @@ export default function BubbleColumn({
   paymentsError = "",
   assignedPaymentIds = [],
   onUpdateAssignedPayments,
+  onDeletePayment,
   showSageSalesAction = false,
   defaultSageCustomerCode = "",
   onSageSalesInvoice,
@@ -104,6 +105,15 @@ export default function BubbleColumn({
   const [activePricingLabel, setActivePricingLabel] = React.useState("");
   const [arCustomerCode, setArCustomerCode] = React.useState("");
   const [sageSalesRunning, setSageSalesRunning] = React.useState(false);
+  const [lockedToast, setLockedToast] = React.useState(false);
+  const toastTimerRef = React.useRef(null);
+
+  function showLockedToast() {
+    setLockedToast(true);
+    clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setLockedToast(false), 3000);
+  }
+
   const allowDelete = !!onDeleteBubble && !isDefaultBubble;
   const deleteOptions = React.useMemo(() => {
     if (!allowDelete) return [];
@@ -375,6 +385,9 @@ export default function BubbleColumn({
       onDrop={handleDrop}
       onMouseDownCapture={handleActivate}
       onTouchStartCapture={handleActivate}
+      onClick={(e) => {
+        if (!canEdit && e.target.readOnly) showLockedToast();
+      }}
     >
       {/* Incoming request banner */}
       {incomingRequest && (
@@ -992,10 +1005,20 @@ export default function BubbleColumn({
                     type="button"
                     onClick={() => handleRemovePayment(p.id)}
                     className="text-slate-400 hover:text-slate-700"
-                    title="Remove payment"
+                    title="Unassign payment"
                   >
-                    x
+                    ×
                   </button>
+                  {onDeletePayment && (
+                    <button
+                      type="button"
+                      onClick={() => onDeletePayment(p.id)}
+                      className="text-red-400 hover:text-red-600"
+                      title="Delete payment"
+                    >
+                      🗑
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -1136,9 +1159,10 @@ export default function BubbleColumn({
             onClick={async () => {
               const code = defaultSageCustomerCode || arCustomerCode.trim();
               if (!code || !onSageSalesInvoice) return;
+              const paymentType = assignedPayments.length > 0 ? (assignedPayments[0].type || "") : "";
               setSageSalesRunning(true);
               try {
-                await onSageSalesInvoice(name, code, notes || "");
+                await onSageSalesInvoice(name, code, notes || "", paymentType);
               } finally {
                 setSageSalesRunning(false);
               }
@@ -1156,6 +1180,21 @@ export default function BubbleColumn({
               Delete Parts
             </button>
           )}
+        </div>
+      )}
+
+      {lockedToast && (
+        <div
+          className="absolute inset-x-4 bottom-10 z-50 flex items-center gap-2 rounded-xl bg-slate-800 px-3 py-2 text-xs text-white shadow-lg"
+          onClick={() => setLockedToast(false)}
+        >
+          <span className="text-base">🔒</span>
+          <span>
+            This bubble is locked.{" "}
+            {lockOwner
+              ? `Currently edited by ${lockOwner}.`
+              : "Click “Edit” to enable editing."}
+          </span>
         </div>
       )}
 

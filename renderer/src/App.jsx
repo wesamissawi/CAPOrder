@@ -5,7 +5,6 @@ import InvoicePreview from "./components/InvoicePreview";
 import DashboardView from "./views/DashboardView";
 import StockFlowView from "./views/StockFlowView";
 import OrderManagementView from "./views/OrderManagementView";
-import RefToInvView from "./views/RefToInvView";
 import PaymentManagementView from "./views/PaymentManagementView";
 import ReturnsManagementView from "./views/ReturnsManagementView";
 import ManageStockView from "./views/ManageStockView";
@@ -23,6 +22,7 @@ import {
 
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
 const DELETE_DESTINATIONS = ["NEW STOCK", "SHELF", "CASH SALES", "RETURNS"];
+const CASH_SALE_DELETE_DESTINATIONS = ["CashPad"];
 
 const ACCOUNTING_PATHS = {
   OUTSTANDING: "OUTSTANDING",
@@ -41,7 +41,6 @@ const VIEWS = [
   { id: "manage-stock", label: "Manage Stock" },
   { id: "returns-management", label: "Returns Management" },
   { id: "order-management", label: "Order Management" },
-  { id: "ref-to-inv", label: "Ref to Inv" },
   { id: "archive-search", label: "Archive" },
   { id: "settings", label: "Settings" },
   { id: "payment-management", label: "Payment Management" },
@@ -111,6 +110,8 @@ export default function App() {
   const [payments, setPayments] = useState([]);
   const [paymentsLoading, setPaymentsLoading] = useState(false);
   const [paymentsError, setPaymentsError] = useState("");
+  const [cashPadMarkup, setCashPadMarkup] = useState("30");
+  const [fillCashPadResult, setFillCashPadResult] = useState(null);
   const [sageWatchError, setSageWatchError] = useState("");
   const [printExtraLinesByBubble, setPrintExtraLinesByBubble] = useState({});
   const [bubbleMeta, setBubbleMeta] = useState({});
@@ -138,6 +139,10 @@ export default function App() {
   const [archiveSearching, setArchiveSearching] = useState(false);
   const [archiveError, setArchiveError] = useState("");
   const [archivePath, setArchivePath] = useState("");
+  const [purchasesSearchTerm, setPurchasesSearchTerm] = useState("");
+  const [purchasesResults, setPurchasesResults] = useState([]);
+  const [purchasesSearching, setPurchasesSearching] = useState(false);
+  const [purchasesError, setPurchasesError] = useState("");
   const ordersLastSavedRef = useRef("");
 
   const [editingItemUid, setEditingItemUid] = useState(null);
@@ -483,7 +488,7 @@ export default function App() {
     setBubbles((p) => [...p, nb]);
     setBubbleMeta((prev) => ({
       ...prev,
-      [id]: { ...(prev[id] || {}), accountingPath: ACCOUNTING_PATHS.OUTSTANDING },
+      [id]: { ...(prev[id] || {}), accountingPath: visibleAccountingPath || ACCOUNTING_PATHS.OUTSTANDING },
     }));
     setNewBubbleName("");
     if (api?.writeSharedBubbleData) {
@@ -576,10 +581,12 @@ export default function App() {
     if (!visibleAccountingPath) return bubbles;
     return bubbles.filter((b) => {
       const path =
-        bubbleAccountingPathByName.get(b.name) || ACCOUNTING_PATHS.OUTSTANDING;
+        bubbleAccountingPathByName.get(b.name) ||
+        bubbleMeta[b.id]?.accountingPath ||
+        ACCOUNTING_PATHS.OUTSTANDING;
       return path === visibleAccountingPath;
     });
-  }, [bubbles, bubbleAccountingPathByName, visibleAccountingPath]);
+  }, [bubbles, bubbleAccountingPathByName, bubbleMeta, visibleAccountingPath]);
   const filteredItemsForView = useMemo(() => {
     if (!visibleAccountingPath) return filteredItems;
     return filteredItems.filter((it) => {
@@ -888,12 +895,14 @@ export default function App() {
 
     window.addEventListener("mousemove", handlePointerMove);
     window.addEventListener("mouseup", endDrag);
+    window.addEventListener("blur", endDrag);
     window.addEventListener("touchmove", handlePointerMove, { passive: false });
     window.addEventListener("touchend", endDrag);
     window.addEventListener("touchcancel", endDrag);
     return () => {
       window.removeEventListener("mousemove", handlePointerMove);
       window.removeEventListener("mouseup", endDrag);
+      window.removeEventListener("blur", endDrag);
       window.removeEventListener("touchmove", handlePointerMove);
       window.removeEventListener("touchend", endDrag);
       window.removeEventListener("touchcancel", endDrag);
@@ -1007,10 +1016,12 @@ export default function App() {
       handleUpdateBubblePayments(bubbleId, []);
     }
     const validTargets = DELETE_DESTINATIONS.filter((name) => name !== bubble.name);
-      const fallback =
-        validTargets.includes(fallbackTargetName) && fallbackTargetName
-          ? fallbackTargetName
-          : validTargets[0] || "NEW STOCK";
+    const bubblePath = bubbleAccountingPathByName.get(bubble.name);
+    const fallback = fallbackTargetName
+      ? fallbackTargetName
+      : (bubblePath === ACCOUNTING_PATHS.CASH_SALE && validTargets.includes("CASH SALES"))
+        ? "CASH SALES"
+        : validTargets[0] || "NEW STOCK";
     let updatedItemsSnapshot = null;
     setItems((prev) => {
       const nowIso = new Date().toISOString();
@@ -1167,6 +1178,121 @@ export default function App() {
     setBubbleMeta(nextBubbleMeta);
     persistUIState(nextBubbleMeta);
     persistSharedBubbleSnapshot(bubbleId, { paymentIds: cleanIds });
+  }
+
+  async function handleDeletePayment(paymentId, bubbleId) {
+    if (!paymentId) return;
+    const next = (payments || []).filter((p) => p?.id !== paymentId);
+    await api.writePayments(next);
+    setPayments(next);
+    if (bubbleId) {
+      const meta = bubbleMeta[bubbleId] || {};
+      const cleanIds = (meta.paymentIds || []).filter((id) => id !== paymentId);
+      handleUpdateBubblePayments(bubbleId, cleanIds);
+    }
+  }
+
+  function handleFillFromCashPad() {
+    const TAX = 0.13;
+    const markup = Math.max(0, parseFloat(cashPadMarkup) || 0) / 100;
+    const toAmt = (v) => parseFloat((v ?? '').toString().replace(/[^0-9.-]/g, '')) || 0;
+
+    // Only unassigned payments
+    const assignedIds = new Set(
+      Object.values(bubbleMeta).flatMap((m) => m.paymentIds || [])
+    );
+    const unassigned = (payments || []).filter((p) => p?.id && !assignedIds.has(p.id));
+    if (!unassigned.length) { alert('No unassigned payments found.'); return; }
+
+    // CASHPAD items only
+    const cashpadItems = items.filter(
+      (it) => (it.allocated_to || '').toUpperCase() === 'CASHPAD'
+    );
+    if (!cashpadItems.length) { alert('CashPad is empty.'); return; }
+
+    // Effective price: cost × (1 + markup) × (1 + tax), sort largest first
+    const priced = cashpadItems
+      .map((it) => ({ ...it, _eff: toAmt(it.cost) * (Number(it.quantity) || 1) * (1 + markup) * (1 + TAX) }))
+      .sort((a, b) => b._eff - a._eff);
+
+    // Payments largest first
+    const sortedPayments = [...unassigned].sort((a, b) => toAmt(b.amount) - toAmt(a.amount));
+
+    // Greedy largest-first fill
+    const pool = [...priced];
+    const assignments = [];
+    for (const payment of sortedPayments) {
+      const target = toAmt(payment.amount);
+      const chosen = [];
+      let spent = 0;
+      const takenIdx = [];
+      for (let i = 0; i < pool.length; i++) {
+        if (spent + pool[i]._eff <= target + 0.005) {
+          chosen.push(pool[i]);
+          takenIdx.push(i);
+          spent += pool[i]._eff;
+        }
+      }
+      // Remove chosen from pool (reverse order to keep indices valid)
+      for (let i = takenIdx.length - 1; i >= 0; i--) pool.splice(takenIdx[i], 1);
+      assignments.push({ payment, chosen });
+    }
+
+    if (!assignments.some((a) => a.chosen.length > 0)) {
+      alert('No items could be assigned — all items may exceed individual payment amounts.');
+      return;
+    }
+
+    // Build new bubbles + meta
+    const now = new Date().toISOString();
+    const newBubbles = [];
+    const newMetaEntries = {};
+    const itemToBubble = new Map();
+    const sharedWrites = [];
+    const existingNames = new Set(bubbles.map((b) => (b.name || '').toUpperCase()));
+    let bubblesCreated = 0;
+    let itemsMoved = 0;
+
+    for (const { payment, chosen } of assignments) {
+      if (chosen.length === 0) continue;
+      const label = `${(payment.type || 'PAYMENT').toUpperCase()} $${toAmt(payment.amount).toFixed(2)}`;
+      const bubbleName = uniqueName(label, existingNames);
+      existingNames.add(bubbleName.toUpperCase());
+      const bubbleId = makeUid();
+      const meta = { accountingPath: ACCOUNTING_PATHS.CASH_SALE, paymentIds: [payment.id] };
+      newBubbles.push({ id: bubbleId, name: bubbleName, notes: '' });
+      newMetaEntries[bubbleId] = meta;
+      newMetaEntries[bubbleName] = meta;
+      chosen.forEach((it) => itemToBubble.set(it.uid, bubbleName));
+      sharedWrites.push({ bubbleId, bubbleName, paymentIds: [payment.id] });
+      bubblesCreated++;
+      itemsMoved += chosen.length;
+    }
+
+    setBubbles((prev) => [...prev, ...newBubbles]);
+    setBubbleMeta((prev) => {
+      const next = { ...prev, ...newMetaEntries };
+      persistUIState(next);
+      return next;
+    });
+    setItems((prev) =>
+      prev.map((it) => {
+        const dest = itemToBubble.get(it.uid);
+        if (!dest) return it;
+        const discounted_price = (toAmt(it.cost) * (1 + markup)).toFixed(2);
+        return { ...it, allocated_to: dest, last_moved_at: now, discounted_price };
+      })
+    );
+    sharedWrites.forEach(({ bubbleId, bubbleName, paymentIds }) => {
+      api.writeSharedBubbleData?.({
+        bubbleId, name: bubbleName, notes: '', extraLines: [], paymentIds,
+      }).catch((e) => console.warn('[cashpad-fill] shared write failed', e));
+    });
+
+    setFillCashPadResult(
+      `Created ${bubblesCreated} bubble${bubblesCreated !== 1 ? 's' : ''}, moved ${itemsMoved} item${itemsMoved !== 1 ? 's' : ''}.`
+    );
+    setTimeout(() => setFillCashPadResult(null), 5000);
   }
 
   async function handleArchiveBubble(bubbleId) {
@@ -1932,6 +2058,28 @@ export default function App() {
     }
   }
 
+  async function handlePurchasesSearch() {
+    const q = purchasesSearchTerm.trim();
+    if (!q) {
+      setPurchasesError("Enter a part number to search.");
+      setPurchasesResults([]);
+      return;
+    }
+    try {
+      setPurchasesError("");
+      setPurchasesSearching(true);
+      const res = await api.searchOrdersArchive(q);
+      if (!res?.ok) throw new Error(res?.error || "Search failed.");
+      setPurchasesResults(res.results || []);
+    } catch (e) {
+      console.error("[purchases search]", e);
+      setPurchasesError(e?.message || "Failed to search purchases archive.");
+      setPurchasesResults([]);
+    } finally {
+      setPurchasesSearching(false);
+    }
+  }
+
   async function handleArchiveSearch() {
     const hasTerm = archiveSearchTerm.trim() || archiveBubbleSearch.trim();
     if (!hasTerm) {
@@ -2157,7 +2305,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    const needsOrders = currentView === "order-management" || currentView === "ref-to-inv";
+    const needsOrders = currentView === "order-management";
     if (needsOrders && !ordersInitialized && !ordersLoading) {
       loadOrders();
     }
@@ -2306,13 +2454,44 @@ export default function App() {
             sageWatchError={sageWatchError}
           />
         ) : isBubbleFlowView ? (
+          <>
+            {currentView === "cash-sale-flow" && (
+              <div className="px-4 pt-3 pb-1">
+                <div className="inline-flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm flex-wrap">
+                  <span className="text-sm font-medium text-slate-600 whitespace-nowrap">Auto-fill from CashPad</span>
+                  <div className="flex items-center gap-1.5">
+                    <label className="text-xs text-slate-500 whitespace-nowrap">Markup %</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      className="w-20 rounded-lg border border-slate-200 px-2 py-1 text-sm text-center focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                      value={cashPadMarkup}
+                      onChange={(e) => setCashPadMarkup(e.target.value)}
+                      onFocus={handleFieldFocus}
+                      onBlur={handleFieldBlur}
+                    />
+                    <span className="text-xs text-slate-400">% + 13% tax</span>
+                  </div>
+                  <button
+                    onClick={handleFillFromCashPad}
+                    className="rounded-xl bg-indigo-600 px-4 py-1.5 text-sm font-semibold text-white shadow hover:bg-indigo-700 whitespace-nowrap"
+                  >
+                    Fill Payments
+                  </button>
+                  {fillCashPadResult && (
+                    <span className="text-sm text-emerald-700 font-medium">{fillCashPadResult}</span>
+                  )}
+                </div>
+              </div>
+            )}
           <StockFlowView
             newBubbleName={newBubbleName}
             setNewBubbleName={setNewBubbleName}
             handleFieldFocus={handleFieldFocus}
             handleFieldBlur={handleFieldBlur}
             addBubble={addBubble}
-            showCreateBubble={currentView === "stock-flow"}
+            showCreateBubble={currentView === "stock-flow" || currentView === "cash-sale-flow"}
             bubbles={bubblesForView}
             bubblePositions={bubblePositions}
             bubbleSizes={bubbleSizes}
@@ -2334,7 +2513,7 @@ export default function App() {
             onSplitItem={handleSplitItem}
             onConsolidateItems={handleConsolidateBubbleItems}
             onDeleteBubble={handleDeleteBubble}
-            deleteTargets={DELETE_DESTINATIONS}
+            deleteTargets={currentView === "cash-sale-flow" ? CASH_SALE_DELETE_DESTINATIONS : DELETE_DESTINATIONS}
             defaultBubbleNames={DEFAULT_BUBBLE_NAMES}
             onStartBubbleMove={handleStartBubbleMove}
             onStartBubbleResize={handleStartBubbleResize}
@@ -2361,16 +2540,18 @@ export default function App() {
             paymentsError={paymentsError}
             bubblePaymentAssignments={bubblePaymentAssignments}
             onUpdateBubblePayments={handleUpdateBubblePayments}
+            onDeletePayment={handleDeletePayment}
             showSageSalesAction={currentView === "sage-ar-queue" || currentView === "cash-sale-flow"}
             defaultSageCustomerCode={currentView === "cash-sale-flow" ? "CAS202" : ""}
-            onSageSalesInvoice={async (bubbleName, customerCode, notes) => {
-              const res = await api.sageSalesInvoice(bubbleName, customerCode, notes || "");
+            onSageSalesInvoice={async (bubbleName, customerCode, notes, paymentType) => {
+              const res = await api.sageSalesInvoice(bubbleName, customerCode, notes || "", paymentType || "");
               if (!res?.ok) {
                 console.error("[sage-sales] invoice failed", res);
                 alert(res?.error || "Sage Sales Invoice failed. Check the console for details.");
               }
             }}
           />
+          </>
         ) : currentView === "manage-stock" ? (
           <ManageStockView
             items={items}
@@ -2382,14 +2563,6 @@ export default function App() {
           <ReturnsManagementView
             groups={returnsByWarehouse}
             onReturnToNewStock={handleReturnItemToNewStock}
-          />
-        ) : currentView === "ref-to-inv" ? (
-          <RefToInvView
-            orders={orders}
-            ordersLoading={ordersLoading}
-            ordersError={ordersError}
-            handleOrderInvoiceChange={handleOrderInvoiceChange}
-            handleSaveOrders={handleSaveOrders}
           />
         ) : currentView === "order-management" ? (
           <OrderManagementView
@@ -2427,6 +2600,32 @@ export default function App() {
             results={archiveResults}
             error={archiveError}
             archivePath={archivePath}
+            purchasesSearchTerm={purchasesSearchTerm}
+            setPurchasesSearchTerm={setPurchasesSearchTerm}
+            onPurchasesSearch={handlePurchasesSearch}
+            purchasesSearching={purchasesSearching}
+            purchasesResults={purchasesResults}
+            purchasesError={purchasesError}
+            items={items}
+            onPurgeOldOrders={() => api.purgeOldOrdersArchive()}
+            onAddLineToCashSales={async (order, line) => {
+              const res = await api.addArchiveLineToCashSales(order, line);
+              if (res?.ok) {
+                try {
+                  const latest = await api.readItems();
+                  const norm = normalizeItems(latest || []);
+                  setItems((prev) => {
+                    const merged = mergeItems(prev, norm);
+                    lastSavedRef.current = JSON.stringify(merged);
+                    ensureBubblesForItems(merged, setBubbles);
+                    return merged;
+                  });
+                } catch (e) {
+                  console.error("[archive-add] item refresh failed", e);
+                }
+              }
+              return res;
+            }}
           />
         ) : currentView === "settings" ? (
           <SettingsView />

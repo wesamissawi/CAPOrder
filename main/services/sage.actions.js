@@ -317,7 +317,7 @@ const createSageActions = (deps) => {
     });
   }
 
-  function runSageSalesInvoice(items, customerCode, notes) {
+  function runSageSalesInvoice(items, customerCode, notes, paymentType) {
     return new Promise((resolve) => {
       if (!fs.existsSync(SAGE_SALES_SCRIPT)) {
         console.error('[sage-sales] AHK script not found', { path: SAGE_SALES_SCRIPT });
@@ -373,7 +373,7 @@ const createSageActions = (deps) => {
       let tempPath;
       try {
         tempPath = path.join(app.getPath('temp'), 'cap_order_sales_items.json');
-        const payload = { notes: notes || '', grandTotal, items: itemsForAhk };
+        const payload = { notes: notes || '', grandTotal, paymentType: paymentType || '', items: itemsForAhk };
         fs.writeFileSync(tempPath, JSON.stringify(payload, null, 2), 'utf-8');
       } catch (e) {
         console.error('[sage-sales] failed to write temp items file', e);

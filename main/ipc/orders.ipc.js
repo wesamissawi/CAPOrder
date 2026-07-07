@@ -23,6 +23,10 @@ const registerOrdersIpc = (ipcMain, deps) => {
     applyReconcileResult,
     archiveCompletedOrders,
     archiveOrderByKey,
+    searchOrdersArchive,
+    purgeOldOrdersArchive,
+    readOrdersArchive,
+    writeOrdersArchive,
     readSageLock,
     writeSageLock,
     clearSageLock,
@@ -180,6 +184,63 @@ const registerOrdersIpc = (ipcMain, deps) => {
     } catch (e) {
       console.error('[orders:archive-one]', e);
       return { ok: false, error: e?.message || 'Failed to archive order.' };
+    }
+  });
+
+  ipcMain.handle('orders-archive:add-to-cash-sales', (_evt, order, line) => {
+    try {
+      const items = readItems();
+      const syntheticOrder = {
+        reference: order?.reference || '',
+        source: order?.source || '',
+        source_invoice: order?.invoice || '',
+        orderDate: order?.date || '',
+        warehouse: order?.warehouse || '',
+        seller: order?.warehouse || '',
+      };
+      const newItem = {
+        ...makeOutstandingFromLine(syntheticOrder, line),
+        allocated_to: 'CASHPAD',
+        accountingPath: 'CASH_SALE',
+      };
+      writeItems(items.concat(newItem));
+
+      // Mark the line as added in the archive so the UI reflects it on next search
+      const archive = readOrdersArchive();
+      const updatedArchive = (archive || []).map((o) => {
+        if ((o?.reference || '') !== order?.reference) return o;
+        return {
+          ...o,
+          lineItems: (o.lineItems || []).map((l) => {
+            if (l?.partNumber !== line?.partNumber || l?.partLineCode !== line?.partLineCode) return l;
+            return { ...l, addedToOutstanding: true };
+          }),
+        };
+      });
+      writeOrdersArchive(updatedArchive);
+
+      return { ok: true, item: newItem };
+    } catch (e) {
+      console.error('[orders-archive:add-to-cash-sales]', e);
+      return { ok: false, error: e?.message || 'Failed to add item.' };
+    }
+  });
+
+  ipcMain.handle('orders-archive:search', async (_evt, term) => {
+    try {
+      return searchOrdersArchive(term);
+    } catch (e) {
+      console.error('[orders-archive:search]', e);
+      return { ok: false, error: e?.message || 'Failed to search orders archive.' };
+    }
+  });
+
+  ipcMain.handle('orders-archive:purge-old', async () => {
+    try {
+      return purgeOldOrdersArchive(90);
+    } catch (e) {
+      console.error('[orders-archive:purge-old]', e);
+      return { ok: false, error: e?.message || 'Failed to purge old orders.' };
     }
   });
 

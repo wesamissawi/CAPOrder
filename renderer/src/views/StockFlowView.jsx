@@ -54,6 +54,7 @@ export default function StockFlowView({
   paymentsError = "",
   bubblePaymentAssignments = {},
   onUpdateBubblePayments,
+  onDeletePayment,
   showSageSalesAction = false,
   defaultSageCustomerCode = "",
   onSageSalesInvoice,
@@ -205,6 +206,7 @@ export default function StockFlowView({
                   paymentsError={paymentsError}
                   assignedPaymentIds={bubblePaymentAssignments[b.id] || []}
                   onUpdateAssignedPayments={onUpdateBubblePayments}
+                  onDeletePayment={onDeletePayment ? (paymentId) => onDeletePayment(paymentId, b.id) : undefined}
                   showSageSalesAction={showSageSalesAction}
                   defaultSageCustomerCode={defaultSageCustomerCode}
                   onSageSalesInvoice={onSageSalesInvoice}

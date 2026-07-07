@@ -36,6 +36,7 @@ if (!IsObject(payload)) {
 
 bubbleNotes := payload.notes
 grandTotal  := payload.grandTotal
+paymentType := payload.paymentType
 items       := payload.items
 
 if (!IsObject(items) || !items.MaxIndex()) {
@@ -109,6 +110,13 @@ if (grandTotal != "") {
     Send, {Tab}
     Sleep, 200
     Send, % grandTotal
+    Sleep, 100
+    noteTabsUsed++
+}
+if (paymentType != "") {
+    Send, {Tab}
+    Sleep, 200
+    Send, % paymentType
     Sleep, 100
     noteTabsUsed++
 }

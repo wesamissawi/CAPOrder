@@ -728,6 +728,67 @@ function archiveCompletedOrders(options = {}) {
     archiveCount: mergedArchive.length,
   };
 }
+function purgeOldOrdersArchive(days = 90) {
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const archive = readOrdersArchive() || [];
+  const keep = archive.filter((o) => {
+    const ts = o?.archivedAt ? new Date(o.archivedAt).getTime() : NaN;
+    return isNaN(ts) || ts > cutoff;
+  });
+  const removed = archive.length - keep.length;
+  writeOrdersArchive(keep);
+  return { ok: true, removed, remaining: keep.length };
+}
+
+function searchOrdersArchive(term) {
+  const norm = (v) => (v ?? '').toString().trim().toLowerCase();
+  const strip = (v) => v.replace(/[-\s]/g, '');
+  const q = norm(term);
+  const qStripped = strip(q);
+  if (!q) return { ok: false, error: 'Enter a part number to search.' };
+
+  const archive = readOrdersArchive() || [];
+  const results = [];
+
+  for (const order of archive) {
+    const lineItems = Array.isArray(order?.lineItems) ? order.lineItems : [];
+    const matched = lineItems.filter((line) => {
+      const partNum = norm(line?.partNumber);
+      const lineCode = norm(line?.partLineCode);
+      const combined = lineCode ? `${lineCode} ${partNum}` : partNum;
+      const partNumStripped = strip(partNum);
+      const combinedStripped = strip(combined);
+      return partNum.includes(q) || combined.includes(q) ||
+        partNumStripped.includes(qStripped) || combinedStripped.includes(qStripped);
+    });
+    if (!matched.length) continue;
+    const invoice = (order?.source_invoice || order?.invoiceNum || '').trim();
+    const date = order?.orderDate || order?.orderDateRaw || order?.sageDate || '';
+    const warehouse = (order?.warehouse || order?.seller || '').trim();
+    results.push({
+      reference: order?.reference || '',
+      source: order?.source || '',
+      invoice,
+      date,
+      warehouse,
+      archivedAt: order?.archivedAt || '',
+      lines: matched.map((line) => ({
+        partNumber: line?.partNumber || '',
+        partLineCode: line?.partLineCode || '',
+        itemcode: line?.partLineCode ? `${line.partLineCode} ${line.partNumber}`.trim() : (line?.partNumber || ''),
+        partDescription: line?.partDescription || '',
+        costPrice: line?.costPrice || '',
+        costPriceValue: line?.costPriceValue ?? null,
+        quantity: line?.quantity ?? null,
+        addedToOutstanding: line?.addedToOutstanding === true,
+      })),
+    });
+  }
+
+  results.sort((a, b) => String(b.archivedAt || '').localeCompare(String(a.archivedAt || '')));
+  return { ok: true, results };
+}
+
 function archiveOrderByKey(refKeyRaw) {
   const key = (refKeyRaw || '').toString().trim().toUpperCase();
   if (!key) return { ok: false, error: 'Missing reference key.' };
@@ -911,6 +972,15 @@ function writeArchivedEntries(entries) {
 
 function writeTempOrder(order) {
   try {
+    const lines = order?.sage_lineItems || order?.lineItems || [];
+    console.log('[sage] writeTempOrder costPrice debug:', lines.map((l, i) => ({
+      idx: i,
+      part: `${l?.partLineCode || ''} ${l?.partNumber || ''}`.trim(),
+      costPrice: l?.costPrice,
+      costPriceValue: l?.costPriceValue,
+      environmentalFeeAmount: l?.environmentalFeeAmount,
+      source: order?.sage_lineItems ? 'sage_lineItems' : 'lineItems',
+    })));
     fs.writeFileSync(SAGE_TEMP_ORDER, JSON.stringify(order || {}, null, 2), 'utf-8');
     return SAGE_TEMP_ORDER;
   } catch (e) {
@@ -1201,6 +1271,10 @@ function registerAllIpc() {
     getPaymentsFile,
     archiveCompletedOrders,
     archiveOrderByKey,
+    searchOrdersArchive,
+    purgeOldOrdersArchive,
+    readOrdersArchive,
+    writeOrdersArchive,
     resetSageQueue,
     stopOrdersWatching,
     startOrdersWatching,
@@ -1259,6 +1333,19 @@ function registerAllIpc() {
   startSageLockWatching();
   startBubbleLockWatching();
   registerAllIpcByDomain(ipcMain, deps);
+
+  ipcMain.handle('dialog:confirm', async (evt, message, detail) => {
+    const sender = BrowserWindow.fromWebContents(evt.sender) || win;
+    const result = await dialog.showMessageBox(sender, {
+      type: 'question',
+      buttons: ['Cancel', 'OK'],
+      defaultId: 1,
+      cancelId: 0,
+      message: message || 'Are you sure?',
+      detail: detail || '',
+    });
+    return result.response === 1;
+  });
 }
 function readUIState() {
   try {
