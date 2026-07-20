@@ -283,13 +283,14 @@ UpdateOrderJournal(ref, journalEntry, jsonPath := "") {
     }
     f.Write(newJson), f.Close()
 
-    FileCopy, %tmp%, %jsonPath%, 1  ; overwrite only if copy succeeds
+    ; FileMove (rename) replaces the target atomically — FileCopy truncated the
+    ; destination first, letting concurrent readers see a partial file.
+    FileMove, %tmp%, %jsonPath%, 1  ; 1 = overwrite
     if (ErrorLevel) {
-        MsgBox, 16, Error, Couldn't copy temp over original:`n%jsonPath%
+        MsgBox, 16, Error, Couldn't move temp over original:`n%jsonPath%
+        FileDelete, %tmp%
         return false
     }
-
-    FileDelete, %tmp%
     return true
 }
 

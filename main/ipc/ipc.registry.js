@@ -1,5 +1,6 @@
 const { registerItemsIpc } = require('./items.ipc');
 const { registerOrdersIpc } = require('./orders.ipc');
+const { registerVendorIpc } = require('./vendor.ipc');
 const { registerPaymentsIpc } = require('./payments.ipc');
 const { registerStockFlowIpc } = require('./stockflow.ipc');
 const { registerSettingsIpc } = require('./settings.ipc');
@@ -29,8 +30,10 @@ function registerAllIpc(ipcMain, deps) {
     readOrders: deps.readOrders,
     writeOrders: deps.writeOrders,
     getOrdersFile: deps.getOrdersFile,
-    getSageIntegrationActive: deps.getSageIntegrationActive,
-    setSageIntegrationActive: deps.setSageIntegrationActive,
+    getSagePoActive: deps.getSagePoActive,
+    setSagePoActive: deps.setSagePoActive,
+    getSageInvoiceActive: deps.getSageInvoiceActive,
+    setSageInvoiceActive: deps.setSageInvoiceActive,
     resetSageQueue: deps.resetSageQueue,
     stopOrdersWatching: deps.stopOrdersWatching,
     startOrdersWatching: deps.startOrdersWatching,
@@ -49,6 +52,7 @@ function registerAllIpc(ipcMain, deps) {
     applyReconcileResult: deps.applyReconcileResult,
     archiveCompletedOrders: deps.archiveCompletedOrders,
     archiveOrderByKey: deps.archiveOrderByKey,
+    deleteOrderByKey: deps.deleteOrderByKey,
     searchOrdersArchive: deps.searchOrdersArchive,
     purgeOldOrdersArchive: deps.purgeOldOrdersArchive,
     readOrdersArchive: deps.readOrdersArchive,
@@ -57,7 +61,28 @@ function registerAllIpc(ipcMain, deps) {
     readSageLock: deps.readSageLock,
     writeSageLock: deps.writeSageLock,
     clearSageLock: deps.clearSageLock,
+    sageLockIsLive: deps.sageLockIsLive,
+    startSageHeartbeat: deps.startSageHeartbeat,
+    stopSageHeartbeat: deps.stopSageHeartbeat,
     getMachineId: deps.getMachineId,
+  });
+
+  registerVendorIpc(ipcMain, {
+    openEpicor: deps.openEpicor,
+    scanEpicorRange: deps.scanEpicorRange,
+    rescanEpicorInvoice: deps.rescanEpicorInvoice,
+    getEpicorScannedInvoices: deps.getEpicorScannedInvoices,
+    shell: deps.shell,
+    getEpicorAssetsDir: deps.getEpicorAssetsDir,
+    fetchTransbecInvoices: deps.fetchTransbecInvoices,
+    fetchBestbuyInvoices: deps.fetchBestbuyInvoices,
+    fetchBestbuyCreditInvoices: deps.fetchBestbuyCreditInvoices,
+    fetchCbkInvoices: deps.fetchCbkInvoices,
+    connectGmail: deps.connectGmail,
+    getGmailStatus: deps.getGmailStatus,
+    getGmailAssetsDir: deps.getGmailAssetsDir,
+    getWin: deps.getWin,
+    loadConfig: deps.loadConfig,
   });
 
   registerPaymentsIpc(ipcMain, {

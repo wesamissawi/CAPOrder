@@ -6,7 +6,7 @@ console.log('[preload] loaded');
 contextBridge.exposeInMainWorld('api', {
   // data
   readItems: () => ipcRenderer.invoke('items:read'),
-  writeItems: (items) => ipcRenderer.invoke('items:write', items),
+  writeItems: (items, deletedUids) => ipcRenderer.invoke('items:write', items, deletedUids),
   exportItems: (items) => ipcRenderer.invoke('items:export', items),
 
   // updates
@@ -50,7 +50,8 @@ contextBridge.exposeInMainWorld('api', {
   migrateBusinessFilesToShared: (payload) => ipcRenderer.invoke('app-config:migrate-business', payload),
   readOrders: () => ipcRenderer.invoke('orders:read'),
   writeOrders: (orders) => ipcRenderer.invoke('orders:write', orders),
-  watchOrders: (enable) => ipcRenderer.invoke('orders:watch', enable),
+  setSagePoActive: (enable) => ipcRenderer.invoke('sage:set-po-active', enable),
+  setSageInvoiceActive: (enable) => ipcRenderer.invoke('sage:set-invoice-active', enable),
   onOrdersUpdated: (cb) => {
     const listener = (_e, data) => cb(data);
     ipcRenderer.on('orders:updated', listener);
@@ -65,11 +66,32 @@ contextBridge.exposeInMainWorld('api', {
   fetchProforceOrders: () => ipcRenderer.invoke('orders:fetch-proforce'),
   fetchCbkOrders: () => ipcRenderer.invoke('orders:fetch-cbk'),
   fetchBestBuyOrders: () => ipcRenderer.invoke('orders:fetch-bestbuy'),
+  openEpicor: (payload) => ipcRenderer.invoke('vendor:open-epicor', payload),
+  scanEpicorRange: (payload) => ipcRenderer.invoke('vendor:scan-epicor-range', payload),
+  getEpicorScanned: () => ipcRenderer.invoke('vendor:get-epicor-scanned'),
+  rescanEpicorInvoice: (invoiceNumber) => ipcRenderer.invoke('vendor:rescan-epicor-invoice', { invoiceNumber }),
+  openEpicorInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:open-epicor-invoice-image', fileName),
+  readEpicorInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:read-epicor-invoice-image', fileName),
+  fetchTransbecInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-transbec-invoices', payload),
+  connectGmail: () => ipcRenderer.invoke('vendor:connect-gmail'),
+  getGmailStatus: () => ipcRenderer.invoke('vendor:gmail-status'),
+  openTransbecInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:open-transbec-invoice-image', fileName),
+  readTransbecInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:read-transbec-invoice-image', fileName),
+  fetchBestbuyInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-bestbuy-invoices', payload),
+  openBestbuyInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:open-bestbuy-invoice-image', fileName),
+  readBestbuyInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:read-bestbuy-invoice-image', fileName),
+  fetchBestbuyCreditInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-bestbuy-credit-invoices', payload),
+  fetchCbkInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-cbk-invoices', payload),
+  openCbkInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:open-cbk-invoice-image', fileName),
+  readCbkInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:read-cbk-invoice-image', fileName),
+  printInvoiceSilent: (fileName) => ipcRenderer.invoke('vendor:print-invoice-silent', fileName),
+  listPrinters: () => ipcRenderer.invoke('printers:list'),
   reconcileTotals: (refKey, order) => ipcRenderer.invoke('orders:reconcile-totals', refKey, order),
   addOrdersToOutstanding: () => ipcRenderer.invoke('orders:add-to-outstanding'),
   bubblifyOrder: (refKey, bubbleName) => ipcRenderer.invoke('orders:bubblify-order', refKey, bubbleName),
   archiveOrders: (payload) => ipcRenderer.invoke('orders:archive-completed', payload),
-  archiveOrder: (refKey) => ipcRenderer.invoke('orders:archive-one', refKey),
+  archiveOrder: (refKey, source) => ipcRenderer.invoke('orders:archive-one', refKey, source),
+  deleteOrder: (refKey, source) => ipcRenderer.invoke('orders:delete-one', refKey, source),
   searchOrdersArchive: (term) => ipcRenderer.invoke('orders-archive:search', term),
   addArchiveLineToCashSales: (order, line) => ipcRenderer.invoke('orders-archive:add-to-cash-sales', order, line),
   purgeOldOrdersArchive: () => ipcRenderer.invoke('orders-archive:purge-old'),

@@ -3,8 +3,10 @@ const registerOrdersIpc = (ipcMain, deps) => {
     readOrders,
     writeOrders,
     getOrdersFile,
-    getSageIntegrationActive,
-    setSageIntegrationActive,
+    getSagePoActive,
+    setSagePoActive,
+    getSageInvoiceActive,
+    setSageInvoiceActive,
     resetSageQueue,
     stopOrdersWatching,
     startOrdersWatching,
@@ -23,6 +25,7 @@ const registerOrdersIpc = (ipcMain, deps) => {
     applyReconcileResult,
     archiveCompletedOrders,
     archiveOrderByKey,
+    deleteOrderByKey,
     searchOrdersArchive,
     purgeOldOrdersArchive,
     readOrdersArchive,
@@ -30,47 +33,87 @@ const registerOrdersIpc = (ipcMain, deps) => {
     readSageLock,
     writeSageLock,
     clearSageLock,
+    sageLockIsLive,
+    startSageHeartbeat,
+    stopSageHeartbeat,
     getMachineId,
   } = deps;
+
+  // Keep the orders.json watcher running while either Sage flow is active.
+  function refreshOrdersWatch() {
+    if (getSagePoActive?.() || getSageInvoiceActive?.()) {
+      startOrdersWatching(deps.getWin());
+    } else {
+      stopOrdersWatching();
+    }
+  }
 
   ipcMain.handle('sage:get-lock', () => {
     try {
       const lock = readSageLock?.() || null;
-      return { ok: true, lock, ownMachineId: getMachineId?.() || null };
+      return {
+        ok: true,
+        lock,
+        lockIsLive: Boolean(lock && sageLockIsLive?.(lock)),
+        ownMachineId: getMachineId?.() || null,
+      };
     } catch (e) {
-      return { ok: false, lock: null, ownMachineId: null };
+      return { ok: false, lock: null, lockIsLive: false, ownMachineId: null };
     }
   });
 
   ipcMain.handle('orders:read', () => readOrders());
   ipcMain.handle('orders:get-path', () => ({ path: getOrdersFile() }));
-  ipcMain.handle('orders:watch', (_evt, enable = true) => {
+
+  // Purchase-order processing: cross-machine exclusive via the heartbeat lock.
+  ipcMain.handle('sage:set-po-active', (_evt, enable = true) => {
     try {
       if (enable === false) {
-        setSageIntegrationActive(false);
+        setSagePoActive(false);
         resetSageQueue();
-        stopOrdersWatching();
+        stopSageHeartbeat?.();
         clearSageLock?.();
-        return { ok: true, watching: false };
+        refreshOrdersWatch();
+        return { ok: true, active: false };
       }
 
-      // Check if another machine holds the lock and is actively running scripts
+      // Block if another machine currently holds a live (still heartbeating) lock.
+      // A stale lock (owner crashed/closed) is fair game to take over.
       const lock = readSageLock?.();
       const ownId = getMachineId?.();
-      if (lock && lock.machineId && lock.machineId !== ownId && lock.running === true) {
-        console.warn('[orders:watch] sage lock held by running machine', lock.machineId);
-        return { ok: false, error: 'sage-locked', lockedBy: lock.machineId };
+      if (lock && lock.machineId && lock.machineId !== ownId && sageLockIsLive?.(lock)) {
+        console.warn('[sage] PO lock held by live machine', lock.machineId);
+        return { ok: false, error: 'sage-locked', lockedBy: lock.machineId, running: lock.running === true };
       }
 
-      // Claim the lock (overwrites a stale/non-running lock from another machine)
-      writeSageLock?.({ machineId: ownId, lockedAt: Date.now(), running: false });
-      setSageIntegrationActive(true);
+      const now = Date.now();
+      writeSageLock?.({ machineId: ownId, lockedAt: now, heartbeatAt: now, running: false });
+      startSageHeartbeat?.();
+      setSagePoActive(true);
       startOrdersWatching(deps.getWin());
       scheduleSageProcessing();
-      return { ok: true, watching: true, path: getOrdersFile() };
+      return { ok: true, active: true, path: getOrdersFile() };
     } catch (e) {
-      console.error('[orders:watch]', e);
-      return { ok: false, error: e?.message || 'Failed to watch orders file.' };
+      console.error('[sage:set-po-active]', e);
+      return { ok: false, error: e?.message || 'Failed to enable Sage purchase orders.' };
+    }
+  });
+
+  // Invoice processing: local to this machine, never gated by the lock.
+  ipcMain.handle('sage:set-invoice-active', (_evt, enable = true) => {
+    try {
+      if (enable === false) {
+        setSageInvoiceActive(false);
+        refreshOrdersWatch();
+        return { ok: true, active: false };
+      }
+      setSageInvoiceActive(true);
+      startOrdersWatching(deps.getWin());
+      scheduleSageProcessing();
+      return { ok: true, active: true, path: getOrdersFile() };
+    } catch (e) {
+      console.error('[sage:set-invoice-active]', e);
+      return { ok: false, error: e?.message || 'Failed to enable Sage invoices.' };
     }
   });
   ipcMain.handle('orders:write', (_evt, orders) => {
@@ -83,7 +126,7 @@ const registerOrdersIpc = (ipcMain, deps) => {
     } catch (e) {
       console.error('[orders:write] sync outstanding failed', e);
     }
-    if (getSageIntegrationActive())
+    if (getSagePoActive?.() || getSageInvoiceActive?.())
       scheduleSageProcessing();
     return { ok: true };
   });
@@ -178,12 +221,21 @@ const registerOrdersIpc = (ipcMain, deps) => {
     }
   });
 
-  ipcMain.handle('orders:archive-one', async (_evt, refKey) => {
+  ipcMain.handle('orders:archive-one', async (_evt, refKey, source) => {
     try {
-      return archiveOrderByKey(refKey);
+      return archiveOrderByKey(refKey, source);
     } catch (e) {
       console.error('[orders:archive-one]', e);
       return { ok: false, error: e?.message || 'Failed to archive order.' };
+    }
+  });
+
+  ipcMain.handle('orders:delete-one', async (_evt, refKey, source) => {
+    try {
+      return deleteOrderByKey(refKey, source);
+    } catch (e) {
+      console.error('[orders:delete-one]', e);
+      return { ok: false, error: e?.message || 'Failed to delete order.' };
     }
   });
 

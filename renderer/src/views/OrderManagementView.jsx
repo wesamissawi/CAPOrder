@@ -1,6 +1,43 @@
 import React, { useState } from "react";
 import Card from "../components/Card";
 
+// sageDate is DDMMYY (e.g. "170726").
+function parseSageDate(ddmmyy) {
+  const clean = String(ddmmyy || "").trim();
+  if (!/^\d{6}$/.test(clean)) return null;
+  const day = Number(clean.slice(0, 2));
+  const month = Number(clean.slice(2, 4));
+  const year = 2000 + Number(clean.slice(4, 6));
+  const date = new Date(year, month - 1, day);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function formatSageDate(date) {
+  const dd = String(date.getDate()).padStart(2, "0");
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const yy = String(date.getFullYear()).slice(-2);
+  return `${dd}${mm}${yy}`;
+}
+
+// Epicor search should span every World bill currently displayed that's still
+// missing an invoice, not just the one whose button was clicked — the OCR pass
+// discovers matches for every invoice in the range and applies them to every
+// order that needs one. The start is padded a day earlier than the earliest
+// bill since Epicor sometimes dates a scanned invoice a day before the order.
+function getEpicorSearchRange(orders, fallbackSageDate) {
+  const dates = (orders || [])
+    .filter((o) => o.source === "world" && !o.source_invoice)
+    .map((o) => parseSageDate(o.sageDate))
+    .filter(Boolean);
+  if (!dates.length) {
+    return { fromSageDate: fallbackSageDate, toSageDate: fallbackSageDate };
+  }
+  const minDate = new Date(Math.min(...dates.map((d) => d.getTime())));
+  const maxDate = new Date(Math.max(...dates.map((d) => d.getTime())));
+  minDate.setDate(minDate.getDate() - 1);
+  return { fromSageDate: formatSageDate(minDate), toSageDate: formatSageDate(maxDate) };
+}
+
 export default function OrderManagementView({
   ordersSourcePath,
   ordersSearch,
@@ -23,7 +60,40 @@ export default function OrderManagementView({
   onMarkComplete,
   onReconcileTotals,
   onArchiveOrder,
+  onDeleteOrder,
   hasSearch,
+  onOpenEpicor,
+  epicorOpening,
+  epicorStatus,
+  epicorError,
+  onViewEpicorInvoiceImage,
+  onVerifyEpicorInvoice,
+  onFetchTransbecInvoices,
+  transbecFetching,
+  transbecStatus,
+  transbecError,
+  onViewTransbecInvoiceImage,
+  onVerifyTransbecInvoice,
+  onPrintTransbecInvoice,
+  onFetchBestbuyInvoices,
+  bestbuyFetching,
+  bestbuyStatus,
+  bestbuyError,
+  onViewBestbuyInvoiceImage,
+  onVerifyBestbuyInvoice,
+  onPrintBestbuyInvoice,
+  onViewBestbuyCreditInvoiceImage,
+  onPrintBestbuyCreditInvoice,
+  onFetchCbkInvoices,
+  cbkFetching,
+  cbkStatus,
+  cbkError,
+  onViewCbkInvoiceImage,
+  onVerifyCbkInvoice,
+  onPrintCbkInvoice,
+  invoicePrintingRef,
+  onUpdateInvoiceTrigger,
+  onConfirmOrderEdit,
 }) {
   const [invoiceEdits, setInvoiceEdits] = useState({});
   const [dirtyRefs, setDirtyRefs] = useState({});
@@ -280,6 +350,46 @@ export default function OrderManagementView({
               {ordersError}
             </div>
           )}
+          {epicorError && (
+            <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+              {epicorError}
+            </div>
+          )}
+          {epicorStatus && !epicorError && (
+            <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700">
+              {epicorStatus}
+            </div>
+          )}
+          {transbecError && (
+            <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700 whitespace-pre-line">
+              {transbecError}
+            </div>
+          )}
+          {transbecStatus && !transbecError && (
+            <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700 whitespace-pre-line">
+              {transbecStatus}
+            </div>
+          )}
+          {bestbuyError && (
+            <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700 whitespace-pre-line">
+              {bestbuyError}
+            </div>
+          )}
+          {bestbuyStatus && !bestbuyError && (
+            <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700 whitespace-pre-line">
+              {bestbuyStatus}
+            </div>
+          )}
+          {cbkError && (
+            <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700 whitespace-pre-line">
+              {cbkError}
+            </div>
+          )}
+          {cbkStatus && !cbkError && (
+            <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700 whitespace-pre-line">
+              {cbkStatus}
+            </div>
+          )}
         </Card>
       </section>
       <section>
@@ -342,6 +452,16 @@ export default function OrderManagementView({
                         {Boolean(order.inStore) && (
                           <span className="px-2 py-1 rounded-full bg-blue-50 text-blue-600 border border-blue-200">
                             Arrived
+                          </span>
+                        )}
+                        {Boolean(order.totalVerified) && (
+                          <span className="px-2 py-1 rounded-full bg-teal-50 text-teal-600 border border-teal-200">
+                            Confirmed
+                          </span>
+                        )}
+                        {Boolean(order.transbecInvoicePrinted || order.bestbuyInvoicePrinted || order.bestbuyCreditInvoicePrinted || order.cbkInvoicePrinted) && (
+                          <span className="px-2 py-1 rounded-full bg-teal-50 text-teal-600 border border-teal-200">
+                            Printed
                           </span>
                         )}
                       </div>
@@ -425,8 +545,10 @@ export default function OrderManagementView({
                                 onBlur={() => {
                                   const num = parseFloat(billedEntry.value);
                                   const normalized = Number.isFinite(num) ? num.toFixed(2) : "";
+                                  const wasDirty = normalized !== (billedEntry.original || "");
                                   updateBilledDraft(refKey, normalized);
                                   stopBilledEdit(refKey);
+                                  if (wasDirty) onConfirmOrderEdit?.(refKey);
                                 }}
                                 placeholder="Billed total"
                                 className={`w-24 border rounded-lg px-2 py-1 text-xs ${
@@ -460,12 +582,30 @@ export default function OrderManagementView({
                       {canArchiveOrder(order) && (
                         <button
                           type="button"
-                          onClick={() => onArchiveOrder?.(refKey)}
+                          onClick={() => onArchiveOrder?.(refKey, order.source)}
                           className="px-3 py-2 rounded-xl text-sm font-semibold border bg-slate-900 text-white hover:bg-slate-800"
                         >
                           Archive Order
                         </button>
                       )}
+                      {Boolean(order.epicorOnly) && !canArchiveOrder(order) && onDeleteOrder && (
+                        <button
+                          type="button"
+                          onClick={() => onDeleteOrder(order)}
+                          className="px-3 py-2 rounded-xl text-sm font-semibold border bg-white text-red-600 border-red-200 hover:bg-red-50"
+                          title="Permanently remove this Epicor-generated order from Order Management"
+                        >
+                          Delete Order
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleSaveOrders}
+                        disabled={!ordersDirty || ordersSaving}
+                        className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold disabled:opacity-50"
+                      >
+                        {ordersSaving ? "Saving..." : ordersDirty ? "Save Changes" : "Saved"}
+                      </button>
                     </div>
                   </div>
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -492,7 +632,11 @@ export default function OrderManagementView({
                             handleOrderFieldChange(refKey, "hasInvoiceNum", true);
                             handleOrderFieldChange(refKey, "invoiceNeedsSync", needsSync);
                           }}
-                          onBlur={() => stopInvoiceEdit(refKey)}
+                          onBlur={() => {
+                            const wasDirty = invoiceEntry.dirty;
+                            stopInvoiceEdit(refKey);
+                            if (wasDirty) onConfirmOrderEdit?.(refKey);
+                          }}
                         />
                         <button
                           type="button"
@@ -503,6 +647,203 @@ export default function OrderManagementView({
                           Edit
                         </button>
                       </div>
+                      {order.source === "world" && !order.source_invoice && onOpenEpicor && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const { fromSageDate, toSageDate } = getEpicorSearchRange(filteredOrders, order.sageDate);
+                            onOpenEpicor(order.reference, fromSageDate, toSageDate);
+                          }}
+                          disabled={epicorOpening}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
+                        >
+                          {epicorOpening ? "Opening Epicor..." : "Get Invoice from Epicor"}
+                        </button>
+                      )}
+                      {order.epicorInvoiceImage && onViewEpicorInvoiceImage && (
+                        <button
+                          type="button"
+                          onClick={() => onViewEpicorInvoiceImage(order.epicorInvoiceImage)}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-slate-700 border-slate-200 hover:bg-slate-50 self-start"
+                          title="Open the scanned invoice image to compare against the invoice # and total"
+                        >
+                          View Invoice Image
+                        </button>
+                      )}
+                      {order.epicorInvoiceImage && onVerifyEpicorInvoice && (
+                        <button
+                          type="button"
+                          onClick={() => onVerifyEpicorInvoice(order)}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50 self-start"
+                          title="Review the scanned invoice side-by-side with the stored invoice # and total, and correct if needed"
+                        >
+                          Verify Invoice
+                        </button>
+                      )}
+                      {order.source === "transbec" && !order.source_invoice && onFetchTransbecInvoices && (
+                        <button
+                          type="button"
+                          onClick={() => onFetchTransbecInvoices(order.reference)}
+                          disabled={transbecFetching}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
+                        >
+                          {transbecFetching ? "Checking Gmail..." : "Get Invoice from Gmail"}
+                        </button>
+                      )}
+                      {(order.transbecInvoiceFile || order.transbecInvoiceImage) && onViewTransbecInvoiceImage && (
+                        <button
+                          type="button"
+                          onClick={() => onViewTransbecInvoiceImage(order)}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-slate-700 border-slate-200 hover:bg-slate-50 self-start"
+                          title="Open the invoice PDF in your default viewer to compare against the invoice # and total"
+                        >
+                          View Invoice PDF
+                        </button>
+                      )}
+                      {(order.transbecInvoiceFile || order.transbecInvoiceImage) && onVerifyTransbecInvoice && (
+                        <button
+                          type="button"
+                          onClick={() => onVerifyTransbecInvoice(order)}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50 self-start"
+                          title="Review the invoice PDF side-by-side with the stored invoice # and total, and correct if needed"
+                        >
+                          Verify Invoice
+                        </button>
+                      )}
+                      {(order.transbecInvoiceFile || order.transbecInvoiceImage) && onPrintTransbecInvoice && (
+                        <button
+                          type="button"
+                          onClick={() => onPrintTransbecInvoice(order)}
+                          disabled={invoicePrintingRef === `transbec:${order.reference}`}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
+                          title="Print page 1 of the invoice"
+                        >
+                          {invoicePrintingRef === `transbec:${order.reference}`
+                            ? "Printing..."
+                            : order.transbecInvoicePrinted
+                            ? "Print Invoice Again"
+                            : "Print Invoice"}
+                        </button>
+                      )}
+                      {order.source === "bestbuy" && !order.bestbuyInvoiceFile && !order.bestbuyCreditFile && onFetchBestbuyInvoices && (
+                        <button
+                          type="button"
+                          onClick={() => onFetchBestbuyInvoices(order.reference)}
+                          disabled={bestbuyFetching}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
+                        >
+                          {bestbuyFetching ? "Checking Gmail..." : "Get Invoice from Gmail"}
+                        </button>
+                      )}
+                      {order.bestbuyInvoiceFile && onViewBestbuyInvoiceImage && (
+                        <button
+                          type="button"
+                          onClick={() => onViewBestbuyInvoiceImage(order)}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-slate-700 border-slate-200 hover:bg-slate-50 self-start"
+                          title="Open the invoice PDF in your default viewer to compare against the invoice # and total"
+                        >
+                          View Invoice PDF
+                        </button>
+                      )}
+                      {order.bestbuyInvoiceFile && onVerifyBestbuyInvoice && (
+                        <button
+                          type="button"
+                          onClick={() => onVerifyBestbuyInvoice(order)}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50 self-start"
+                          title="Review the invoice PDF side-by-side with the stored invoice # and total, and correct if needed"
+                        >
+                          Verify Invoice
+                        </button>
+                      )}
+                      {order.bestbuyInvoiceFile && onPrintBestbuyInvoice && (
+                        <button
+                          type="button"
+                          onClick={() => onPrintBestbuyInvoice(order)}
+                          disabled={invoicePrintingRef === `bestbuy:${order.reference}`}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
+                          title="Print page 1 of the invoice"
+                        >
+                          {invoicePrintingRef === `bestbuy:${order.reference}`
+                            ? "Printing..."
+                            : order.bestbuyInvoicePrinted
+                            ? "Print Invoice Again"
+                            : "Print Invoice"}
+                        </button>
+                      )}
+                      {/* Credit invoice check piggybacks on the button above — no
+                          separate fetch button, it's found in the same Gmail check.
+                          The invoice # and billed total fill the normal fields; only
+                          the View/Print Credit actions are credit-specific. */}
+                      {order.bestbuyCreditFile && onViewBestbuyCreditInvoiceImage && (
+                        <button
+                          type="button"
+                          onClick={() => onViewBestbuyCreditInvoiceImage(order)}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-slate-700 border-slate-200 hover:bg-slate-50 self-start"
+                          title="Open the credit invoice PDF in your default viewer"
+                        >
+                          View Credit PDF
+                        </button>
+                      )}
+                      {order.bestbuyCreditFile && onPrintBestbuyCreditInvoice && (
+                        <button
+                          type="button"
+                          onClick={() => onPrintBestbuyCreditInvoice(order)}
+                          disabled={invoicePrintingRef === `bestbuy-credit:${order.reference}`}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
+                          title="Print page 1 of the credit invoice"
+                        >
+                          {invoicePrintingRef === `bestbuy-credit:${order.reference}`
+                            ? "Printing..."
+                            : order.bestbuyCreditInvoicePrinted
+                            ? "Print Credit Again"
+                            : "Print Credit"}
+                        </button>
+                      )}
+                      {order.source === "cbk" && !order.cbkInvoiceFile && onFetchCbkInvoices && (
+                        <button
+                          type="button"
+                          onClick={() => onFetchCbkInvoices(order.reference)}
+                          disabled={cbkFetching}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
+                        >
+                          {cbkFetching ? "Checking Gmail..." : "Get Invoice from Gmail"}
+                        </button>
+                      )}
+                      {order.cbkInvoiceFile && onViewCbkInvoiceImage && (
+                        <button
+                          type="button"
+                          onClick={() => onViewCbkInvoiceImage(order)}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-slate-700 border-slate-200 hover:bg-slate-50 self-start"
+                          title="Open the invoice PDF in your default viewer to compare against the invoice # and total"
+                        >
+                          View Invoice PDF
+                        </button>
+                      )}
+                      {order.cbkInvoiceFile && onVerifyCbkInvoice && (
+                        <button
+                          type="button"
+                          onClick={() => onVerifyCbkInvoice(order)}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50 self-start"
+                          title="Review the invoice PDF side-by-side with the stored invoice # and total, and correct if needed"
+                        >
+                          Verify Invoice
+                        </button>
+                      )}
+                      {order.cbkInvoiceFile && onPrintCbkInvoice && (
+                        <button
+                          type="button"
+                          onClick={() => onPrintCbkInvoice(order)}
+                          disabled={invoicePrintingRef === `cbk:${order.reference}`}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
+                          title="Print page 1 of the invoice"
+                        >
+                          {invoicePrintingRef === `cbk:${order.reference}`
+                            ? "Printing..."
+                            : order.cbkInvoicePrinted
+                            ? "Print Invoice Again"
+                            : "Print Invoice"}
+                        </button>
+                      )}
                     </div>
                     <div className="flex flex-col gap-1">
                       <span className="text-xs uppercase tracking-wide text-slate-400">Journal Entry</span>
@@ -705,12 +1046,29 @@ export default function OrderManagementView({
                         <button
                           type="button"
                           className="px-2 py-1 text-xs rounded-lg border border-red-500 text-red-700 bg-white hover:bg-red-50"
-                          onClick={() => {
-                            markDirty(refKey, "Invoice update queued");
-                            handleOrderFieldChange(refKey, "sage_invoice_trigger", true);
-                          }}
+                          onClick={() => onUpdateInvoiceTrigger?.(refKey)}
                         >
                           Update Invoice
+                        </button>
+                      </div>
+                    )}
+                    {Boolean(order.environmentalFeeAlert) && (
+                      <div className="mt-3 text-xs font-semibold text-amber-700 flex items-center gap-2 flex-wrap">
+                        <span className="inline-block h-2 w-2 rounded-full bg-amber-600"></span>
+                        <span>
+                          Environmental fee detected on invoice
+                          {order.environmentalFeeAmount ? ` ($${order.environmentalFeeAmount})` : ""} — needs to
+                          be entered.
+                        </span>
+                        <button
+                          type="button"
+                          className="px-2 py-1 text-xs rounded-lg border border-amber-500 text-amber-700 bg-white hover:bg-amber-50"
+                          onClick={() => {
+                            markDirty(refKey, "Environmental fee entered");
+                            handleOrderFieldChange(refKey, "environmentalFeeAlert", false);
+                          }}
+                        >
+                          Mark Entered
                         </button>
                       </div>
                     )}

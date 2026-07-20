@@ -5,6 +5,7 @@ import InvoicePreview from "./components/InvoicePreview";
 import DashboardView from "./views/DashboardView";
 import StockFlowView from "./views/StockFlowView";
 import OrderManagementView from "./views/OrderManagementView";
+import EpicorView from "./views/EpicorView";
 import PaymentManagementView from "./views/PaymentManagementView";
 import ReturnsManagementView from "./views/ReturnsManagementView";
 import ManageStockView from "./views/ManageStockView";
@@ -21,6 +22,28 @@ import {
 } from "./utils/inventory";
 
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
+
+// Best-effort convert an Epicor grid date into Sage's DDMMYY, so an order
+// created from an Epicor invoice lands in the right world_YYYYMM folder when
+// archived. Returns "" for anything we can't confidently parse, in which case
+// archiving falls back to the archive timestamp's month.
+function epicorDateToSageDate(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  let y, m, d, match;
+  if ((match = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/))) {
+    [, y, m, d] = match; // YYYY-MM-DD
+  } else if ((match = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/))) {
+    [, m, d, y] = match; // MM/DD/YYYY or MM/DD/YY (Epicor uses US month-first)
+  } else {
+    return "";
+  }
+  const yy = String(y).slice(-2).padStart(2, "0");
+  const mm = String(m).padStart(2, "0");
+  const dd = String(d).padStart(2, "0");
+  if (Number(mm) < 1 || Number(mm) > 12 || Number(dd) < 1 || Number(dd) > 31) return "";
+  return `${dd}${mm}${yy}`;
+}
 const DELETE_DESTINATIONS = ["NEW STOCK", "SHELF", "CASH SALES", "RETURNS"];
 const CASH_SALE_DELETE_DESTINATIONS = ["CashPad"];
 
@@ -41,6 +64,7 @@ const VIEWS = [
   { id: "manage-stock", label: "Manage Stock" },
   { id: "returns-management", label: "Returns Management" },
   { id: "order-management", label: "Order Management" },
+  { id: "epicor", label: "Epicor" },
   { id: "archive-search", label: "Archive" },
   { id: "settings", label: "Settings" },
   { id: "payment-management", label: "Payment Management" },
@@ -99,7 +123,10 @@ export default function App() {
   const [ordersArchiveStatus, setOrdersArchiveStatus] = useState("");
   const [ordersArchiveError, setOrdersArchiveError] = useState("");
   const [archiveCleanupDays, setArchiveCleanupDays] = useState(2);
-  const [sageIntegrationEnabled, setSageIntegrationEnabled] = useState(false);
+  // Purchase-order processing is coordinated across machines via a shared lock
+  // (only one machine at a time). Invoice processing runs locally and is unlocked.
+  const [sagePoEnabled, setSagePoEnabled] = useState(false);
+  const [sageInvoiceEnabled, setSageInvoiceEnabled] = useState(false);
   const [sageLockInfo, setSageLockInfo] = useState(null); // { lock, ownMachineId }
   // Bubble edit locks
   const [bubbleLocks, setBubbleLocks] = useState({});
@@ -107,12 +134,14 @@ export default function App() {
   const [pendingRequestBubbles, setPendingRequestBubbles] = useState(new Set());
   const pendingRequestsRef = React.useRef({}); // { [bubbleId]: { startedAt, timeoutId } }
   const [sageReadyOrders, setSageReadyOrders] = useState([]);
+  const [sageInvoiceReadyOrders, setSageInvoiceReadyOrders] = useState([]);
   const [payments, setPayments] = useState([]);
   const [paymentsLoading, setPaymentsLoading] = useState(false);
   const [paymentsError, setPaymentsError] = useState("");
   const [cashPadMarkup, setCashPadMarkup] = useState("30");
   const [fillCashPadResult, setFillCashPadResult] = useState(null);
-  const [sageWatchError, setSageWatchError] = useState("");
+  const [sageWatchError, setSageWatchError] = useState(""); // purchase-order (locked) errors
+  const [sageInvoiceError, setSageInvoiceError] = useState(""); // invoice (local) errors
   const [printExtraLinesByBubble, setPrintExtraLinesByBubble] = useState({});
   const [bubbleMeta, setBubbleMeta] = useState({});
   const [worldOrdersRunning, setWorldOrdersRunning] = useState(false);
@@ -130,6 +159,34 @@ export default function App() {
   const [proforceRunning, setProforceRunning] = useState(false);
   const [proforceStatus, setProforceStatus] = useState("");
   const [proforceError, setProforceError] = useState("");
+  const [epicorOpening, setEpicorOpening] = useState(false);
+  const [epicorStatus, setEpicorStatus] = useState("");
+  const [epicorError, setEpicorError] = useState("");
+  const [epicorReviewOrder, setEpicorReviewOrder] = useState(null);
+  const [epicorReviewImageDataUrl, setEpicorReviewImageDataUrl] = useState("");
+  const [epicorReviewInvoiceDraft, setEpicorReviewInvoiceDraft] = useState("");
+  const [epicorReviewTotalDraft, setEpicorReviewTotalDraft] = useState("");
+  // Editable line items shown in the Verify Invoice modal for epicor-only orders.
+  const [epicorReviewLinesDraft, setEpicorReviewLinesDraft] = useState([]);
+  // Epicor view: bulk date-range scan for invoices not yet in our records.
+  const [epicorScanning, setEpicorScanning] = useState(false);
+  const [epicorScanError, setEpicorScanError] = useState("");
+  const [epicorScanLog, setEpicorScanLog] = useState([]);
+  const [epicorScanInvoices, setEpicorScanInvoices] = useState([]);
+  const [epicorScanCounts, setEpicorScanCounts] = useState({ scanned: 0, unknown: 0 });
+  const [epicorReviewLoading, setEpicorReviewLoading] = useState(false);
+  const [epicorReviewSaving, setEpicorReviewSaving] = useState(false);
+  const [epicorReviewError, setEpicorReviewError] = useState("");
+  const [transbecFetching, setTransbecFetching] = useState(false);
+  const [transbecStatus, setTransbecStatus] = useState("");
+  const [transbecError, setTransbecError] = useState("");
+  const [bestbuyFetching, setBestbuyFetching] = useState(false);
+  const [bestbuyStatus, setBestbuyStatus] = useState("");
+  const [bestbuyError, setBestbuyError] = useState("");
+  const [cbkFetching, setCbkFetching] = useState(false);
+  const [cbkStatus, setCbkStatus] = useState("");
+  const [cbkError, setCbkError] = useState("");
+  const [invoicePrintingRef, setInvoicePrintingRef] = useState("");
   const [outstandingRunning, setOutstandingRunning] = useState(false);
   const [outstandingStatus, setOutstandingStatus] = useState("");
   const [outstandingError, setOutstandingError] = useState("");
@@ -166,9 +223,29 @@ export default function App() {
   // Drag state (items only)
   const draggedItemUidRef = useRef(null);
 
-  // Save / watch bookkeeping
-  const lastSavedRef = useRef("");
+  // Save / watch bookkeeping.
+  // Initialize to the serialized initial state ("[]") so the idle autosave can
+  // never see "unsaved changes" before the first successful load — that window
+  // used to allow an empty state to overwrite the real item files.
+  const lastSavedRef = useRef("[]");
   const skipNextSaveRef = useRef(false);
+  const itemsLoadedRef = useRef(false);
+  // Uids the user explicitly deleted but whose deletion hasn't been confirmed
+  // saved yet. Saves are upserts — an item absent from our state is NOT
+  // deleted on disk unless its uid is sent in this list. The ledger also keeps
+  // incoming file updates from resurrecting a just-deleted item.
+  const deletedUidsRef = useRef(new Set());
+
+  function markItemsDeleted(uids) {
+    (uids || []).forEach((u) => { if (u) deletedUidsRef.current.add(u); });
+  }
+  function confirmItemsDeleted(uids) {
+    (uids || []).forEach((u) => deletedUidsRef.current.delete(u));
+  }
+  function filterPendingDeleted(list) {
+    if (!deletedUidsRef.current.size) return list;
+    return (list || []).filter((it) => !deletedUidsRef.current.has(it?.uid));
+  }
 
   // "User is editing any field" flag
   const isEditingAnythingRef = useRef(false);
@@ -176,18 +253,36 @@ export default function App() {
 
   // === Load once & subscribe to file changes ===
   useEffect(() => {
-    api.readItems().then((arr) => {
-      const norm = normalizeItems(arr || []);
-      console.log("[init] readItems ->", norm);
-      setItems(norm);
-      lastSavedRef.current = JSON.stringify(norm);
-      ensureBubblesForItems(norm, setBubbles);
-      const needsLastMovedPersist =
-        (arr || []).some((it) => !it || !it.last_moved_at);
-      if (needsLastMovedPersist) {
-        api.writeItems(norm);
-      }
-    });
+    let loadAttempts = 0;
+    function loadItemsInitial() {
+      loadAttempts += 1;
+      api.readItems().then((arr) => {
+        const norm = normalizeItems(arr || []);
+        console.log("[init] readItems ->", norm);
+        itemsLoadedRef.current = true;
+        setItems(norm);
+        lastSavedRef.current = JSON.stringify(norm);
+        ensureBubblesForItems(norm, setBubbles);
+        const needsLastMovedPersist =
+          (arr || []).some((it) => !it || !it.last_moved_at);
+        if (needsLastMovedPersist) {
+          api.writeItems(norm);
+        }
+      }).catch((e) => {
+        // Never treat a failed read as "no items" — retry, then tell the user.
+        console.error("[init] readItems failed", e);
+        if (loadAttempts < 3) {
+          setTimeout(loadItemsInitial, 3000);
+        } else {
+          alert(
+            "Could not load items from the shared folder.\n\n" +
+            (e?.message || "Unknown error") +
+            "\n\nCheck the network share and restart the app. Saving is disabled until items load."
+          );
+        }
+      });
+    }
+    loadItemsInitial();
 
     // const off = api.onItemsUpdated((arr) => {
     //   if (isEditingAnythingRef.current) {
@@ -223,7 +318,8 @@ export default function App() {
         return;
       }
 
-      const norm = normalizeItems(arr || []);
+      const norm = filterPendingDeleted(normalizeItems(arr || []));
+      itemsLoadedRef.current = true; // main only pushes successfully-read data
       setItems((prev) => {
         const merged = mergeItems(prev, norm);
         const prevStr = JSON.stringify(prev);
@@ -270,16 +366,31 @@ export default function App() {
   // === Autosave after 10s of inactivity ===
   useEffect(() => {
     if (!items) return;
+    // Never autosave before the first successful load — the state would be
+    // empty and the write would erase the real item files.
+    if (!itemsLoadedRef.current) return;
     const id = setTimeout(() => {
       if (skipNextSaveRef.current) {
         skipNextSaveRef.current = false;
         return;
       }
       const current = JSON.stringify(items);
-      if (current === lastSavedRef.current) return;
+      const pendingDeletes = Array.from(deletedUidsRef.current);
+      if (current === lastSavedRef.current && pendingDeletes.length === 0) return;
       lastSavedRef.current = current;
       console.log("[autosave] writing items to disk after idle", items);
-      api.writeItems(items);
+      api.writeItems(items, pendingDeletes).then((res) => {
+        if (res && res.ok === false) {
+          console.error("[autosave] write rejected by main:", res.error);
+          // Allow a retry on the next change; keep pending deletions queued
+          lastSavedRef.current = "";
+        } else {
+          confirmItemsDeleted(pendingDeletes);
+        }
+      }).catch((e) => {
+        console.error("[autosave] write failed", e);
+        lastSavedRef.current = "";
+      });
     }, 10000);
 
     return () => clearTimeout(id);
@@ -636,8 +747,16 @@ export default function App() {
         if (Array.isArray(state.bubbleZOrder)) {
           setBubbleZOrder(state.bubbleZOrder);
         }
-        if (typeof state.sageIntegrationEnabled === "boolean") {
-          setSageIntegrationEnabled(state.sageIntegrationEnabled);
+        // Back-compat: the old single `sageIntegrationEnabled` flag drove both flows.
+        if (typeof state.sagePoEnabled === "boolean") {
+          setSagePoEnabled(state.sagePoEnabled);
+        } else if (typeof state.sageIntegrationEnabled === "boolean") {
+          setSagePoEnabled(state.sageIntegrationEnabled);
+        }
+        if (typeof state.sageInvoiceEnabled === "boolean") {
+          setSageInvoiceEnabled(state.sageInvoiceEnabled);
+        } else if (typeof state.sageIntegrationEnabled === "boolean") {
+          setSageInvoiceEnabled(state.sageIntegrationEnabled);
         }
         if (typeof state.archiveCleanupDays === "number") {
           setArchiveCleanupDays(state.archiveCleanupDays);
@@ -754,7 +873,8 @@ export default function App() {
           bubblePositions,
           bubbleSizes,
           bubbleZOrder,
-          sageIntegrationEnabled,
+          sagePoEnabled,
+          sageInvoiceEnabled,
           archiveCleanupDays,
           printExtraLinesByBubble,
           ordersTodayOnly,
@@ -765,7 +885,8 @@ export default function App() {
     bubblePositions,
       bubbleSizes,
       bubbleZOrder,
-      sageIntegrationEnabled,
+      sagePoEnabled,
+      sageInvoiceEnabled,
       archiveCleanupDays,
       printExtraLinesByBubble,
       ordersTodayOnly,
@@ -780,7 +901,8 @@ export default function App() {
           bubblePositions,
           bubbleSizes,
           bubbleZOrder,
-          sageIntegrationEnabled,
+          sagePoEnabled,
+          sageInvoiceEnabled,
           archiveCleanupDays,
           printExtraLinesByBubble,
           ordersTodayOnly,
@@ -952,60 +1074,66 @@ export default function App() {
 
   function handleConsolidateBubbleItems(bubbleName) {
     if (!bubbleName) return;
-    setItems((prev) => {
-      const groupedByItem = new Map();
-      for (const item of prev) {
-        if (item.allocated_to !== bubbleName) continue;
-        const key = item.itemcode || item.reference_num || item.uid;
-        if (!groupedByItem.has(key)) {
-          groupedByItem.set(key, []);
-        }
-        groupedByItem.get(key).push(item);
+    // Computed from current state (not inside the updater) so the merged-away
+    // uids can be recorded as explicit deletions for the next save.
+    const prev = items;
+    const groupedByItem = new Map();
+    for (const item of prev) {
+      if (item.allocated_to !== bubbleName) continue;
+      const key = item.itemcode || item.reference_num || item.uid;
+      if (!groupedByItem.has(key)) {
+        groupedByItem.set(key, []);
       }
+      groupedByItem.get(key).push(item);
+    }
 
-      let changed = false;
-      const replacements = new Map();
+    let changed = false;
+    const replacements = new Map();
+    const removedUids = [];
 
-      groupedByItem.forEach((itemsForKey) => {
-        if (itemsForKey.length < 2) return;
-        changed = true;
-        const totalQuantity = itemsForKey.reduce(
-          (sum, curr) => sum + (Number(curr.quantity) || 0),
-          0
-        );
-        const totalCost = itemsForKey.reduce(
-          (sum, curr) => sum + (Number(curr.cost) || 0) * (Number(curr.quantity) || 0),
-          0
-        );
-        const highestPrice = itemsForKey.reduce(
-          (max, curr) => Math.max(max, Number(curr.allocated_for) || 0),
-          0
-        );
-        const reference = itemsForKey[0];
-        const mergedItem = {
-          ...reference,
-          uid: reference.uid,
-          quantity: totalQuantity,
-          cost: totalQuantity ? (totalCost / totalQuantity).toFixed(2) : reference.cost,
-          allocated_for: String(highestPrice || ""),
-        };
-        replacements.set(reference.uid, mergedItem);
-        for (let i = 1; i < itemsForKey.length; i++) {
-          replacements.set(itemsForKey[i].uid, null);
-        }
-      });
-
-      if (!changed) return prev;
-
-      return prev
-        .map((item) => {
-          if (!replacements.has(item.uid)) return item;
-          const replacement = replacements.get(item.uid);
-          if (replacement === null) return null;
-          return replacement;
-        })
-        .filter(Boolean);
+    groupedByItem.forEach((itemsForKey) => {
+      if (itemsForKey.length < 2) return;
+      changed = true;
+      const totalQuantity = itemsForKey.reduce(
+        (sum, curr) => sum + (Number(curr.quantity) || 0),
+        0
+      );
+      const totalCost = itemsForKey.reduce(
+        (sum, curr) => sum + (Number(curr.cost) || 0) * (Number(curr.quantity) || 0),
+        0
+      );
+      const highestPrice = itemsForKey.reduce(
+        (max, curr) => Math.max(max, Number(curr.allocated_for) || 0),
+        0
+      );
+      const reference = itemsForKey[0];
+      const mergedItem = {
+        ...reference,
+        uid: reference.uid,
+        quantity: totalQuantity,
+        cost: totalQuantity ? (totalCost / totalQuantity).toFixed(2) : reference.cost,
+        allocated_for: String(highestPrice || ""),
+      };
+      replacements.set(reference.uid, mergedItem);
+      for (let i = 1; i < itemsForKey.length; i++) {
+        replacements.set(itemsForKey[i].uid, null);
+        removedUids.push(itemsForKey[i].uid);
+      }
     });
+
+    if (!changed) return;
+
+    const next = prev
+      .map((item) => {
+        if (!replacements.has(item.uid)) return item;
+        const replacement = replacements.get(item.uid);
+        if (replacement === null) return null;
+        return replacement;
+      })
+      .filter(Boolean);
+
+    markItemsDeleted(removedUids); // autosave will carry these deletions
+    setItems(next);
   }
 
   function handleDeleteBubble(bubbleId, fallbackTargetName) {
@@ -1320,9 +1448,15 @@ export default function App() {
       if (!res?.ok) throw new Error(res?.error || "Failed to archive bubble.");
       const archivedAt = res.archivedAt || new Date().toISOString();
       const remainingItems = items.filter((it) => it.allocated_to !== bubble.name);
+      const removedUids = bubbleItems.map((it) => it.uid);
+      markItemsDeleted(removedUids);
       setItems(remainingItems);
       lastSavedRef.current = JSON.stringify(remainingItems);
-      await api.writeItems(remainingItems);
+      const writeRes = await api.writeItems(remainingItems, removedUids);
+      if (writeRes?.ok === false) {
+        throw new Error(writeRes.error || "Failed to remove archived items from active files.");
+      }
+      confirmItemsDeleted(removedUids);
       const paymentMeta = bubbleMeta[bubbleId] || bubbleMeta[bubble.name] || {};
       if (Array.isArray(paymentMeta.paymentIds) && paymentMeta.paymentIds.length) {
         handleUpdateBubblePayments(bubbleId, []);
@@ -1379,9 +1513,15 @@ export default function App() {
     if (!confirmed) return;
     try {
       const remainingItems = items.filter((it) => it.allocated_to !== bubble.name);
+      const removedUids = bubbleItems.map((it) => it.uid);
+      markItemsDeleted(removedUids);
       setItems(remainingItems);
       lastSavedRef.current = JSON.stringify(remainingItems);
-      await api.writeItems(remainingItems);
+      const writeRes = await api.writeItems(remainingItems, removedUids);
+      if (writeRes?.ok === false) {
+        throw new Error(writeRes.error || "Failed to delete items.");
+      }
+      confirmItemsDeleted(removedUids);
       const paymentMeta = bubbleMeta[bubbleId] || bubbleMeta[bubble.name] || {};
       if (Array.isArray(paymentMeta.paymentIds) && paymentMeta.paymentIds.length) {
         handleUpdateBubblePayments(bubbleId, []);
@@ -1603,7 +1743,7 @@ export default function App() {
     if (!pendingItemsRefreshRef.current) return;
     try {
       const latest = await api.readItems();
-      const norm = normalizeItems(latest || []);
+      const norm = filterPendingDeleted(normalizeItems(latest || []));
       setItems((prev) => {
         const merged = mergeItems(prev, norm);
         lastSavedRef.current = JSON.stringify(merged);
@@ -1653,7 +1793,8 @@ export default function App() {
   }
 
   function updateOrderByKey(key, patch) {
-    if (!key) return;
+    if (!key) return null;
+    let result = null;
     setOrders((prev) => {
       let changed = false;
       const next = prev.map((o) => {
@@ -1673,7 +1814,16 @@ export default function App() {
           };
         });
       if (changed) setOrdersDirty(true);
+      result = next;
       return next;
+    });
+    return result;
+  }
+  function normalizeOrdersForSave(list) {
+    return (list || []).map((o) => {
+      const invFilled = Boolean((o?.source_invoice || "").trim());
+      const { _localDirty, ...rest } = o || {};
+      return { ...rest, hasInvoiceNum: invFilled };
     });
   }
   function handleOrderFieldChange(referenceKey, field, value) {
@@ -1681,6 +1831,32 @@ export default function App() {
   }
   function handleOrderInvoiceChange(referenceKey, value) {
     updateOrderByKey(referenceKey, { source_invoice: value, sage_reference: value });
+  }
+  // Like updateOrderByKey, but writes the result to orders.json immediately
+  // instead of leaving it as an unsaved React-state change for the user to
+  // save later via the "Save Changes" button.
+  async function updateOrderByKeyAndSave(key, patch) {
+    const patchedOrders = updateOrderByKey(key, patch);
+    if (!patchedOrders || !api?.writeOrders) return patchedOrders;
+    const normalized = normalizeOrdersForSave(patchedOrders);
+    try {
+      const saveRes = await api.writeOrders(normalized);
+      if (saveRes?.ok) {
+        setOrders(normalized);
+        ordersLastSavedRef.current = JSON.stringify(normalized);
+        setOrdersDirty(false);
+      } else {
+        console.error("[orders] failed to save", saveRes);
+        setOrdersError("Failed to save order.");
+      }
+    } catch (e) {
+      console.error("[orders] failed to save", e);
+      setOrdersError(e?.message || "Failed to save order.");
+    }
+    return patchedOrders;
+  }
+  function handleUpdateInvoiceTrigger(referenceKey) {
+    updateOrderByKeyAndSave(referenceKey, { sage_invoice_trigger: true });
   }
   function handleOrderCheckboxChange(referenceKey, field, checked) {
     if (field === "inStore") {
@@ -1777,8 +1953,9 @@ export default function App() {
     }
     const freshItems = await api.readItems();
     if (Array.isArray(freshItems)) {
-      setItems(freshItems);
-      lastSavedRef.current = JSON.stringify(freshItems);
+      const filtered = filterPendingDeleted(freshItems);
+      setItems(filtered);
+      lastSavedRef.current = JSON.stringify(filtered);
     }
   }
 
@@ -1802,20 +1979,29 @@ export default function App() {
     }
   }
 
-  function handleSageIntegrationToggleClick() {
-    const timestamp = new Date().toISOString();
+  function handleSagePoToggleClick() {
     const readyCount = Array.isArray(sageReadyOrders) ? sageReadyOrders.length : 0;
-    console.log("[sage-ui] Run Sage / AHK button clicked", {
-      timestamp,
+    console.log("[sage-ui] Sage purchase-orders toggle clicked", {
+      timestamp: new Date().toISOString(),
       sageReadyCount: readyCount,
     });
-    setSageIntegrationEnabled((v) => !v);
+    setSagePoEnabled((v) => !v);
+  }
+
+  function handleSageInvoiceToggleClick() {
+    console.log("[sage-ui] Sage invoices toggle clicked", {
+      timestamp: new Date().toISOString(),
+    });
+    setSageInvoiceEnabled((v) => !v);
   }
 
   function handleOrdersUpdatedExternally(list) {
     const normalized = Array.isArray(list) ? list : [];
     setSageReadyOrders(
       normalized.filter((o) => o && o.sage_trigger && !o.enteredInSage)
+    );
+    setSageInvoiceReadyOrders(
+      normalized.filter((o) => o && o.sage_invoice_trigger)
     );
     if (ordersDirty) {
       console.log("[orders] external update skipped (local edits present)");
@@ -1832,11 +2018,7 @@ export default function App() {
     try {
       setOrdersSaving(true);
       setOrdersError(null);
-      const normalized = (orders || []).map((o) => {
-        const invFilled = Boolean((o?.source_invoice || "").trim());
-        const { _localDirty, ...rest } = o || {};
-        return { ...rest, hasInvoiceNum: invFilled };
-      });
+      const normalized = normalizeOrdersForSave(orders);
       const res = await api?.writeOrders?.(normalized);
       if (!res?.ok) {
         throw new Error("Failed to save orders.");
@@ -1869,17 +2051,43 @@ export default function App() {
     }
   }
 
-  async function handleArchiveOrder(refKey) {
+  async function handleArchiveOrder(refKey, source) {
     if (!api?.archiveOrder) return;
     try {
       setOrdersError(null);
-      const res = await api.archiveOrder(refKey);
+      const res = await api.archiveOrder(refKey, source);
       if (!res?.ok) throw new Error(res?.error || "Failed to archive order.");
       await loadOrders();
     } catch (e) {
       setOrdersError(e?.message || "Failed to archive order.");
     }
   }
+
+  // A vendor crawler builds its result from orders.json ON DISK, and we then
+  // replace renderer state with that result wholesale. Edits that only live in
+  // React state would therefore be silently dropped — and most order fields
+  // (the invoice box, the checkboxes) go through updateOrderByKey, which marks
+  // dirty but does NOT save. Flush those to disk first so the crawler merges on
+  // top of them (it keeps existing orders untouched) instead of erasing them.
+  // Returns false if the flush failed, in which case the caller must not fetch.
+  async function flushPendingOrderEdits() {
+    if (!ordersDirty || !api?.writeOrders) return true;
+    try {
+      const normalized = normalizeOrdersForSave(orders);
+      const res = await api.writeOrders(normalized);
+      if (!res?.ok) return false;
+      setOrders(normalized);
+      ordersLastSavedRef.current = JSON.stringify(normalized);
+      setOrdersDirty(false);
+      return true;
+    } catch (e) {
+      console.error("[orders] failed to flush pending edits before fetch", e);
+      return false;
+    }
+  }
+
+  const FLUSH_FAILED_MSG =
+    "You have unsaved order changes that could not be saved, so the fetch was cancelled to avoid losing them. Click Save, then try again.";
 
   async function handleGetWorldOrders() {
     if (!api?.fetchWorldOrders) return;
@@ -1888,6 +2096,7 @@ export default function App() {
       setWorldOrdersError("");
       setWorldOrdersStatus("");
       setOrdersError(null);
+      if (!(await flushPendingOrderEdits())) throw new Error(FLUSH_FAILED_MSG);
       const res = await api.fetchWorldOrders();
       if (!res?.ok) {
         throw new Error(res?.error || "Failed to fetch World orders.");
@@ -1918,6 +2127,7 @@ export default function App() {
       setCbkOrdersError("");
       setCbkOrdersStatus("");
       setOrdersError(null);
+      if (!(await flushPendingOrderEdits())) throw new Error(FLUSH_FAILED_MSG);
       const res = await api.fetchCbkOrders();
       if (!res?.ok) {
         throw new Error(res?.error || "Failed to fetch CBK orders.");
@@ -1947,6 +2157,7 @@ export default function App() {
       setBestBuyOrdersError("");
       setBestBuyOrdersStatus("");
       setOrdersError(null);
+      if (!(await flushPendingOrderEdits())) throw new Error(FLUSH_FAILED_MSG);
       const res = await api.fetchBestBuyOrders();
       if (!res?.ok) {
         throw new Error(res?.error || "Failed to fetch BestBuy orders.");
@@ -1976,6 +2187,7 @@ export default function App() {
       setTransbecOrdersError("");
       setTransbecOrdersStatus("");
       setOrdersError(null);
+      if (!(await flushPendingOrderEdits())) throw new Error(FLUSH_FAILED_MSG);
       const res = await api.fetchTransbecOrders();
       if (!res?.ok) {
         throw new Error(res?.error || "Failed to fetch Transbec orders.");
@@ -2005,6 +2217,7 @@ export default function App() {
       setProforceError("");
       setProforceStatus("");
       setOrdersError(null);
+      if (!(await flushPendingOrderEdits())) throw new Error(FLUSH_FAILED_MSG);
       const res = await api.fetchProforceOrders();
       if (!res?.ok) throw new Error(res?.error || "Failed to fetch Proforce orders.");
       const list = Array.isArray(res.orders) ? res.orders : [];
@@ -2025,6 +2238,1141 @@ export default function App() {
     }
   }
 
+  async function handleOpenEpicor(reference, fromSageDate, toSageDate) {
+    if (!api?.openEpicor) return;
+    try {
+      setEpicorOpening(true);
+      setEpicorError("");
+      setEpicorStatus("");
+      const res = await api.openEpicor({ reference, fromSageDate, toSageDate });
+      if (!res?.ok) throw new Error(res?.error || "Failed to open Epicor site.");
+      const logMsg = Array.isArray(res.statusLog) && res.statusLog.length ? res.statusLog.join("\n") : "";
+
+      // The date-range search discovers references for every invoice checked in
+      // that range, not just the one that was clicked — apply a match to every
+      // order in Order Management that has one, not only the order that triggered this run.
+      // Only orders that already have this exact reference get patched, and only
+      // if they don't already have an invoice recorded (so a manually-verified
+      // entry never gets silently overwritten by a re-scan).
+      const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
+      let patchedOrders = null;
+      let appliedCount = 0;
+
+      if (discoveries.length > 0) {
+        setOrders((prev) => {
+          const next = prev.map((o) => {
+            if (!o?.reference || (o.source_invoice || "").toString().trim()) return o;
+            const orderRef = String(o.reference).trim().toUpperCase();
+            const found = discoveries.find(
+              (d) => d.reference && String(d.reference).trim().toUpperCase() === orderRef
+            );
+            if (!found) return o;
+            appliedCount += 1;
+            const balanceDueNum = Number(found.balanceDue);
+            // Same mechanism as typing an invoice into the textbox: if the order
+            // was already entered in Sage (invoiceSageUpdate) and the new invoice
+            // differs from what Sage last synced, flag it so the red
+            // "Invoice differs from last Sage update / Update Invoice" UI appears.
+            const invoiceNeedsSync =
+              Boolean(o.invoiceSageUpdate) &&
+              String(found.invoiceNumber || "").trim() !== String(o.sage_reference_synced || "").trim();
+            return {
+              ...o,
+              source_invoice: found.invoiceNumber,
+              sage_reference: found.invoiceNumber,
+              hasInvoiceNum: true,
+              invoiceNeedsSync,
+              ...(Number.isFinite(balanceDueNum) ? { billed_total: balanceDueNum } : {}),
+              ...(found.imageFileName ? { epicorInvoiceImage: found.imageFileName } : {}),
+              environmentalFeeAlert: Boolean(found.hasEnvironmentalFee),
+              ...(found.environmentalFeeAmount ? { environmentalFeeAmount: found.environmentalFeeAmount } : {}),
+              lastUpdatedAt: new Date().toISOString(),
+              _localDirty: true,
+            };
+          });
+          patchedOrders = next;
+          return next;
+        });
+        // Dirty BEFORE attempting the save: if the write to orders.json fails
+        // (transient network-share error), this keeps the Save button live for a
+        // manual retry and stops the next full-orders refresh (watcher push or a
+        // crawler fetch) from silently discarding the never-persisted data.
+        setOrdersDirty(true);
+      }
+
+      let saveFailed = false;
+      if (appliedCount > 0 && patchedOrders && api?.writeOrders) {
+        const normalized = normalizeOrdersForSave(patchedOrders);
+        try {
+          const saveRes = await api.writeOrders(normalized);
+          if (saveRes?.ok) {
+            setOrders(normalized);
+            ordersLastSavedRef.current = JSON.stringify(normalized);
+            setOrdersDirty(false);
+          } else {
+            saveFailed = true;
+            console.error("[vendor] failed to auto-save epicor matches", saveRes);
+          }
+        } catch (saveErr) {
+          saveFailed = true;
+          console.error("[vendor] failed to auto-save epicor matches", saveErr);
+        }
+      }
+
+      if (saveFailed) {
+        setEpicorError(
+          "Filled invoice data but could not save it to orders.json. It will not survive a page refresh or another fetch until you click Save. Click Save now to retry."
+        );
+      }
+      const appliedMsg = appliedCount > 0 ? `Filled invoice/total for ${appliedCount} order(s) in Order Management.` : "";
+      setEpicorStatus([logMsg, appliedMsg].filter(Boolean).join("\n") || "Logged into Epicor.");
+    } catch (e) {
+      console.error("[vendor] epicor open error", e);
+      setEpicorError(e?.message || "Failed to open Epicor site.");
+    } finally {
+      setEpicorOpening(false);
+    }
+  }
+
+  // Load previously-scanned invoices straight from the on-disk cache (no
+  // browser). Called when the Epicor view opens so a restart still shows prior
+  // results instead of an empty page.
+  async function handleLoadEpicorScanned() {
+    if (!api?.getEpicorScanned) return;
+    try {
+      setEpicorScanError("");
+      const res = await api.getEpicorScanned();
+      if (!res?.ok) throw new Error(res?.error || "Failed to load scanned invoices.");
+      const invoices = Array.isArray(res.invoices) ? res.invoices : [];
+      setEpicorScanInvoices(invoices);
+      setEpicorScanCounts({
+        scanned: res.scannedCount ?? invoices.length,
+        unknown: res.unknownCount ?? invoices.filter((i) => !i.known).length,
+      });
+      await backfillEpicorOrders(invoices);
+    } catch (e) {
+      console.error("[vendor] load scanned epicor invoices failed", e);
+      setEpicorScanError(e?.message || "Failed to load scanned invoices.");
+    }
+  }
+
+  // Bring already-created epicorOnly orders up to date after a scan/refresh:
+  //  - fill the invoice date on orders whose cache entry gained a Date only
+  //    later (older entries were cached before grid fields were stored), matched
+  //    by the authoritative invoice number; and
+  //  - stamp detailStored:true on any epicor order missing it, so orders created
+  //    before that field was set can still meet the archive criteria (their
+  //    line-item detail was captured at creation — nothing more is fetched).
+  // Only these fields are touched; all Sage processing state / totals / line
+  // items are left exactly as-is, so a fully-processed order keeps everything.
+  // Reads/writes orders.json directly since the Epicor view can be used without
+  // Order Management ever being open (in-memory state may be stale).
+  async function backfillEpicorOrders(invoices) {
+    if (!api?.readOrders || !api?.writeOrders) return;
+    const dateByInvoice = new Map();
+    for (const inv of Array.isArray(invoices) ? invoices : []) {
+      const key = inv?.invoiceNumber ? String(inv.invoiceNumber).trim().toUpperCase() : "";
+      if (key && inv.date && !dateByInvoice.has(key)) dateByInvoice.set(key, inv.date);
+    }
+    try {
+      const ordersRes = await api.readOrders();
+      const currentList = ordersRes?.state || ordersRes || [];
+      const base = Array.isArray(currentList) ? currentList : [];
+      let changed = false;
+      const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+      const next = base.map((o) => {
+        if (!o?.epicorOnly) return o;
+        const patch = {};
+        if (o.detailStored !== true) patch.detailStored = true;
+        if (!(o.orderDateRaw || "").toString().trim()) {
+          const date = dateByInvoice.get(norm(o.source_invoice)) || dateByInvoice.get(norm(o.invoiceNum));
+          if (date) {
+            patch.epicorInvoiceDate = date;
+            patch.orderDateRaw = date;
+            patch.sageDate = epicorDateToSageDate(date);
+          }
+        }
+        if (Object.keys(patch).length === 0) return o;
+        changed = true;
+        return { ...o, ...patch };
+      });
+      if (!changed) return;
+      const saveRes = await api.writeOrders(normalizeOrdersForSave(next));
+      if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save backfilled dates.");
+      if (ordersInitialized) {
+        setOrders(next);
+        ordersLastSavedRef.current = JSON.stringify(next);
+        setOrdersDirty(false);
+      }
+    } catch (e) {
+      console.error("[vendor] backfill epicor orders failed", e);
+    }
+  }
+
+  async function handleScanEpicorRange(fromDate, toDate, force = false) {
+    if (!api?.scanEpicorRange) return;
+    try {
+      setEpicorScanning(true);
+      setEpicorScanError("");
+      const res = await api.scanEpicorRange({ fromDate, toDate, force });
+      setEpicorScanLog(Array.isArray(res?.statusLog) ? res.statusLog : []);
+      if (!res?.ok) throw new Error(res?.error || "Failed to scan Epicor range.");
+      const invoices = Array.isArray(res.invoices) ? res.invoices : [];
+      setEpicorScanInvoices(invoices);
+      setEpicorScanCounts({
+        scanned: res.scannedCount ?? invoices.length,
+        unknown: res.unknownCount ?? invoices.filter((i) => !i.known).length,
+      });
+      await backfillEpicorOrders(invoices);
+    } catch (e) {
+      console.error("[vendor] epicor scan error", e);
+      setEpicorScanError(e?.message || "Failed to scan Epicor range.");
+    } finally {
+      setEpicorScanning(false);
+    }
+  }
+
+  // Re-OCR a single invoice from its already-saved image (no browser, no Epicor,
+  // no date), then merge the fresh total/reference/parts back into that one row.
+  // Lets the user refresh a stale or imperfect cached parse before creating an
+  // order from it.
+  async function handleRescanEpicorInvoice(inv) {
+    if (!api?.rescanEpicorInvoice) return { ok: false, error: "Rescan is not available." };
+    const invNum = String(inv?.invoiceNumber || "").trim();
+    if (!invNum) return { ok: false, error: "This invoice has no number." };
+    try {
+      const res = await api.rescanEpicorInvoice(invNum);
+      if (!res?.ok) throw new Error(res?.error || "Rescan failed.");
+      const refreshed = res.invoice;
+      if (!refreshed) throw new Error("Rescan returned no data.");
+      const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+      setEpicorScanInvoices((prev) =>
+        prev.map((i) => (norm(i.invoiceNumber) === norm(invNum) ? { ...i, ...refreshed, created: i.created } : i))
+      );
+      return { ok: true };
+    } catch (e) {
+      console.error("[vendor] rescan invoice failed", e);
+      return { ok: false, error: e?.message || "Rescan failed." };
+    }
+  }
+
+  // Turn a scanned Epicor invoice into an order in Order Management — the same
+  // kind of order the World scrape produces (source "world"), pre-filled with
+  // the invoice number, total, scanned image, and OCR'd reference. Reads the
+  // freshest orders from disk first (the Epicor view can be used without ever
+  // opening Order Management, so in-memory state may be empty/stale).
+  async function handleCreateOrderFromEpicorInvoice(inv) {
+    if (!inv || !api?.writeOrders) return { ok: false, error: "Saving orders is not available." };
+    const invNum = String(inv.invoiceNumber || "").trim();
+    if (!invNum) return { ok: false, error: "This invoice has no number to key an order by." };
+    try {
+      const ordersRes = await api?.readOrders?.();
+      const currentList = ordersRes?.state || ordersRes || [];
+      const base = Array.isArray(currentList) ? currentList : [];
+
+      const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+      const invKey = norm(invNum);
+      const already = base.some(
+        (o) => o && (norm(o.source_invoice) === invKey || norm(o.invoiceNum) === invKey)
+      );
+
+      if (!already) {
+        const balanceDueNum = Number(inv.balanceDue);
+        // Prefer the order reference OCR read off the invoice; only when OCR
+        // found none do we fall back to the invoice number so the bubble still
+        // has a real identity instead of "No reference". The order key (__row)
+        // mirrors whichever we use; source_invoice always stays the invoice #.
+        const ocrRef = inv.reference ? String(inv.reference).trim() : "";
+        const refValue = ocrRef || invNum;
+        const newOrder = {
+          source: "world",
+          epicorOnly: true,
+          reference: refValue,
+          __row: refValue,
+          warehouse: inv.accountName || "Epicor invoice",
+          sage_source: "WOR505",
+          source_invoice: invNum,
+          sage_reference: invNum,
+          hasInvoiceNum: true,
+          // Epicor orders capture their line-item detail at creation from OCR;
+          // there is no separate detail-fetch step (unlike World/Transbec), so
+          // the detail is "stored" from the start — same as cbk/bestbuy orders.
+          // Without this the order can never satisfy the archive criteria.
+          detailStored: true,
+          ...(Number.isFinite(balanceDueNum) ? { billed_total: balanceDueNum } : {}),
+          ...(inv.imageFileName ? { epicorInvoiceImage: inv.imageFileName } : {}),
+          environmentalFeeAlert: Boolean(inv.hasEnvironmentalFee),
+          ...(inv.environmentalFeeAmount ? { environmentalFeeAmount: inv.environmentalFeeAmount } : {}),
+          epicorInvoiceDate: inv.date || "",
+          orderDateRaw: inv.date || "",
+          sageDate: epicorDateToSageDate(inv.date),
+          lineItems: Array.isArray(inv.lineItems) ? inv.lineItems : [],
+          lastUpdatedAt: new Date().toISOString(),
+        };
+        const nextList = normalizeOrdersForSave(base.concat(newOrder));
+        const saveRes = await api.writeOrders(nextList);
+        if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the new order.");
+        if (ordersInitialized) {
+          setOrders(nextList);
+          ordersLastSavedRef.current = JSON.stringify(nextList);
+          setOrdersDirty(false);
+        }
+      }
+
+      // Reflect in the Epicor list: it's now on file (and stays visible with a
+      // "Created" badge even under the "only new" filter).
+      setEpicorScanInvoices((prev) =>
+        prev.map((i) => (norm(i.invoiceNumber) === invKey ? { ...i, known: true, created: true } : i))
+      );
+      if (!already) {
+        setEpicorScanCounts((prev) => ({
+          scanned: prev.scanned,
+          unknown: Math.max(0, prev.unknown - 1),
+        }));
+      }
+      return { ok: true, duplicate: already };
+    } catch (e) {
+      console.error("[vendor] create order from epicor invoice failed", e);
+      return { ok: false, error: e?.message || "Failed to create order." };
+    }
+  }
+
+  // Attach a scanned Epicor invoice to an EXISTING order that has no invoice yet
+  // — the manual counterpart to the OCR auto-match, for invoices where OCR could
+  // not read the order reference. Patches only the invoice-related fields (number,
+  // total, image, EHC, date) exactly like the auto-match does; the order's own
+  // line items / detail / Sage flags are untouched. Reads fresh from disk since
+  // the Epicor view can be used without Order Management being open.
+  async function handleAssignEpicorInvoiceToOrder(inv, orderReference) {
+    if (!api?.writeOrders) return { ok: false, error: "Saving orders is not available." };
+    const invNum = String(inv?.invoiceNumber || "").trim();
+    if (!invNum) return { ok: false, error: "This invoice has no number." };
+    const targetRef = String(orderReference || "").trim();
+    if (!targetRef) return { ok: false, error: "Pick an order to assign this invoice to." };
+    try {
+      const ordersRes = await api?.readOrders?.();
+      const currentList = ordersRes?.state || ordersRes || [];
+      const base = Array.isArray(currentList) ? currentList : [];
+      const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+      const invKey = norm(invNum);
+      const targetKey = norm(targetRef);
+
+      // Guard: don't attach the same invoice number to two different orders.
+      const clash = base.find(
+        (o) => o && norm(o.source_invoice) === invKey && norm(o.reference) !== targetKey
+      );
+      if (clash) {
+        return { ok: false, error: `Invoice ${invNum} is already on order ${clash.reference}.` };
+      }
+
+      let applied = false;
+      const balanceDueNum = Number(inv.balanceDue);
+      const next = base.map((o) => {
+        // Scope to the same World order the dropdown offered: reference is unique
+        // per vendor but can rarely collide across vendors, so match source too.
+        if (!o || o.epicorOnly || String(o.source || "").trim().toLowerCase() !== "world") return o;
+        if (norm(o.reference) !== targetKey) return o;
+        applied = true;
+        // Mirror the auto-match: flag a Sage re-sync when the order was already
+        // entered in Sage and this invoice differs from what Sage last synced.
+        const invoiceNeedsSync =
+          Boolean(o.invoiceSageUpdate) &&
+          String(invNum).trim() !== String(o.sage_reference_synced || "").trim();
+        return {
+          ...o,
+          source_invoice: invNum,
+          sage_reference: invNum,
+          hasInvoiceNum: true,
+          invoiceNeedsSync,
+          ...(Number.isFinite(balanceDueNum) ? { billed_total: balanceDueNum } : {}),
+          ...(inv.imageFileName ? { epicorInvoiceImage: inv.imageFileName } : {}),
+          environmentalFeeAlert: Boolean(inv.hasEnvironmentalFee),
+          ...(inv.environmentalFeeAmount ? { environmentalFeeAmount: inv.environmentalFeeAmount } : {}),
+          ...(inv.date
+            ? { epicorInvoiceDate: inv.date, orderDateRaw: o.orderDateRaw || inv.date, sageDate: o.sageDate || epicorDateToSageDate(inv.date) }
+            : {}),
+          lastUpdatedAt: new Date().toISOString(),
+        };
+      });
+      if (!applied) return { ok: false, error: `Order ${targetRef} was not found (it may already have an invoice).` };
+
+      const normalized = normalizeOrdersForSave(next);
+      const saveRes = await api.writeOrders(normalized);
+      if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the assignment.");
+      if (ordersInitialized) {
+        setOrders(normalized);
+        ordersLastSavedRef.current = JSON.stringify(normalized);
+        setOrdersDirty(false);
+      }
+
+      // The invoice now belongs to an order, so it's on file: mark it known and
+      // drop the "not in records" count.
+      setEpicorScanInvoices((prev) =>
+        prev.map((i) => (norm(i.invoiceNumber) === invKey ? { ...i, known: true, assignedTo: targetRef } : i))
+      );
+      setEpicorScanCounts((prev) => ({
+        scanned: prev.scanned,
+        unknown: Math.max(0, prev.unknown - 1),
+      }));
+      return { ok: true };
+    } catch (e) {
+      console.error("[vendor] assign epicor invoice to order failed", e);
+      return { ok: false, error: e?.message || "Failed to assign invoice." };
+    }
+  }
+
+  // Orders eligible to receive a scanned Epicor invoice: World orders (Epicor is
+  // the World vendor portal) that don't have an invoice number yet, and that
+  // aren't themselves Epicor-generated. Sorted by reference for a stable dropdown.
+  const assignableEpicorOrders = useMemo(() => {
+    return (orders || [])
+      .filter(
+        (o) =>
+          o &&
+          !o.epicorOnly &&
+          String(o.source || "").trim().toLowerCase() === "world" &&
+          !String(o.source_invoice || "").trim() &&
+          String(o.reference || "").trim()
+      )
+      .map((o) => ({
+        reference: String(o.reference).trim(),
+        label: `${String(o.reference).trim()}${o.seller || o.warehouse ? ` — ${o.seller || o.warehouse}` : ""}${
+          o.total || o.totalRaw ? ` (${o.totalRaw || o.total})` : ""
+        }`,
+      }))
+      .sort((a, b) => a.reference.localeCompare(b.reference));
+  }, [orders]);
+
+  // Permanently remove an order from orders.json (no archive/manifest). Used to
+  // clean up Epicor-created orders. Returns {ok,error} for the caller's UI.
+  async function handleDeleteOrder(refKey, source) {
+    if (!api?.deleteOrder || !refKey) return { ok: false, error: "Delete is not available." };
+    try {
+      const res = await api.deleteOrder(refKey, source);
+      if (!res?.ok) throw new Error(res?.error || "Failed to remove order.");
+      if (ordersInitialized) await loadOrders();
+      return { ok: true };
+    } catch (e) {
+      console.error("[vendor] delete order failed", e);
+      return { ok: false, error: e?.message || "Failed to remove order." };
+    }
+  }
+
+  // Remove the order created from an Epicor invoice, and flip the row in the
+  // Epicor scan list back to "not in records" (outstanding — as if the order was
+  // never made) so it can be re-created if needed.
+  async function handleRemoveEpicorOrder(inv, source = "world") {
+    const invNum = String(inv?.invoiceNumber || "").trim();
+    if (!invNum) return { ok: false, error: "This invoice has no number." };
+    // Epicor-created orders are stored with source "world"; scoping the delete to
+    // that source stops a same-numbered order from another vendor being removed.
+    const res = await handleDeleteOrder(invNum, source);
+    if (!res.ok) return res;
+    const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+    const invKey = norm(invNum);
+    // Only bump the "not in records" count if a matching row is actually on
+    // screen and was counted as known/created (avoids drifting the tally when
+    // the delete came from Order Management and the view isn't showing this row).
+    const wasCounted = epicorScanInvoices.some(
+      (i) => norm(i.invoiceNumber) === invKey && (i.known || i.created)
+    );
+    setEpicorScanInvoices((prev) =>
+      prev.map((i) => (norm(i.invoiceNumber) === invKey ? { ...i, known: false, created: false } : i))
+    );
+    if (wasCounted) {
+      setEpicorScanCounts((prev) => ({ scanned: prev.scanned, unknown: prev.unknown + 1 }));
+    }
+    return { ok: true };
+  }
+
+  // Delete an Epicor-generated order straight from the Order Management bubble.
+  // Confirms first (permanent), then reuses the Epicor removal path so the
+  // matching scan flips back to "not in records".
+  async function handleDeleteEpicorOrder(order) {
+    const invNum = String(order?.source_invoice || order?.invoiceNum || "").trim();
+    const label = order?.reference || invNum || "this order";
+    const proceed = api?.confirm
+      ? await api.confirm(
+          `Delete Epicor order ${label}?`,
+          "This permanently removes it from Order Management. The invoice will show as not-in-records again in the Epicor view."
+        )
+      : true;
+    if (!proceed) return;
+    const src = order?.source || "world";
+    const res = invNum
+      ? await handleRemoveEpicorOrder({ invoiceNumber: invNum }, src)
+      : await handleDeleteOrder(order?.reference || order?.__row, src);
+    if (!res?.ok) setOrdersError(res?.error || "Failed to delete order.");
+  }
+
+  async function handleViewEpicorInvoiceImage(fileName) {
+    if (!api?.openEpicorInvoiceImage || !fileName) return;
+    try {
+      const res = await api.openEpicorInvoiceImage(fileName);
+      if (!res?.ok) {
+        setEpicorError(res?.error || "Failed to open invoice image.");
+      }
+    } catch (e) {
+      console.error("[vendor] failed to open invoice image", e);
+      setEpicorError(e?.message || "Failed to open invoice image.");
+    }
+  }
+
+  // The Verify modal is shared between the Epicor (World) and Gmail (Transbec)
+  // flows. Each vendor saves its invoice preview in its own folder behind its own
+  // IPC channel, so pick the right image field + read/open API from the order.
+  // The invoice PDF filename for a Transbec order. Back-compat: earlier builds
+  // stored a (broken) PNG preview name in transbecInvoiceImage; the PDF sits
+  // beside it with the same base name, so derive it for those older records.
+  function transbecPdfName(order) {
+    if (order?.transbecInvoiceFile) return order.transbecInvoiceFile;
+    if (order?.transbecInvoiceImage) return order.transbecInvoiceImage.replace(/\.png$/i, ".pdf");
+    return "";
+  }
+
+  function invoiceReviewApis(order) {
+    if (order?.bestbuyInvoiceFile) {
+      return {
+        imageFile: order.bestbuyInvoiceFile,
+        read: api?.readBestbuyInvoiceImage,
+        open: api?.openBestbuyInvoiceImage,
+      };
+    }
+    if (order?.cbkInvoiceFile) {
+      return {
+        imageFile: order.cbkInvoiceFile,
+        read: api?.readCbkInvoiceImage,
+        open: api?.openCbkInvoiceImage,
+      };
+    }
+    const transbecFile = transbecPdfName(order);
+    if (transbecFile) {
+      return {
+        imageFile: transbecFile,
+        read: api?.readTransbecInvoiceImage,
+        open: api?.openTransbecInvoiceImage,
+      };
+    }
+    return {
+      imageFile: order?.epicorInvoiceImage,
+      read: api?.readEpicorInvoiceImage,
+      open: api?.openEpicorInvoiceImage,
+    };
+  }
+
+  async function handleOpenEpicorReview(order) {
+    const { imageFile, read } = invoiceReviewApis(order);
+    if (!imageFile) return;
+    setEpicorReviewOrder(order);
+    setEpicorReviewInvoiceDraft(order.source_invoice || "");
+    setEpicorReviewTotalDraft(
+      order.billed_total !== null && order.billed_total !== undefined ? String(order.billed_total) : ""
+    );
+    // Seed editable line items (epicor-only orders). "part" is the code+number
+    // shown as one field; on confirm it's stored back into partNumber.
+    setEpicorReviewLinesDraft(
+      (Array.isArray(order.lineItems) ? order.lineItems : []).map((li) => ({
+        part: `${li.partLineCode || ""} ${li.partNumber || ""}`.trim(),
+        quantity: li.quantity ?? "",
+        partDescription: li.partDescription || "",
+        costPrice: li.costPrice ?? "",
+        __orig: li,
+      }))
+    );
+    setEpicorReviewImageDataUrl("");
+    setEpicorReviewError("");
+    setEpicorReviewLoading(true);
+    try {
+      const res = await read?.(imageFile);
+      if (res?.ok && res.dataUrl) {
+        setEpicorReviewImageDataUrl(res.dataUrl);
+      } else {
+        setEpicorReviewError(res?.error || "Failed to load invoice image.");
+      }
+    } catch (e) {
+      setEpicorReviewError(e?.message || "Failed to load invoice image.");
+    } finally {
+      setEpicorReviewLoading(false);
+    }
+  }
+
+  function handleCloseEpicorReview() {
+    setEpicorReviewOrder(null);
+    setEpicorReviewImageDataUrl("");
+    setEpicorReviewInvoiceDraft("");
+    setEpicorReviewTotalDraft("");
+    setEpicorReviewLinesDraft([]);
+    setEpicorReviewError("");
+  }
+
+  function updateEpicorReviewLine(idx, field, value) {
+    setEpicorReviewLinesDraft((prev) => prev.map((l, i) => (i === idx ? { ...l, [field]: value } : l)));
+  }
+  function removeEpicorReviewLine(idx) {
+    setEpicorReviewLinesDraft((prev) => prev.filter((_, i) => i !== idx));
+  }
+  function addEpicorReviewLine() {
+    setEpicorReviewLinesDraft((prev) => prev.concat({ part: "", quantity: "", partDescription: "", costPrice: "" }));
+  }
+
+  async function handleConfirmEpicorReview() {
+    if (!epicorReviewOrder?.reference) return;
+    setEpicorReviewSaving(true);
+    setEpicorReviewError("");
+    try {
+      const reference = epicorReviewOrder.reference;
+      const nextInvoice = epicorReviewInvoiceDraft.trim();
+      const totalNum = parseFloat(epicorReviewTotalDraft);
+      const nextTotal = Number.isFinite(totalNum) ? Number(totalNum.toFixed(2)) : null;
+
+      // Only epicor-generated orders get their line items edited here; other
+      // vendors' orders keep whatever line items they already had.
+      const nextLineItems = epicorReviewOrder.epicorOnly
+        ? epicorReviewLinesDraft
+            .map((l) => {
+              const part = String(l.part || "").trim();
+              return {
+                ...(l.__orig || { addedToOutstanding: false, source: "epicor-ocr" }),
+                partLineCode: "",
+                partNumber: part,
+                quantity: l.quantity,
+                partDescription: String(l.partDescription || "").trim(),
+                ...(l.costPrice !== undefined && l.costPrice !== "" ? { costPrice: l.costPrice } : {}),
+              };
+            })
+            .filter((li) => String(li.partNumber || "").trim() || String(li.partDescription || "").trim())
+        : null;
+
+      let patchedOrders = null;
+      setOrders((prev) => {
+        const next = prev.map((o) => {
+          if (!o?.reference || String(o.reference).trim().toUpperCase() !== String(reference).trim().toUpperCase()) {
+            return o;
+          }
+          // Same mechanism as the manual invoice textbox: flag for Sage re-sync
+          // if this order was already entered in Sage and the confirmed invoice
+          // differs from what Sage last synced.
+          const invoiceNeedsSync =
+            Boolean(o.invoiceSageUpdate) && nextInvoice !== String(o.sage_reference_synced || "").trim();
+
+          // Mark the total as human-verified if it matches what Sage already has
+          // (or there's no Sage total yet to conflict with) — otherwise leave the
+          // existing Reconcile Totals flow to surface the discrepancy.
+          const sageTotalNum = Number(o.sage_total_synced ?? o.sageTotalSynced);
+          const totalsMatch =
+            nextTotal !== null && (!Number.isFinite(sageTotalNum) || Math.abs(nextTotal - sageTotalNum) < 0.01);
+
+          return {
+            ...o,
+            source_invoice: nextInvoice,
+            sage_reference: nextInvoice,
+            hasInvoiceNum: Boolean(nextInvoice),
+            invoiceNeedsSync,
+            ...(nextTotal !== null ? { billed_total: nextTotal, totalVerified: totalsMatch } : {}),
+            ...(nextLineItems ? { lineItems: nextLineItems } : {}),
+            lastUpdatedAt: new Date().toISOString(),
+            _localDirty: true,
+          };
+        });
+        patchedOrders = next;
+        return next;
+      });
+      // Dirty BEFORE attempting the save: if the write fails and the user closes
+      // this modal, the corrected values stay protected (Save button live, and
+      // external refreshes won't overwrite them) instead of silently vanishing.
+      setOrdersDirty(true);
+
+      if (patchedOrders && api?.writeOrders) {
+        const normalized = normalizeOrdersForSave(patchedOrders);
+        const saveRes = await api.writeOrders(normalized);
+        if (!saveRes?.ok) throw new Error("Failed to save order. Your corrections are kept on screen — click Save to retry.");
+        setOrders(normalized);
+        ordersLastSavedRef.current = JSON.stringify(normalized);
+        setOrdersDirty(false);
+      }
+
+      handleCloseEpicorReview();
+    } catch (e) {
+      console.error("[vendor] failed to save verified invoice", e);
+      setEpicorReviewError(e?.message || "Failed to save.");
+    } finally {
+      setEpicorReviewSaving(false);
+    }
+  }
+
+  // Transbec analog of handleOpenEpicor: pull invoice data from Gmail and batch-
+  // fill every matching Transbec order (not just the one clicked). Reuses the
+  // same invoiceNeedsSync / totalVerified logic as manual entry and Epicor.
+  async function handleFetchTransbecInvoices(reference) {
+    if (!api?.fetchTransbecInvoices) return;
+    try {
+      setTransbecFetching(true);
+      setTransbecError("");
+      setTransbecStatus("");
+      const res = await api.fetchTransbecInvoices({ reference });
+      if (!res?.ok) throw new Error(res?.error || "Failed to fetch Transbec invoices.");
+      const logMsg = Array.isArray(res.statusLog) && res.statusLog.length ? res.statusLog.join("\n") : "";
+
+      const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
+      let patchedOrders = null;
+      let appliedCount = 0;
+
+      if (discoveries.length > 0) {
+        setOrders((prev) => {
+          const next = prev.map((o) => {
+            if (!o?.reference || (o.source_invoice || "").toString().trim()) return o;
+            const orderRef = String(o.reference).trim().toUpperCase();
+            const found = discoveries.find(
+              (d) => d.reference && String(d.reference).trim().toUpperCase() === orderRef
+            );
+            if (!found) return o;
+            appliedCount += 1;
+            const totalNum = Number(found.total ?? found.balanceDue);
+            const invoiceNeedsSync =
+              Boolean(o.invoiceSageUpdate) &&
+              String(found.invoiceNumber || "").trim() !== String(o.sage_reference_synced || "").trim();
+            return {
+              ...o,
+              source_invoice: found.invoiceNumber,
+              sage_reference: found.invoiceNumber,
+              hasInvoiceNum: true,
+              invoiceNeedsSync,
+              ...(Number.isFinite(totalNum) ? { billed_total: totalNum } : {}),
+              ...(found.fileName ? { transbecInvoiceFile: found.fileName } : {}),
+              lastUpdatedAt: new Date().toISOString(),
+              _localDirty: true,
+            };
+          });
+          patchedOrders = next;
+          return next;
+        });
+        // Dirty BEFORE attempting the save — see handleFetchBestbuyInvoices for
+        // the full rationale (protects against silent data loss on save failure).
+        setOrdersDirty(true);
+      }
+
+      let saveFailed = false;
+      if (appliedCount > 0 && patchedOrders && api?.writeOrders) {
+        const normalized = normalizeOrdersForSave(patchedOrders);
+        try {
+          const saveRes = await api.writeOrders(normalized);
+          if (saveRes?.ok) {
+            setOrders(normalized);
+            ordersLastSavedRef.current = JSON.stringify(normalized);
+            setOrdersDirty(false);
+          } else {
+            saveFailed = true;
+            console.error("[vendor] failed to auto-save transbec matches", saveRes);
+          }
+        } catch (saveErr) {
+          saveFailed = true;
+          console.error("[vendor] failed to auto-save transbec matches", saveErr);
+        }
+      }
+
+      if (saveFailed) {
+        setTransbecError(
+          "Filled invoice data but could not save it to orders.json. It will not survive a page refresh or another fetch until you click Save. Click Save now to retry."
+        );
+      }
+      const appliedMsg =
+        appliedCount > 0 ? `Filled invoice/total for ${appliedCount} order(s) in Order Management.` : "";
+      setTransbecStatus([logMsg, appliedMsg].filter(Boolean).join("\n") || "Checked Gmail.");
+    } catch (e) {
+      console.error("[vendor] transbec fetch error", e);
+      setTransbecError(e?.message || "Failed to fetch Transbec invoices.");
+    } finally {
+      setTransbecFetching(false);
+    }
+  }
+
+  async function handleViewTransbecInvoiceImage(order) {
+    const fileName = typeof order === "string" ? order : transbecPdfName(order);
+    if (!api?.openTransbecInvoiceImage || !fileName) return;
+    try {
+      const res = await api.openTransbecInvoiceImage(fileName);
+      if (!res?.ok) {
+        setTransbecError(res?.error || "Failed to open invoice image.");
+      }
+    } catch (e) {
+      console.error("[vendor] failed to open transbec invoice image", e);
+      setTransbecError(e?.message || "Failed to open invoice image.");
+    }
+  }
+
+  // BestBuy: one "BESTBUY INVOICES FOR TODAY" email holds many invoices. We match
+  // each invoice to an order by packing slip (the order's reference when scraped
+  // early), falling back to the invoice number, then fill total + confirm invoice #.
+  //
+  // Same click also checks for a BestBuy CREDIT invoice (a separate Gmail search
+  // — see bestbuyCreditInvoice.js) matching this order, and — if found — fills
+  // bestbuyCreditFile/bestbuyCreditTotal alongside it. Both patches land in one
+  // setOrders/save pass so a credit fetch failure can't clobber an invoice match
+  // that was just applied (or vice versa).
+  async function handleFetchBestbuyInvoices(reference) {
+    if (!api?.fetchBestbuyInvoices) return;
+    try {
+      setBestbuyFetching(true);
+      setBestbuyError("");
+      setBestbuyStatus("");
+      const res = await api.fetchBestbuyInvoices({ reference });
+      if (!res?.ok) throw new Error(res?.error || "Failed to fetch BestBuy invoices.");
+      const logMsg = Array.isArray(res.statusLog) && res.statusLog.length ? res.statusLog.join("\n") : "";
+      const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
+
+      let creditLogMsg = "";
+      let creditDiscoveries = [];
+      if (api?.fetchBestbuyCreditInvoices) {
+        try {
+          const creditRes = await api.fetchBestbuyCreditInvoices({ reference });
+          if (creditRes?.ok) {
+            creditLogMsg =
+              Array.isArray(creditRes.statusLog) && creditRes.statusLog.length ? creditRes.statusLog.join("\n") : "";
+            creditDiscoveries = Array.isArray(creditRes.discoveries) ? creditRes.discoveries : [];
+          } else {
+            console.error("[vendor] bestbuy credit invoice fetch failed", creditRes);
+          }
+        } catch (creditErr) {
+          console.error("[vendor] bestbuy credit invoice fetch error", creditErr);
+        }
+      }
+
+      let patchedOrders = null;
+      let appliedCount = 0;
+      let appliedCreditCount = 0;
+
+      if (discoveries.length > 0 || creditDiscoveries.length > 0) {
+        setOrders((prev) => {
+          const next = prev.map((o) => {
+            if (!o?.reference || o.source !== "bestbuy") return o;
+            const keys = [o.reference, o.source_invoice, o.invoiceNum]
+              .map((v) => (v ? String(v).trim().toUpperCase() : ""))
+              .filter(Boolean);
+
+            let patch = null;
+
+            // Unlike World/Transbec, a BestBuy order usually already has an
+            // invoice number from the site scrape, so we can't skip on that.
+            // Skip only once the invoice PDF is actually attached.
+            if (!o.bestbuyInvoiceFile) {
+              // The order's reference is the packing slip when scraped before the
+              // warehouse invoiced it, and the invoice number after — so try both,
+              // and also match against an already-known invoice number.
+              const found = discoveries.find(
+                (d) =>
+                  (d.packingSlip && keys.includes(String(d.packingSlip).trim().toUpperCase())) ||
+                  (d.invoiceNumber && keys.includes(String(d.invoiceNumber).trim().toUpperCase()))
+              );
+              if (found) {
+                appliedCount += 1;
+                const totalNum = Number(found.total);
+                // Keep an invoice number that's already recorded (scraped or
+                // hand-corrected); only fill it in when there isn't one.
+                const existingInvoice = (o.source_invoice || "").toString().trim();
+                const nextInvoice = existingInvoice || found.invoiceNumber || "";
+                const invoiceNeedsSync =
+                  Boolean(o.invoiceSageUpdate) &&
+                  String(nextInvoice).trim() !== String(o.sage_reference_synced || "").trim();
+                patch = {
+                  ...(nextInvoice
+                    ? { source_invoice: nextInvoice, sage_reference: nextInvoice, hasInvoiceNum: true }
+                    : {}),
+                  invoiceNeedsSync,
+                  ...(Number.isFinite(totalNum) ? { billed_total: totalNum } : {}),
+                  ...(found.fileName ? { bestbuyInvoiceFile: found.fileName } : {}),
+                  environmentalFeeAlert: Boolean(found.hasEnvironmentalFee),
+                };
+              }
+            }
+
+            // A credit invoice fills the SAME invoice # / billed total fields as
+            // a regular one (a credit order carries no invoice number until the
+            // warehouse credits it): its real invoice number (from the PDF body,
+            // not the subject) goes in source_invoice, and its total goes in
+            // billed_total — as a POSITIVE amount, even though the PDF prints it
+            // as an accounting negative. bestbuyCreditFile is also kept so the
+            // credit PDF stays viewable/printable and the row is flagged as a
+            // credit. Skip once a credit PDF is already attached.
+            if (!o.bestbuyCreditFile) {
+              const foundCredit = creditDiscoveries.find(
+                (d) =>
+                  (d.packingSlip && keys.includes(String(d.packingSlip).trim().toUpperCase())) ||
+                  (d.invoiceNumber && keys.includes(String(d.invoiceNumber).trim().toUpperCase()))
+              );
+              if (foundCredit) {
+                appliedCreditCount += 1;
+                // Guard null explicitly: Number(null) is 0, which would wrongly
+                // record a $0.00 credit when the total failed to parse. Store the
+                // magnitude — billed_total is always positive.
+                const rawCreditTotal = foundCredit.total == null ? NaN : Number(foundCredit.total);
+                const creditTotalNum = Number.isFinite(rawCreditTotal) ? Math.abs(rawCreditTotal) : NaN;
+                const existingInvoice = (patch?.source_invoice || o.source_invoice || "").toString().trim();
+                const nextInvoice = existingInvoice || foundCredit.invoiceNumber || "";
+                const invoiceNeedsSync =
+                  Boolean(o.invoiceSageUpdate) &&
+                  String(nextInvoice).trim() !== String(o.sage_reference_synced || "").trim();
+                patch = {
+                  ...(patch || {}),
+                  ...(nextInvoice
+                    ? { source_invoice: nextInvoice, sage_reference: nextInvoice, hasInvoiceNum: true }
+                    : {}),
+                  invoiceNeedsSync,
+                  ...(Number.isFinite(creditTotalNum) ? { billed_total: creditTotalNum } : {}),
+                  ...(foundCredit.fileName ? { bestbuyCreditFile: foundCredit.fileName } : {}),
+                };
+              }
+            }
+
+            if (!patch) return o;
+            return {
+              ...o,
+              ...patch,
+              lastUpdatedAt: new Date().toISOString(),
+              _localDirty: true,
+            };
+          });
+          patchedOrders = next;
+          return next;
+        });
+        // Mark dirty the moment the in-memory patch is applied, BEFORE the save
+        // below is even attempted. If the save fails (thrown error or {ok:false}
+        // — e.g. a transient failure writing orders.json on the network share),
+        // this is what keeps the data from being silently lost: it re-enables
+        // the Save button for a manual retry, and it stops any later full-orders
+        // refresh (the file watcher's push, or another vendor fetch) from
+        // overwriting these never-persisted fields with stale disk contents.
+        setOrdersDirty(true);
+      }
+
+      let saveFailed = false;
+      if ((appliedCount > 0 || appliedCreditCount > 0) && patchedOrders && api?.writeOrders) {
+        const normalized = normalizeOrdersForSave(patchedOrders);
+        try {
+          const saveRes = await api.writeOrders(normalized);
+          if (saveRes?.ok) {
+            setOrders(normalized);
+            ordersLastSavedRef.current = JSON.stringify(normalized);
+            setOrdersDirty(false);
+          } else {
+            saveFailed = true;
+            console.error("[vendor] failed to auto-save bestbuy matches", saveRes);
+          }
+        } catch (saveErr) {
+          saveFailed = true;
+          console.error("[vendor] failed to auto-save bestbuy matches", saveErr);
+        }
+      }
+
+      const appliedMsg =
+        appliedCount > 0 ? `Filled invoice/total for ${appliedCount} order(s) in Order Management.` : "";
+      const appliedCreditMsg =
+        appliedCreditCount > 0 ? `Filled credit invoice for ${appliedCreditCount} order(s).` : "";
+      if (saveFailed) {
+        setBestbuyError(
+          "Filled invoice data but could not save it to orders.json. It will not survive a page refresh or another fetch until you click Save. Click Save now to retry."
+        );
+      }
+      setBestbuyStatus(
+        [logMsg, creditLogMsg, appliedMsg, appliedCreditMsg].filter(Boolean).join("\n") || "Checked Gmail."
+      );
+    } catch (e) {
+      console.error("[vendor] bestbuy fetch error", e);
+      setBestbuyError(e?.message || "Failed to fetch BestBuy invoices.");
+    } finally {
+      setBestbuyFetching(false);
+    }
+  }
+
+  async function handleViewBestbuyInvoiceImage(order) {
+    const fileName = typeof order === "string" ? order : order?.bestbuyInvoiceFile;
+    if (!api?.openBestbuyInvoiceImage || !fileName) return;
+    try {
+      const res = await api.openBestbuyInvoiceImage(fileName);
+      if (!res?.ok) {
+        setBestbuyError(res?.error || "Failed to open invoice image.");
+      }
+    } catch (e) {
+      console.error("[vendor] failed to open bestbuy invoice image", e);
+      setBestbuyError(e?.message || "Failed to open invoice image.");
+    }
+  }
+
+  // Credit invoice PDFs land in the same gmail assets dir as regular BestBuy
+  // invoices, so viewing reuses that same generic open-by-filename IPC call.
+  async function handleViewBestbuyCreditInvoiceImage(order) {
+    const fileName = typeof order === "string" ? order : order?.bestbuyCreditFile;
+    if (!api?.openBestbuyInvoiceImage || !fileName) return;
+    try {
+      const res = await api.openBestbuyInvoiceImage(fileName);
+      if (!res?.ok) {
+        setBestbuyError(res?.error || "Failed to open credit invoice image.");
+      }
+    } catch (e) {
+      console.error("[vendor] failed to open bestbuy credit invoice image", e);
+      setBestbuyError(e?.message || "Failed to open credit invoice image.");
+    }
+  }
+
+  // CBK: one email per order (subject carries the order number = the order's
+  // reference, attachment is one invoice named by invoice number). Mirrors the
+  // BestBuy flow — fetch discovers invoices for every CBK email and batch-applies
+  // them to matching orders, not just the one whose button was clicked.
+  async function handleFetchCbkInvoices(reference) {
+    if (!api?.fetchCbkInvoices) return;
+    try {
+      setCbkFetching(true);
+      setCbkError("");
+      setCbkStatus("");
+      const res = await api.fetchCbkInvoices({ reference });
+      if (!res?.ok) throw new Error(res?.error || "Failed to fetch CBK invoices.");
+      const logMsg = Array.isArray(res.statusLog) && res.statusLog.length ? res.statusLog.join("\n") : "";
+
+      const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
+      let appliedCount = 0;
+
+      // Build the patched list synchronously from current state (NOT as a
+      // side-effect inside a setState updater) so the disk write below always
+      // runs with the real result. This is what makes Gmail-sourced changes
+      // persist immediately: the invoice #, total and file are saved to
+      // orders.json right away, without waiting for a manual Save.
+      const patchedOrders = orders.map((o) => {
+        if (!o?.reference || o.source !== "cbk") return o;
+        // Skip once the invoice PDF is already attached (don't overwrite a
+        // verified entry on a re-fetch).
+        if (o.cbkInvoiceFile) return o;
+        // Match on the CBK order number (the order's reference), falling back
+        // to an already-known invoice number.
+        const keys = [o.reference, o.source_invoice, o.invoiceNum]
+          .map((v) => (v ? String(v).trim().toUpperCase() : ""))
+          .filter(Boolean);
+        const found = discoveries.find(
+          (d) =>
+            (d.reference && keys.includes(String(d.reference).trim().toUpperCase())) ||
+            (d.invoiceNumber && keys.includes(String(d.invoiceNumber).trim().toUpperCase()))
+        );
+        if (!found) return o;
+        appliedCount += 1;
+        const totalNum = Number(found.total);
+        // The CBK order scrape seeds source_invoice with the order number
+        // (same as the reference), which is not the real invoice number — so
+        // whenever the Gmail search turns up an actual invoice number, it
+        // REPLACES what's there. Only fall back to the existing value if the
+        // email didn't carry one.
+        const existingInvoice = (o.source_invoice || "").toString().trim();
+        const nextInvoice = found.invoiceNumber || existingInvoice || "";
+        const invoiceNeedsSync =
+          Boolean(o.invoiceSageUpdate) &&
+          String(nextInvoice).trim() !== String(o.sage_reference_synced || "").trim();
+        return {
+          ...o,
+          ...(nextInvoice ? { source_invoice: nextInvoice, sage_reference: nextInvoice, hasInvoiceNum: true } : {}),
+          invoiceNeedsSync,
+          ...(Number.isFinite(totalNum) ? { billed_total: totalNum } : {}),
+          ...(found.fileName ? { cbkInvoiceFile: found.fileName } : {}),
+          lastUpdatedAt: new Date().toISOString(),
+          _localDirty: true,
+        };
+      });
+
+      let saveFailed = false;
+      if (appliedCount > 0) {
+        // Reflect in the UI, and mark dirty BEFORE the write so a failed save
+        // keeps the data recoverable (Save button stays live, and a later
+        // full-orders refresh can't silently discard the never-persisted data).
+        setOrders(patchedOrders);
+        setOrdersDirty(true);
+        if (api?.writeOrders) {
+          const normalized = normalizeOrdersForSave(patchedOrders);
+          try {
+            const saveRes = await api.writeOrders(normalized);
+            if (saveRes?.ok) {
+              setOrders(normalized);
+              ordersLastSavedRef.current = JSON.stringify(normalized);
+              setOrdersDirty(false);
+            } else {
+              saveFailed = true;
+              console.error("[vendor] failed to auto-save cbk matches", saveRes);
+            }
+          } catch (saveErr) {
+            saveFailed = true;
+            console.error("[vendor] failed to auto-save cbk matches", saveErr);
+          }
+        }
+      }
+
+      if (saveFailed) {
+        setCbkError(
+          "Filled invoice data but could not save it to orders.json. It will not survive a page refresh or another fetch until you click Save. Click Save now to retry."
+        );
+      }
+      const appliedMsg =
+        appliedCount > 0 ? `Filled invoice/total for ${appliedCount} order(s) in Order Management.` : "";
+      setCbkStatus([logMsg, appliedMsg].filter(Boolean).join("\n") || "Checked Gmail.");
+    } catch (e) {
+      console.error("[vendor] cbk fetch error", e);
+      setCbkError(e?.message || "Failed to fetch CBK invoices.");
+    } finally {
+      setCbkFetching(false);
+    }
+  }
+
+  async function handleViewCbkInvoiceImage(order) {
+    const fileName = typeof order === "string" ? order : order?.cbkInvoiceFile;
+    if (!api?.openCbkInvoiceImage || !fileName) return;
+    try {
+      const res = await api.openCbkInvoiceImage(fileName);
+      if (!res?.ok) {
+        setCbkError(res?.error || "Failed to open invoice image.");
+      }
+    } catch (e) {
+      console.error("[vendor] failed to open cbk invoice image", e);
+      setCbkError(e?.message || "Failed to open invoice image.");
+    }
+  }
+
+  // Sends page 1 of the invoice straight to the printer with no dialog, same
+  // as Sage's print button — uses the printer configured in Settings, or the
+  // OS default if none is set. Because it's silent there's no "did the user
+  // actually print" signal to wait for, so "printed" is recorded once the
+  // print job is handed off successfully.
+  async function handlePrintVendorInvoice(order, vendor) {
+    const fileName =
+      vendor === "transbec"
+        ? transbecPdfName(order)
+        : vendor === "cbk"
+        ? order?.cbkInvoiceFile
+        : vendor === "bestbuy-credit"
+        ? order?.bestbuyCreditFile
+        : order?.bestbuyInvoiceFile;
+    const setError =
+      vendor === "transbec" ? setTransbecError : vendor === "cbk" ? setCbkError : setBestbuyError;
+    if (!fileName || !api?.printInvoiceSilent || !order?.reference) return;
+    const printKey = `${vendor}:${order.reference}`;
+    try {
+      setInvoicePrintingRef(printKey);
+      setError("");
+      const res = await api.printInvoiceSilent(fileName);
+      if (!res?.ok) {
+        throw new Error(res?.error || "Failed to print invoice.");
+      }
+
+      const field =
+        vendor === "transbec"
+          ? "transbecInvoicePrinted"
+          : vendor === "cbk"
+          ? "cbkInvoicePrinted"
+          : vendor === "bestbuy-credit"
+          ? "bestbuyCreditInvoicePrinted"
+          : "bestbuyInvoicePrinted";
+      updateOrderByKeyAndSave(order.reference, { [field]: true, [`${field}At`]: new Date().toISOString() });
+    } catch (e) {
+      console.error(`[vendor] failed to print ${vendor} invoice`, e);
+      setError(e?.message || "Failed to print invoice.");
+    } finally {
+      setInvoicePrintingRef("");
+    }
+  }
+
   async function handleAddOutstanding() {
     if (!api?.addOrdersToOutstanding) return;
     try {
@@ -2037,7 +3385,7 @@ export default function App() {
 
       // Pull fresh outstanding items immediately (fs.watch can be skipped while editing)
       const latestItems = await api.readItems();
-      const normItems = normalizeItems(latestItems || []);
+      const normItems = filterPendingDeleted(normalizeItems(latestItems || []));
       setItems((prev) => {
         const merged = mergeItems(prev, normItems);
         lastSavedRef.current = JSON.stringify(merged);
@@ -2105,75 +3453,117 @@ export default function App() {
     }
   }
 
+  // Whenever either Sage flow is on, subscribe to orders.json updates pushed
+  // from main (the main process owns the file watcher itself) and do one read.
+  const sageAnyEnabled = sagePoEnabled || sageInvoiceEnabled;
   useEffect(() => {
-    if (!api?.watchOrders || !api?.onOrdersUpdated) {
-      if (sageIntegrationEnabled) {
-        setSageWatchError("Orders watching is unavailable in this environment.");
-      }
-      return;
-    }
-
-    let cancelled = false;
-    let offOrdersUpdated = null;
-
-    if (!sageIntegrationEnabled) {
+    if (!api?.onOrdersUpdated) return;
+    if (!sageAnyEnabled) {
       setSageReadyOrders([]);
-      setSageWatchError("");
-      api.watchOrders(false).catch(() => {});
+      setSageInvoiceReadyOrders([]);
       return;
     }
-
-    setSageWatchError("");
-    offOrdersUpdated = api.onOrdersUpdated((arr) => handleOrdersUpdatedExternally(arr));
-
-    async function bootstrapWatch() {
+    let cancelled = false;
+    const offOrdersUpdated = api.onOrdersUpdated((arr) => handleOrdersUpdatedExternally(arr));
+    (async () => {
       try {
-        const res = await api.watchOrders(true);
-        if (res && !res.ok) {
-          if (!cancelled) {
-            if (res.error === 'sage-locked') {
-              setSageWatchError(`Sage Interface is active on another machine (${res.lockedBy || 'unknown'}). Turn it off there first.`);
-            } else {
-              setSageWatchError(res.error || "Failed to watch orders file.");
-            }
-            setSageIntegrationEnabled(false);
-          }
-          return;
-        }
-        const latest = await api.readOrders();
-        if (!cancelled) {
-          handleOrdersUpdatedExternally(latest);
-        }
+        const latest = await api.readOrders?.();
+        if (!cancelled) handleOrdersUpdatedExternally(latest);
       } catch (e) {
-        console.error("[orders] watch error", e);
-        if (!cancelled) setSageWatchError(e?.message || "Failed to watch orders file.");
+        console.error("[orders] read error", e);
       }
-    }
-    bootstrapWatch();
-
+    })();
     return () => {
       cancelled = true;
-      if (offOrdersUpdated) offOrdersUpdated();
-      api.watchOrders(false).catch(() => {});
+      offOrdersUpdated?.();
     };
-  }, [sageIntegrationEnabled, ordersDirty]);
+  }, [sageAnyEnabled, ordersDirty]);
 
-  // Subscribe to sage lock changes pushed from main process
+  // Purchase-order processing: claim/release the cross-machine lock.
+  useEffect(() => {
+    if (!api?.setSagePoActive) {
+      if (sagePoEnabled) setSageWatchError("Sage is unavailable in this environment.");
+      return;
+    }
+    let cancelled = false;
+    if (!sagePoEnabled) {
+      setSageWatchError("");
+      api.setSagePoActive(false).catch(() => {});
+      return;
+    }
+    setSageWatchError("");
+    (async () => {
+      try {
+        const res = await api.setSagePoActive(true);
+        if (res && !res.ok && !cancelled) {
+          if (res.error === 'sage-locked') {
+            setSageWatchError(`Sage purchase orders are active on another machine (${res.lockedBy || 'unknown'}). Turn it off there first.`);
+          } else {
+            setSageWatchError(res.error || "Failed to enable Sage purchase orders.");
+          }
+          setSagePoEnabled(false);
+        }
+      } catch (e) {
+        console.error("[sage-po] enable error", e);
+        if (!cancelled) setSageWatchError(e?.message || "Failed to enable Sage purchase orders.");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [sagePoEnabled]);
+
+  // Invoice processing: local only, no lock.
+  useEffect(() => {
+    if (!api?.setSageInvoiceActive) {
+      if (sageInvoiceEnabled) setSageInvoiceError("Sage is unavailable in this environment.");
+      return;
+    }
+    if (!sageInvoiceEnabled) {
+      setSageInvoiceError("");
+      api.setSageInvoiceActive(false).catch(() => {});
+      return;
+    }
+    setSageInvoiceError("");
+    api.setSageInvoiceActive(true).catch((e) => {
+      console.error("[sage-invoice] enable error", e);
+      setSageInvoiceError(e?.message || "Failed to enable Sage invoices.");
+      setSageInvoiceEnabled(false);
+    });
+  }, [sageInvoiceEnabled]);
+
+  // Subscribe to sage lock changes pushed from main process (purchase orders only)
   useEffect(() => {
     if (!api?.onSageLockChanged) return;
     const off = api.onSageLockChanged((data) => {
-      setSageLockInfo(data ? { lock: data.lock, ownMachineId: data.ownMachineId } : null);
-      if (data?.lockedByOther && sageIntegrationEnabled) {
-        setSageIntegrationEnabled(false);
-        setSageWatchError(`Sage Interface was claimed by ${data.lock?.machineId || 'another machine'}.`);
+      setSageLockInfo(data ? { lock: data.lock, lockIsLive: data.lockIsLive, ownMachineId: data.ownMachineId } : null);
+      if (data?.forcedOff && sagePoEnabled) {
+        setSagePoEnabled(false);
+        setSageWatchError(`Sage purchase orders were claimed by ${data.lock?.machineId || 'another machine'}.`);
       }
     });
     // Load initial lock state
     api.getSageLock?.().then((res) => {
-      if (res?.ok) setSageLockInfo({ lock: res.lock, ownMachineId: res.ownMachineId });
+      if (res?.ok) setSageLockInfo({ lock: res.lock, lockIsLive: res.lockIsLive, ownMachineId: res.ownMachineId });
     }).catch(() => {});
     return () => off?.();
-  }, []);
+  }, [sagePoEnabled]);
+
+  // A crashed lock-holder stops writing the lock file, so no watcher event fires
+  // when its heartbeat goes stale. While a foreign live lock is shown, re-poll so
+  // the "held by X" state clears on its own once the lock expires.
+  useEffect(() => {
+    const foreignLive =
+      sageLockInfo?.lockIsLive &&
+      sageLockInfo?.lock?.machineId &&
+      sageLockInfo?.ownMachineId &&
+      sageLockInfo.lock.machineId !== sageLockInfo.ownMachineId;
+    if (!foreignLive || !api?.getSageLock) return;
+    const id = setInterval(() => {
+      api.getSageLock().then((res) => {
+        if (res?.ok) setSageLockInfo({ lock: res.lock, lockIsLive: res.lockIsLive, ownMachineId: res.ownMachineId });
+      }).catch(() => {});
+    }, 15000);
+    return () => clearInterval(id);
+  }, [sageLockInfo?.lockIsLive, sageLockInfo?.lock?.machineId, sageLockInfo?.ownMachineId]);
 
   // ---- Bubble edit locks ----
   const BUBBLE_LOCK_STALE_MS = 10000;
@@ -2447,11 +3837,15 @@ export default function App() {
             ordersArchiveError={ordersArchiveError}
             archiveCleanupDays={archiveCleanupDays}
             setArchiveCleanupDays={setArchiveCleanupDays}
-            sageIntegrationEnabled={sageIntegrationEnabled}
-            setSageIntegrationEnabled={handleSageIntegrationToggleClick}
+            sagePoEnabled={sagePoEnabled}
+            onToggleSagePo={handleSagePoToggleClick}
+            sageInvoiceEnabled={sageInvoiceEnabled}
+            onToggleSageInvoice={handleSageInvoiceToggleClick}
             sageLockInfo={sageLockInfo}
             sageReadyOrders={sageReadyOrders}
+            sageInvoiceReadyOrders={sageInvoiceReadyOrders}
             sageWatchError={sageWatchError}
+            sageInvoiceError={sageInvoiceError}
           />
         ) : isBubbleFlowView ? (
           <>
@@ -2587,7 +3981,57 @@ export default function App() {
             onMarkComplete={handleMarkComplete}
             onReconcileTotals={handleReconcileTotals}
             onArchiveOrder={handleArchiveOrder}
+            onDeleteOrder={handleDeleteEpicorOrder}
             hasSearch={hasSearch}
+            onOpenEpicor={handleOpenEpicor}
+            onConfirmOrderEdit={(key) => updateOrderByKeyAndSave(key, {})}
+            epicorOpening={epicorOpening}
+            epicorStatus={epicorStatus}
+            epicorError={epicorError}
+            onViewEpicorInvoiceImage={handleViewEpicorInvoiceImage}
+            onVerifyEpicorInvoice={handleOpenEpicorReview}
+            onFetchTransbecInvoices={handleFetchTransbecInvoices}
+            transbecFetching={transbecFetching}
+            transbecStatus={transbecStatus}
+            transbecError={transbecError}
+            onViewTransbecInvoiceImage={handleViewTransbecInvoiceImage}
+            onVerifyTransbecInvoice={handleOpenEpicorReview}
+            onPrintTransbecInvoice={(order) => handlePrintVendorInvoice(order, "transbec")}
+            onFetchBestbuyInvoices={handleFetchBestbuyInvoices}
+            bestbuyFetching={bestbuyFetching}
+            bestbuyStatus={bestbuyStatus}
+            bestbuyError={bestbuyError}
+            onViewBestbuyInvoiceImage={handleViewBestbuyInvoiceImage}
+            onVerifyBestbuyInvoice={handleOpenEpicorReview}
+            onPrintBestbuyInvoice={(order) => handlePrintVendorInvoice(order, "bestbuy")}
+            onViewBestbuyCreditInvoiceImage={handleViewBestbuyCreditInvoiceImage}
+            onPrintBestbuyCreditInvoice={(order) => handlePrintVendorInvoice(order, "bestbuy-credit")}
+            onFetchCbkInvoices={handleFetchCbkInvoices}
+            cbkFetching={cbkFetching}
+            cbkStatus={cbkStatus}
+            cbkError={cbkError}
+            onViewCbkInvoiceImage={handleViewCbkInvoiceImage}
+            onVerifyCbkInvoice={handleOpenEpicorReview}
+            onPrintCbkInvoice={(order) => handlePrintVendorInvoice(order, "cbk")}
+            invoicePrintingRef={invoicePrintingRef}
+            onUpdateInvoiceTrigger={handleUpdateInvoiceTrigger}
+          />
+        ) : currentView === "epicor" ? (
+          <EpicorView
+            onScan={handleScanEpicorRange}
+            scanning={epicorScanning}
+            results={epicorScanInvoices}
+            error={epicorScanError}
+            statusLog={epicorScanLog}
+            scannedCount={epicorScanCounts.scanned}
+            unknownCount={epicorScanCounts.unknown}
+            onViewInvoiceImage={handleViewEpicorInvoiceImage}
+            onCreateOrder={handleCreateOrderFromEpicorInvoice}
+            onRemoveOrder={handleRemoveEpicorOrder}
+            onRescanInvoice={handleRescanEpicorInvoice}
+            onLoadScanned={handleLoadEpicorScanned}
+            assignableOrders={assignableEpicorOrders}
+            onAssignOrder={handleAssignEpicorInvoiceToOrder}
           />
         ) : currentView === "archive-search" ? (
           <ArchiveSearchView
@@ -2613,7 +4057,7 @@ export default function App() {
               if (res?.ok) {
                 try {
                   const latest = await api.readItems();
-                  const norm = normalizeItems(latest || []);
+                  const norm = filterPendingDeleted(normalizeItems(latest || []));
                   setItems((prev) => {
                     const merged = mergeItems(prev, norm);
                     lastSavedRef.current = JSON.stringify(merged);
@@ -2844,6 +4288,145 @@ export default function App() {
                 className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm"
               >
                 Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {epicorReviewOrder && (
+        <div className="fixed inset-0 z-[5000] bg-slate-900/60 flex items-center justify-center px-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-[95vw] p-6 flex flex-col gap-4 max-h-[95vh]">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-semibold text-slate-800">
+                Verify Invoice — {epicorReviewOrder.reference}
+              </h2>
+              <button className="text-slate-500 hover:text-slate-700" onClick={handleCloseEpicorReview}>
+                x
+              </button>
+            </div>
+            <p className="text-sm text-slate-500">
+              Compare the invoice against the stored values below. Edit either field if it was read
+              wrong, then confirm.
+            </p>
+            {epicorReviewError && (
+              <div className="rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+                {epicorReviewError}
+              </div>
+            )}
+            <div className="grid gap-4 lg:grid-cols-[1fr,320px] overflow-auto">
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 flex items-center justify-center overflow-auto min-h-[400px] max-h-[85vh]">
+                {epicorReviewLoading ? (
+                  <div className="text-sm text-slate-500 p-6">Loading invoice...</div>
+                ) : epicorReviewImageDataUrl.startsWith("data:application/pdf") ? (
+                  // Transbec invoices are shown as the real PDF (Chromium's viewer);
+                  // rasterizing them to an image drops most of the page.
+                  <iframe
+                    src={epicorReviewImageDataUrl}
+                    title="Invoice PDF"
+                    className="w-full h-[85vh] border-0"
+                  />
+                ) : epicorReviewImageDataUrl ? (
+                  <img src={epicorReviewImageDataUrl} alt="Scanned invoice" className="max-w-full max-h-[85vh] h-auto" />
+                ) : (
+                  <div className="text-sm text-slate-500 p-6">No invoice available.</div>
+                )}
+              </div>
+              <div className="flex flex-col gap-4">
+                <div className="flex flex-col gap-1">
+                  <label className="text-sm uppercase tracking-wide text-slate-500">Invoice #</label>
+                  <input
+                    className="rounded-lg border border-slate-300 px-4 py-3 text-2xl font-semibold"
+                    value={epicorReviewInvoiceDraft}
+                    onChange={(e) => setEpicorReviewInvoiceDraft(e.target.value)}
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-sm uppercase tracking-wide text-slate-500">Billed Total</label>
+                  <input
+                    className="rounded-lg border border-slate-300 px-4 py-3 text-2xl font-semibold"
+                    value={epicorReviewTotalDraft}
+                    onChange={(e) => setEpicorReviewTotalDraft(e.target.value)}
+                  />
+                </div>
+
+                {epicorReviewOrder.epicorOnly && (
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                      <label className="text-sm uppercase tracking-wide text-slate-500">
+                        Line Items ({epicorReviewLinesDraft.length})
+                      </label>
+                      <button
+                        type="button"
+                        className="text-xs font-semibold text-emerald-700 border border-emerald-200 rounded-full px-2 py-1 hover:bg-emerald-50"
+                        onClick={addEpicorReviewLine}
+                      >
+                        + Add line
+                      </button>
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      Read by OCR — check each against the invoice and fix the part #, quantity, or
+                      description as needed.
+                    </p>
+                    {epicorReviewLinesDraft.length === 0 && (
+                      <div className="text-xs text-slate-400 border border-dashed border-slate-200 rounded-lg p-3">
+                        No line items were read. Use “Add line” to enter them from the invoice.
+                      </div>
+                    )}
+                    <div className="flex flex-col gap-2 max-h-[45vh] overflow-auto pr-1">
+                      {epicorReviewLinesDraft.map((l, idx) => (
+                        <div key={idx} className="rounded-xl border border-slate-200 p-2 flex flex-col gap-1.5">
+                          <input
+                            className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm font-semibold"
+                            placeholder="Part #"
+                            value={l.part}
+                            onChange={(e) => updateEpicorReviewLine(idx, "part", e.target.value)}
+                          />
+                          <input
+                            className="rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+                            placeholder="Description"
+                            value={l.partDescription}
+                            onChange={(e) => updateEpicorReviewLine(idx, "partDescription", e.target.value)}
+                          />
+                          <div className="flex items-center gap-2">
+                            <input
+                              className="w-16 rounded-lg border border-slate-300 px-2 py-1.5 text-sm text-center"
+                              placeholder="Qty"
+                              value={l.quantity}
+                              onChange={(e) => updateEpicorReviewLine(idx, "quantity", e.target.value)}
+                            />
+                            {l.costPrice !== "" && l.costPrice !== undefined && (
+                              <span className="text-xs text-slate-400">@ ${l.costPrice}</span>
+                            )}
+                            <button
+                              type="button"
+                              className="ml-auto text-xs font-semibold text-red-600 hover:text-red-700"
+                              onClick={() => removeEpicorReviewLine(idx)}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                className="px-4 py-2 rounded-full border border-slate-300 text-slate-700"
+                onClick={handleCloseEpicorReview}
+                disabled={epicorReviewSaving}
+              >
+                Cancel
+              </button>
+              <button
+                className="px-5 py-2 rounded-full bg-indigo-600 text-white shadow hover:bg-indigo-700 disabled:opacity-60"
+                onClick={handleConfirmEpicorReview}
+                disabled={epicorReviewSaving}
+              >
+                {epicorReviewSaving ? "Saving..." : "Confirm"}
               </button>
             </div>
           </div>

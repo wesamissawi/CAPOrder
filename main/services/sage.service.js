@@ -6,7 +6,8 @@ const createSageService = (deps) => {
     readOrders,
     applySageResult,
     applyInvoiceResult,
-    getSageIntegrationActive,
+    getSagePoActive,
+    getSageInvoiceActive,
   } = deps;
 
   let sageProcessing = false;
@@ -19,7 +20,7 @@ const createSageService = (deps) => {
   const { runSagePurchase, runSageReconcile, runUpdateInvoice, runSageSalesInvoice } = createSageActions(deps);
 
   async function processSageOrdersQueue() {
-    if (!getSageIntegrationActive()) return;
+    if (!getSagePoActive()) return;
     if (sageProcessing) {
       sagePendingRun = true;
       return;
@@ -75,7 +76,7 @@ const createSageService = (deps) => {
       console.error("[sage] queue error", e);
     } finally {
       sageProcessing = false;
-      if (sagePendingRun && getSageIntegrationActive()) {
+      if (sagePendingRun && getSagePoActive()) {
         sagePendingRun = false;
         setTimeout(() => processSageOrdersQueue(), 200);
       } else {
@@ -85,7 +86,7 @@ const createSageService = (deps) => {
   }
 
   async function processInvoiceUpdateQueue() {
-    if (!getSageIntegrationActive()) return;
+    if (!getSageInvoiceActive()) return;
     if (invoiceProcessing) {
       invoicePendingRun = true;
       return;
@@ -115,7 +116,7 @@ const createSageService = (deps) => {
       console.error("[sage-invoice] queue error", e);
     } finally {
       invoiceProcessing = false;
-      if (invoicePendingRun && getSageIntegrationActive()) {
+      if (invoicePendingRun && getSageInvoiceActive()) {
         invoicePendingRun = false;
         setTimeout(() => processInvoiceUpdateQueue(), 200);
       } else {
@@ -125,13 +126,9 @@ const createSageService = (deps) => {
   }
 
   function scheduleSageProcessing() {
-    if (!getSageIntegrationActive()) return;
-    if (sageProcessing) {
-      sagePendingRun = true;
-      return;
-    }
-    processSageOrdersQueue();
-    processInvoiceUpdateQueue();
+    // Each queue self-gates on its own active flag, so just kick both.
+    if (getSagePoActive()) processSageOrdersQueue();
+    if (getSageInvoiceActive()) processInvoiceUpdateQueue();
   }
 
   function resetSageQueue() {

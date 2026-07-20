@@ -11,8 +11,10 @@ const createWatchersService = (deps) => {
     readSharedBubbleData,
     scheduleSageProcessing,
     getSageIntegrationActive,
+    getSagePoActive,
     getSageLockFile,
     readSageLock,
+    sageLockIsLive,
     getMachineId,
     onSageLockForcedOff,
     getBubbleLocksFile,
@@ -91,7 +93,16 @@ const createWatchersService = (deps) => {
     files.forEach((file) => {
       ensureDataFileAt(file);
       const w = createFileWatcher(file, () => {
-        const arr = readItems();
+        // A failed/partial read (e.g. another machine mid-write over SMB) must
+        // never reach the renderer: it would look like items were deleted and
+        // a later save would erase them for real. Skip the push instead.
+        let arr;
+        try {
+          arr = readItems();
+        } catch (e) {
+          console.error('[main] watch -> items read failed, skipping push', e?.message || e);
+          return;
+        }
         const win = getWin();
         if (win && !win.isDestroyed()) {
           win.webContents.send('items:updated', arr);
@@ -126,7 +137,13 @@ const createWatchersService = (deps) => {
     } catch {}
     ensureDataFileAt(file);
     ordersWatcher = createFileWatcher(file, () => {
-      const arr = readOrders();
+      let arr;
+      try {
+        arr = readOrders();
+      } catch (e) {
+        console.error('[main] watch -> orders read failed, skipping push', e?.message || e);
+        return;
+      }
       const win = getWin();
       if (win && !win.isDestroyed()) {
         win.webContents.send('orders:updated', arr);
@@ -158,16 +175,19 @@ const createWatchersService = (deps) => {
       const ownId = getMachineId();
       const win = getWin();
       const lockedByOther = lock && lock.machineId && lock.machineId !== ownId;
-      if (lockedByOther && getSageIntegrationActive()) {
-        console.log('[sage-lock] another machine claimed the lock — forcing local OFF', lock.machineId);
+      const poActive = getSagePoActive ? getSagePoActive() : false;
+      const forcedOff = Boolean(lockedByOther && poActive);
+      if (forcedOff) {
+        console.log('[sage-lock] another machine claimed the lock — forcing local PO OFF', lock.machineId);
         onSageLockForcedOff?.();
       }
       if (win && !win.isDestroyed()) {
         win.webContents.send('sage:lock-changed', {
           lock: lock || null,
+          lockIsLive: Boolean(lock && sageLockIsLive?.(lock)),
           ownMachineId: ownId,
           lockedByOther: Boolean(lockedByOther),
-          forcedOff: Boolean(lockedByOther && getSageIntegrationActive()),
+          forcedOff,
         });
       }
     }, 'sage-lock');

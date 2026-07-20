@@ -110,8 +110,13 @@ savePurchaseToFiles(pathToFile, warehouse) {
         return ReturnFalse("Failed writing order file:`n" . destPath)
 
     ; ---------- Update outstanding_items.json (append objects) ----------
+    ; SAFETY: a file that EXISTS but cannot be read/parsed (locked, mid-write
+    ; by the app, corrupt) must ABORT — treating it as empty and rewriting it
+    ; would erase every existing outstanding item.
     outstandingPath := A_ScriptDir . "\..\Order_Items\outstanding_items.json"
-    outstanding := LoadJSONArray(outstandingPath) ; [] if file missing/empty
+    outstanding := LoadJSONArrayStrict(outstandingPath, loadOk)
+    if (!loadOk)
+        return ReturnFalse("outstanding_items.json exists but could not be read/parsed — aborting to avoid data loss.")
 
     for idx, li in transformedLines {
         qtyInt := ToInt(li["quantity_ordered"])
@@ -144,17 +149,25 @@ savePurchaseToFiles(pathToFile, warehouse) {
 ; Helpers (self-contained)
 ; =========================
 
-; Write any AHK object as JSON to file (UTF-8, overwrite)
+; Write any AHK object as JSON to file (UTF-8), atomically:
+; write to a temp file first, then replace the target with FileMove.
+; A truncate-then-write (FileOpen "w") left a window where concurrent readers
+; (the Electron app watching the same shared folder) saw an empty/partial file.
 WriteJSON(path, obj) {
     try {
         json := new JSON()
-        ; dump normally — no extra "UTF-8" string
         text := json.Dump(obj, 1)  ; 1 = pretty (optional)
-        f := FileOpen(path, "w", "UTF-8")  ; proper encoding
+        tmpPath := path . ".tmp." . A_TickCount
+        f := FileOpen(tmpPath, "w", "UTF-8")
         if !IsObject(f)
             return false
         f.Write(text)
         f.Close()
+        FileMove, %tmpPath%, %path%, 1  ; 1 = overwrite
+        if (ErrorLevel) {
+            FileDelete, %tmpPath%
+            return false
+        }
         return true
     } catch e {
         return false
@@ -162,7 +175,9 @@ WriteJSON(path, obj) {
 }
 
 
-; Load a JSON array file, or return [] on any issue
+; Load a JSON array file, or return [] on any issue.
+; DANGEROUS for read-modify-write flows: cannot tell "empty" from "unreadable".
+; Kept for callers that only read; use LoadJSONArrayStrict before rewriting a file.
 LoadJSONArray(path) {
     if !FileExist(path)
         return []  ; new
@@ -179,10 +194,44 @@ LoadJSONArray(path) {
         data := json.Load(content)
         if IsObject(data)
             return data
-    } catch e { 
+    } catch e {
         ; handle error (optional)
     }
     return []  ; fallback if corrupt
+}
+
+; Strict variant for read-modify-write: a missing or blank file is a valid
+; empty list (ok := true), but a file that exists and has content which cannot
+; be read or parsed sets ok := false so the caller can ABORT instead of
+; overwriting real data. Retries a few times to ride out a concurrent writer.
+LoadJSONArrayStrict(path, ByRef ok) {
+    ok := true
+    if !FileExist(path)
+        return []  ; new file — legitimately empty
+    Loop, 4 {
+        content := ""
+        readFailed := false
+        try {
+            content := ReadFileContent(path)
+        } catch e {
+            readFailed := true
+        }
+        if (!readFailed) {
+            if (Trim(content) = "")
+                return []  ; blank file — legitimately empty
+            try {
+                json := new JSON()
+                data := json.Load(content)
+                if IsObject(data)
+                    return data
+            } catch e {
+                ; parse failed — fall through to retry
+            }
+        }
+        Sleep, 200
+    }
+    ok := false
+    return []
 }
 
 EnsureDir(dirPath) {

@@ -73,10 +73,30 @@ export default function SettingsView() {
   const [proforceStore, setProforceStore] = useState("");
   const [proforceCustomer, setProforceCustomer] = useState("");
   const [proforcePass, setProforcePass] = useState("");
+  const [epicorUser, setEpicorUser] = useState("");
+  const [epicorPass, setEpicorPass] = useState("");
+  const [gmailClientId, setGmailClientId] = useState("");
+  const [gmailClientSecret, setGmailClientSecret] = useState("");
+  const [transbecInvoiceSender, setTransbecInvoiceSender] = useState("");
+  const [transbecInvoiceSubject, setTransbecInvoiceSubject] = useState("");
+  const [bestbuyInvoiceSender, setBestbuyInvoiceSender] = useState("");
+  const [bestbuyInvoiceSubject, setBestbuyInvoiceSubject] = useState("BESTBUY INVOICES FOR TODAY");
+  const [bestbuyCreditInvoiceSender, setBestbuyCreditInvoiceSender] = useState("bestautosolution.ca");
+  const [bestbuyCreditInvoiceSubject, setBestbuyCreditInvoiceSubject] = useState("invoice");
+  const [cbkInvoiceSender, setCbkInvoiceSender] = useState("branch_05@cbkauto.com");
+  const [cbkInvoiceSubject, setCbkInvoiceSubject] = useState("Invoice");
+  const [gmailConnected, setGmailConnected] = useState(false);
+  const [gmailEmail, setGmailEmail] = useState("");
+  const [gmailConnecting, setGmailConnecting] = useState(false);
+  const [gmailStatusMsg, setGmailStatusMsg] = useState("");
   const [credStatus, setCredStatus] = useState("");
   const [credError, setCredError] = useState("");
   const [credSaving, setCredSaving] = useState(false);
   const [timeoutError, setTimeoutError] = useState("");
+  const [invoicePrinter, setInvoicePrinter] = useState("");
+  const [printerOptions, setPrinterOptions] = useState([]);
+  const [printersLoading, setPrintersLoading] = useState(false);
+  const [printersError, setPrintersError] = useState("");
 
   const fileEntries = useMemo(() => {
     if (!summary?.files) return [];
@@ -188,8 +208,23 @@ export default function SettingsView() {
           setProforceStore(cfg.PROFORCE_STORE || "");
           setProforceCustomer(cfg.PROFORCE_CUSTOMER || "");
           setProforcePass(cfg.PROFORCE_PASS || "");
+          setEpicorUser(cfg.EPICOR_USER || "");
+          setEpicorPass(cfg.EPICOR_PASS || "");
+          setGmailClientId(cfg.GMAIL_CLIENT_ID || "");
+          setGmailClientSecret(cfg.GMAIL_CLIENT_SECRET || "");
+          setTransbecInvoiceSender(cfg.TRANSBEC_INVOICE_SENDER || "");
+          setTransbecInvoiceSubject(cfg.TRANSBEC_INVOICE_SUBJECT || "");
+          setBestbuyInvoiceSender(cfg.BESTBUY_INVOICE_SENDER || "");
+          setBestbuyInvoiceSubject(cfg.BESTBUY_INVOICE_SUBJECT || "BESTBUY INVOICES FOR TODAY");
+          setBestbuyCreditInvoiceSender(cfg.BESTBUY_CREDIT_INVOICE_SENDER || "bestautosolution.ca");
+          setBestbuyCreditInvoiceSubject(cfg.BESTBUY_CREDIT_INVOICE_SUBJECT || "invoice");
+          setCbkInvoiceSender(cfg.CBK_INVOICE_SENDER || "branch_05@cbkauto.com");
+          setCbkInvoiceSubject(cfg.CBK_INVOICE_SUBJECT || "Invoice");
+          setInvoicePrinter(cfg.INVOICE_PRINTER || "");
           setCredStatus("");
           setCredError("");
+          refreshGmailStatus();
+          refreshPrinters();
         } else if (credRes?.error) {
           setCredError(credRes.error);
         }
@@ -282,6 +317,19 @@ export default function SettingsView() {
         PROFORCE_STORE: proforceStore || "",
         PROFORCE_CUSTOMER: proforceCustomer || "",
         PROFORCE_PASS: proforcePass || "",
+        EPICOR_USER: epicorUser || "",
+        EPICOR_PASS: epicorPass || "",
+        GMAIL_CLIENT_ID: gmailClientId || "",
+        GMAIL_CLIENT_SECRET: gmailClientSecret || "",
+        TRANSBEC_INVOICE_SENDER: transbecInvoiceSender || "",
+        TRANSBEC_INVOICE_SUBJECT: transbecInvoiceSubject || "",
+        BESTBUY_INVOICE_SENDER: bestbuyInvoiceSender || "",
+        BESTBUY_INVOICE_SUBJECT: bestbuyInvoiceSubject || "",
+        BESTBUY_CREDIT_INVOICE_SENDER: bestbuyCreditInvoiceSender || "",
+        BESTBUY_CREDIT_INVOICE_SUBJECT: bestbuyCreditInvoiceSubject || "",
+        CBK_INVOICE_SENDER: cbkInvoiceSender || "",
+        CBK_INVOICE_SUBJECT: cbkInvoiceSubject || "",
+        INVOICE_PRINTER: invoicePrinter || "",
       });
       if (res?.ok) {
         setCredStatus("Saved");
@@ -292,6 +340,63 @@ export default function SettingsView() {
       setCredError(e?.message || "Failed to save credentials.");
     } finally {
       setCredSaving(false);
+    }
+  }
+
+  async function refreshGmailStatus() {
+    try {
+      const res = await api.getGmailStatus?.();
+      if (res?.ok) {
+        setGmailConnected(Boolean(res.connected));
+        setGmailEmail(res.emailAddress || "");
+        if (!res.connected && res.reason === "error" && res.error) {
+          setGmailStatusMsg(res.error);
+        } else {
+          setGmailStatusMsg("");
+        }
+      }
+    } catch (e) {
+      console.warn("[settings] gmail status failed", e);
+    }
+  }
+
+  async function refreshPrinters() {
+    setPrintersLoading(true);
+    setPrintersError("");
+    try {
+      const res = await api.listPrinters?.();
+      if (res?.ok) {
+        setPrinterOptions(Array.isArray(res.printers) ? res.printers : []);
+      } else {
+        setPrintersError(res?.error || "Failed to list printers.");
+      }
+    } catch (e) {
+      setPrintersError(e?.message || "Failed to list printers.");
+    } finally {
+      setPrintersLoading(false);
+    }
+  }
+
+  async function handleConnectGmail() {
+    setGmailConnecting(true);
+    setGmailStatusMsg("");
+    try {
+      // Persist client id/secret/sender/subject first so connectGmail can read them.
+      await handleSaveCreds();
+      const res = await api.connectGmail?.();
+      if (res?.ok) {
+        setGmailConnected(true);
+        setGmailEmail(res.emailAddress || "");
+        setGmailStatusMsg(
+          res.emailAddress ? `Connected as ${res.emailAddress}` : "Gmail connected."
+        );
+      } else {
+        setGmailStatusMsg(res?.error || "Failed to connect Gmail.");
+      }
+    } catch (e) {
+      setGmailStatusMsg(e?.message || "Failed to connect Gmail.");
+    } finally {
+      setGmailConnecting(false);
     }
   }
 
@@ -432,7 +537,7 @@ export default function SettingsView() {
             <div>
               <h2 className="text-xl font-semibold text-slate-800">Scraper Credentials</h2>
               <p className="text-sm text-slate-500">
-                Stored per-machine in app data. Used by World, Transbec, CBK, BestBuy, and Proforce scrapers.
+                Stored per-machine in app data. Used by World, Transbec, CBK, BestBuy, Proforce, and Epicor scrapers.
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -572,6 +677,216 @@ export default function SettingsView() {
                 className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
               />
             </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Epicor Username</label>
+              <input
+                type="text"
+                value={epicorUser}
+                onChange={(e) => setEpicorUser(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Epicor Password</label>
+              <input
+                type="password"
+                value={epicorPass}
+                onChange={(e) => setEpicorPass(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-semibold text-slate-800">Transbec Invoices (Gmail)</h2>
+              <p className="text-sm text-slate-500">
+                Pulls Transbec invoice numbers and totals from invoice emails. Requires a Google
+                Cloud “Desktop app” OAuth client — paste its Client ID and Secret, then connect.
+              </p>
+            </div>
+            <span
+              className={`text-xs font-semibold ${
+                gmailConnected ? "text-emerald-600" : "text-amber-600"
+              }`}
+            >
+              {gmailConnected ? `Connected${gmailEmail ? ` · ${gmailEmail}` : ""}` : "Not connected"}
+            </span>
+          </div>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Gmail OAuth Client ID</label>
+              <input
+                type="text"
+                value={gmailClientId}
+                onChange={(e) => setGmailClientId(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Gmail OAuth Client Secret</label>
+              <input
+                type="password"
+                value={gmailClientSecret}
+                onChange={(e) => setGmailClientSecret(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Invoice Sender (from:)</label>
+              <input
+                type="text"
+                placeholder="e.g. noreply@transbec.com"
+                value={transbecInvoiceSender}
+                onChange={(e) => setTransbecInvoiceSender(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Transbec Subject Contains</label>
+              <input
+                type="text"
+                placeholder="e.g. invoice"
+                value={transbecInvoiceSubject}
+                onChange={(e) => setTransbecInvoiceSubject(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">BestBuy Sender (from:)</label>
+              <input
+                type="text"
+                placeholder="optional — leave blank to match by subject only"
+                value={bestbuyInvoiceSender}
+                onChange={(e) => setBestbuyInvoiceSender(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">BestBuy Subject Contains</label>
+              <input
+                type="text"
+                placeholder="BESTBUY INVOICES FOR TODAY"
+                value={bestbuyInvoiceSubject}
+                onChange={(e) => setBestbuyInvoiceSubject(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">BestBuy Credit Invoice Sender (from:)</label>
+              <input
+                type="text"
+                placeholder="bestautosolution.ca"
+                value={bestbuyCreditInvoiceSender}
+                onChange={(e) => setBestbuyCreditInvoiceSender(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">BestBuy Credit Invoice Subject Contains</label>
+              <input
+                type="text"
+                placeholder="invoice"
+                value={bestbuyCreditInvoiceSubject}
+                onChange={(e) => setBestbuyCreditInvoiceSubject(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+              <p className="text-xs text-slate-400">
+                Emails with "Order No." in the subject are always ignored, even if this matches them too.
+              </p>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">CBK Sender (from:)</label>
+              <input
+                type="text"
+                placeholder="branch_05@cbkauto.com"
+                value={cbkInvoiceSender}
+                onChange={(e) => setCbkInvoiceSender(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">CBK Subject Contains</label>
+              <input
+                type="text"
+                placeholder="Invoice"
+                value={cbkInvoiceSubject}
+                onChange={(e) => setCbkInvoiceSubject(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleConnectGmail}
+              disabled={gmailConnecting}
+              className="px-4 py-2 rounded-lg text-sm font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60"
+            >
+              {gmailConnecting ? "Connecting…" : gmailConnected ? "Reconnect Gmail" : "Connect Gmail"}
+            </button>
+            {gmailStatusMsg && (
+              <span className="text-xs text-slate-600">{gmailStatusMsg}</span>
+            )}
+          </div>
+          <p className="text-xs text-slate-400">
+            Connecting saves these fields, then opens Google in your browser to authorize read-only
+            access. Only the invoice sender/subject you set above are searched.
+          </p>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-semibold text-slate-800">Invoice Printing</h2>
+              <p className="text-sm text-slate-500">
+                The printer used by the "Print Invoice" button in Order Management. Prints page 1
+                of the invoice directly — no dialog, same as Sage's print button.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={refreshPrinters}
+              disabled={printersLoading}
+              className="px-3 py-2 rounded-lg text-sm font-semibold border bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+            >
+              {printersLoading ? "Refreshing…" : "Refresh Printers"}
+            </button>
+          </div>
+          <div className="flex flex-col gap-1 max-w-sm">
+            <label className="text-xs uppercase tracking-wide text-slate-500">Printer</label>
+            <select
+              value={invoicePrinter}
+              onChange={(e) => setInvoicePrinter(e.target.value)}
+              className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+            >
+              <option value="">System default</option>
+              {printerOptions.map((p) => (
+                <option key={p.name} value={p.name}>
+                  {p.displayName}
+                  {p.isDefault ? " (default)" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+          {printersError && <p className="text-xs text-red-600">{printersError}</p>}
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleSaveCreds}
+              disabled={credSaving}
+              className="px-4 py-2 rounded-lg text-sm font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60"
+            >
+              {credSaving ? "Saving..." : "Save"}
+            </button>
+            {credStatus && <span className="text-xs text-emerald-600">{credStatus}</span>}
+            {credError && <span className="text-xs text-red-600">{credError}</span>}
           </div>
         </div>
       </Card>

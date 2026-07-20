@@ -41,7 +41,8 @@
     ],
     "asarUnpack": [
       "**/node_modules/playwright/**",
-      "**/node_modules/playwright-core/**"
+      "**/node_modules/playwright-core/**",
+      "**/node_modules/pdf-to-printer/**"
     ]
   },
   "devDependencies": {
@@ -64,6 +65,13 @@
     "dotenv": "^17.2.3",
     "electron-squirrel-startup": "^1.0.1",
     "electron-updater": "^6.1.8",
-    "playwright": "^1.57.0"
+    "googleapis": "^173.0.0",
+    "pdf-lib": "^1.17.1",
+    "pdf-parse": "^1.1.1",
+    "pdf-to-png-converter": "^4.1.1",
+    "pdf-to-printer": "^5.8.0",
+    "pdfjs-dist": "^6.0.227",
+    "playwright": "^1.57.0",
+    "tesseract.js": "^7.0.0"
   }
 }

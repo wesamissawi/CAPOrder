@@ -60,8 +60,6 @@ if (oldRef = "" || newRef = "") {
     ExitApp, 6
 }
 
-MsgBox, 64, Update Invoice, Old ref: %oldRef%`nNew ref: %newRef%
-
 ; Focus Sage window
 if WinExist("Purchases - Creating an Invoice") {
     WinActivate
@@ -114,5 +112,9 @@ journal_entry := GetSageTxnNumber(10)
 if (journal_entry != "") {
     FileAppend, %journal_entry%`n, *
 }
+
+; Dismiss the final Sage window/dialog left open after posting.
+Send, {Enter}
+Sleep, 500
 
 ExitApp, 0

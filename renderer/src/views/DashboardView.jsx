@@ -44,37 +44,46 @@ export default function DashboardView({
   ordersArchiveError,
   archiveCleanupDays,
   setArchiveCleanupDays,
-  sageIntegrationEnabled,
-  setSageIntegrationEnabled,
+  sagePoEnabled,
+  onToggleSagePo,
+  sageInvoiceEnabled,
+  onToggleSageInvoice,
   sageLockInfo,
   sageReadyOrders,
+  sageInvoiceReadyOrders,
   sageWatchError,
+  sageInvoiceError,
 }) {
   const lockOwner = sageLockInfo?.lock?.machineId || null;
   const ownMachineId = sageLockInfo?.ownMachineId || null;
-  const lockedByOther = lockOwner && ownMachineId && lockOwner !== ownMachineId;
+  // Only a live (still-heartbeating) lock blocks this machine; a stale one is claimable.
+  const lockedByOther = Boolean(
+    lockOwner && ownMachineId && lockOwner !== ownMachineId && sageLockInfo?.lockIsLive
+  );
   const lockIsRunning = sageLockInfo?.lock?.running === true;
+  const poReadyCount = Array.isArray(sageReadyOrders) ? sageReadyOrders.length : 0;
+  const invoiceReadyCount = Array.isArray(sageInvoiceReadyOrders) ? sageInvoiceReadyOrders.length : 0;
   return (
     <section className="grid gap-4 lg:grid-cols-2 items-start text-left">
+      {/* Purchase orders — cross-machine exclusive via the shared lock */}
       <Card className="bg-white/80">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="space-y-1">
-            <p className="text-lg font-semibold text-slate-800">Sage interface</p>
+            <p className="text-lg font-semibold text-slate-800">Sage purchase orders</p>
             <p className="text-sm text-slate-500">
-              Enable on the machine that runs Sage + AutoHotkey to respond when orders are flagged with
-              <code className="ml-1 text-indigo-700">sage_trigger: true</code>.
+              Enters flagged purchase orders into Sage on the machine running Sage + AutoHotkey. Only
+              <strong className="mx-1">one machine</strong>can run this at a time.
             </p>
-            {sageIntegrationEnabled && (
+            {sagePoEnabled && (
               <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
-                Watching orders.json — {sageReadyOrders.length} order{sageReadyOrders.length === 1 ? "" : "s"} ready
-                for Sage.
+                Watching orders.json — {poReadyCount} order{poReadyCount === 1 ? "" : "s"} ready for Sage.
               </p>
             )}
-            {lockedByOther && (
-              <p className={`text-xs rounded-xl px-3 py-2 border ${lockIsRunning ? "text-red-700 bg-red-50 border-red-200" : "text-amber-700 bg-amber-50 border-amber-200"}`}>
+            {!sagePoEnabled && lockedByOther && (
+              <p className="text-xs rounded-xl px-3 py-2 border text-amber-700 bg-amber-50 border-amber-200">
                 {lockIsRunning
-                  ? `🔒 Sage is running on ${lockOwner} — cannot enable here.`
-                  : `🔒 Sage Interface is held by ${lockOwner}. You can still take it.`}
+                  ? `🔒 Running on ${lockOwner}. Turn it off there before enabling here.`
+                  : `🔒 Held by ${lockOwner}. Turn it off there before enabling here.`}
               </p>
             )}
             {sageWatchError && (
@@ -85,17 +94,51 @@ export default function DashboardView({
           </div>
           <button
             type="button"
-            disabled={lockedByOther && lockIsRunning}
-            onClick={() => setSageIntegrationEnabled((v) => !v)}
+            disabled={!sagePoEnabled && lockedByOther}
+            onClick={onToggleSagePo}
             className={`px-4 py-2 rounded-full text-sm font-semibold border transition ${
-              sageIntegrationEnabled
+              sagePoEnabled
                 ? "bg-emerald-100 text-emerald-700 border-emerald-200"
-                : lockedByOther && lockIsRunning
+                : lockedByOther
                 ? "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed"
                 : "bg-white text-slate-700 border-slate-200"
             }`}
           >
-            {sageIntegrationEnabled ? "Sage On" : "Sage Off"}
+            {sagePoEnabled ? "POs On" : "POs Off"}
+          </button>
+        </div>
+      </Card>
+
+      {/* Invoices — local to this machine, never gated by the lock */}
+      <Card className="bg-white/80">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="space-y-1">
+            <p className="text-lg font-semibold text-slate-800">Sage invoices</p>
+            <p className="text-sm text-slate-500">
+              Sends invoice updates to Sage on <strong className="mx-1">this machine</strong>. Runs
+              independently — no cross-machine lock.
+            </p>
+            {sageInvoiceEnabled && (
+              <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
+                Watching orders.json — {invoiceReadyCount} invoice update{invoiceReadyCount === 1 ? "" : "s"} queued.
+              </p>
+            )}
+            {sageInvoiceError && (
+              <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl px-3 py-2">
+                {sageInvoiceError}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={onToggleSageInvoice}
+            className={`px-4 py-2 rounded-full text-sm font-semibold border transition ${
+              sageInvoiceEnabled
+                ? "bg-emerald-100 text-emerald-700 border-emerald-200"
+                : "bg-white text-slate-700 border-slate-200"
+            }`}
+          >
+            {sageInvoiceEnabled ? "Invoices On" : "Invoices Off"}
           </button>
         </div>
       </Card>

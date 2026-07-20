@@ -13,21 +13,30 @@ const registerItemsIpc = (ipcMain, deps) => {
     setDataFileOverride,
     LOCK_DURATION_MS,
     cleanExpiredLocks,
-    getItemsReplaceAll,
     runSageSalesInvoice,
   } = deps;
 
+  // items:read intentionally lets read failures reject the invoke — the
+  // renderer must treat that as "unknown state", never as an empty list.
   ipcMain.handle('items:read', () => readItems());
-  // ipcMain.handle('items:write', (_evt, items) => { writeItems(items); return { ok: true }; });
-  ipcMain.handle('items:write', (_evt, items) => {
-    const current = readItems();                // existing array
-    const a = JSON.stringify(current);
-    const b = JSON.stringify(items ?? []);
-    if (a !== b) {
-      const replaceAll = typeof getItemsReplaceAll === 'function' ? getItemsReplaceAll() : true;
-      writeItems(items, { replaceAll });        // only write if actually different
+  // Upsert-by-uid save. Items absent from `items` are preserved on disk;
+  // deletions happen only for the uids the renderer explicitly lists in
+  // `deletedUids`. This stops a stale/partial renderer state from erasing
+  // items it never saw.
+  ipcMain.handle('items:write', (_evt, items, deletedUids) => {
+    try {
+      const deletions = Array.isArray(deletedUids) ? deletedUids.filter(Boolean) : [];
+      const current = readItems();              // throws if any queue file is unreadable
+      const a = JSON.stringify(current);
+      const b = JSON.stringify(items ?? []);
+      if (a !== b || deletions.length > 0) {
+        writeItems(items, { replaceAll: false, deletedUids: deletions });
+      }
+      return { ok: true };
+    } catch (e) {
+      console.error('[items:write] aborted', e?.message || e);
+      return { ok: false, error: e?.message || 'Failed to save items.' };
     }
-    return { ok: true };
   });
   ipcMain.handle('items:export', async (_evt, items) => {
     const { canceled, filePath } = await dialog.showSaveDialog({
@@ -48,7 +57,10 @@ const registerItemsIpc = (ipcMain, deps) => {
     const cfg = readConfig(); cfg.dataFile = res.filePaths[0]; writeConfig(cfg);
     startWatching(getWin());
     const win = getWin();
-    if (win && !win.isDestroyed()) win.webContents.send('items:updated', readItems());
+    if (win && !win.isDestroyed()) {
+      try { win.webContents.send('items:updated', readItems()); }
+      catch (e) { console.error('[items:choose-file] read failed, not pushing', e?.message || e); }
+    }
     return { ok: true, path: res.filePaths[0] };
   });
   ipcMain.handle('items:use-default', () => {
@@ -56,12 +68,16 @@ const registerItemsIpc = (ipcMain, deps) => {
     const cfg = readConfig(); delete cfg.dataFile; writeConfig(cfg);
     startWatching(getWin());
     const win = getWin();
-    if (win && !win.isDestroyed()) win.webContents.send('items:updated', readItems());
+    if (win && !win.isDestroyed()) {
+      try { win.webContents.send('items:updated', readItems()); }
+      catch (e) { console.error('[items:use-default] read failed, not pushing', e?.message || e); }
+    }
     return { ok: true, path: getDataFile() };
   });
 
   // Acquire a 20s lock on a specific item
   ipcMain.handle('items:lock-item', (_evt, uid) => {
+    try {
     let items = readItems();
     const { items: cleaned, changed } = cleanExpiredLocks(items);
     if (changed) {
@@ -87,10 +103,15 @@ const registerItemsIpc = (ipcMain, deps) => {
     writeItems(items);
 
     return { ok: true, item: items[idx], lock_expires_at };
+    } catch (e) {
+      console.error('[items:lock-item] aborted', e?.message || e);
+      return { ok: false, reason: 'read-failed', error: e?.message };
+    }
   });
 
   // Apply an edit to a locked item and remove the lock
   ipcMain.handle('items:apply-edit', (_evt, uid, patch) => {
+    try {
     let items = readItems();
     const { items: cleaned, changed } = cleanExpiredLocks(items);
     if (changed) {
@@ -118,13 +139,22 @@ const registerItemsIpc = (ipcMain, deps) => {
 
     writeItems(items);
     return { ok: true, item: updated };
+    } catch (e) {
+      console.error('[items:apply-edit] aborted', e?.message || e);
+      return { ok: false, reason: 'read-failed', error: e?.message };
+    }
   });
 
   ipcMain.handle('items:sage-sales-invoice', async (_evt, bubbleName, customerCode, notes, paymentType) => {
     if (typeof runSageSalesInvoice !== 'function') {
       return { ok: false, code: 'not-configured', error: 'Sage sales invoice action not available.' };
     }
-    const all = readItems();
+    let all;
+    try {
+      all = readItems();
+    } catch (e) {
+      return { ok: false, code: 'read-failed', error: e?.message || 'Failed to read items.' };
+    }
     const items = (all || []).filter((i) => i.allocated_to === bubbleName);
     if (!items.length) {
       return { ok: false, code: 'no-items', error: `No items found in bubble "${bubbleName}".` };
@@ -134,19 +164,24 @@ const registerItemsIpc = (ipcMain, deps) => {
 
   // Optional: manual lock release (e.g., user cancels)
   ipcMain.handle('items:release-lock', (_evt, uid) => {
-    let items = readItems();
-    const idx = items.findIndex((it) => it.uid === uid);
-    if (idx === -1) return { ok: false, reason: 'not-found' };
+    try {
+      let items = readItems();
+      const idx = items.findIndex((it) => it.uid === uid);
+      if (idx === -1) return { ok: false, reason: 'not-found' };
 
-    const it = items[idx];
-    if (!it.lock_expires_at) {
-      return { ok: true, released: false }; // nothing to do
+      const it = items[idx];
+      if (!it.lock_expires_at) {
+        return { ok: true, released: false }; // nothing to do
+      }
+
+      const { lock_expires_at, ...rest } = it;
+      items[idx] = rest;
+      writeItems(items);
+      return { ok: true, released: true };
+    } catch (e) {
+      console.error('[items:release-lock] aborted', e?.message || e);
+      return { ok: false, reason: 'read-failed', error: e?.message };
     }
-
-    const { lock_expires_at, ...rest } = it;
-    items[idx] = rest;
-    writeItems(items);
-    return { ok: true, released: true };
   });
 };
 

@@ -28,6 +28,12 @@ const { getTransbecOrders } = require('./src/scrapers/transbecScraper');
 const { getProforceOrders } = require('./src/scrapers/proforceScraper');
 const { getBestBuyOrders } = require('./src/scrapers/bestBuyScraper');
 const { getCbkOrders } = require('./src/scrapers/cbkScraper');
+const { openEpicorSite } = require('./src/scrapers/epicorScraper');
+const { fetchTransbecInvoices } = require('./src/scrapers/transbecInvoice');
+const { fetchBestbuyInvoices } = require('./src/scrapers/bestbuyInvoice');
+const { fetchBestbuyCreditInvoices } = require('./src/scrapers/bestbuyCreditInvoice');
+const { fetchCbkInvoices } = require('./src/scrapers/cbkInvoice');
+const { runInteractiveAuth, verifyConnection } = require('./src/scrapers/gmail.auth');
 
 const isDev = !app.isPackaged;
 
@@ -93,7 +99,35 @@ const VENDOR_PATHS = {
     dataDir: path.join(INSTANCE_DIR, 'cbk'),
     storageState: path.join(INSTANCE_DIR, 'cbk', 'cbk_storage_state.json'),
   },
+  epicor: {
+    // Playwright browser session (cookies) — machine-specific, stays local.
+    storageState: path.join(INSTANCE_DIR, 'epicor', 'epicor_storage_state.json'),
+  },
 };
+// Downloaded invoice assets (PDFs/images) and their caches are NOT
+// instance-local: they're referenced by filename from shared orders.json
+// (e.g. order.bestbuyInvoiceFile), so a fetch on one machine must be visible
+// from every machine, exactly like orders.json itself. Resolved fresh on every
+// call (not cached in a const) because the shared folder is a runtime Settings
+// value that can change without an app restart — see getSharedDataDir().
+function getEpicorAssetsDir() {
+  return path.join(getSharedDataDir(), 'epicor');
+}
+function getGmailAssetsDir() {
+  return path.join(getSharedDataDir(), 'gmail');
+}
+function getTransbecInvoiceCachePath() {
+  return path.join(getGmailAssetsDir(), 'transbec_invoice_cache.json');
+}
+function getBestbuyInvoiceCachePath() {
+  return path.join(getGmailAssetsDir(), 'bestbuy_invoice_cache.json');
+}
+function getBestbuyCreditInvoiceCachePath() {
+  return path.join(getGmailAssetsDir(), 'bestbuy_credit_invoice_cache.json');
+}
+function getCbkInvoiceCachePath() {
+  return path.join(getGmailAssetsDir(), 'cbk_invoice_cache.json');
+}
 
 const PRELOAD = path.resolve(__dirname, 'preload.js');
 
@@ -129,14 +163,25 @@ function ensureAppConfigFile() {
   const defaults = normalizeAppConfig();
   fs.writeFileSync(INSTANCE_PATHS.appConfig, JSON.stringify(defaults, null, 2), 'utf-8');
 }
+// Cache the last successfully-read config. resolveBusinessPaths() re-reads the
+// config on EVERY file access; if a transient read failure returned bare
+// defaults (sharedDataDir: ''), every business file would silently retarget to
+// the machine-local userData dir — the app would "load locally", see empty
+// items, and a later save against the share could erase real data.
+let lastGoodAppConfig = null;
 function readAppConfig() {
   try {
     ensureAppConfigFile();
     const raw = fs.readFileSync(INSTANCE_PATHS.appConfig, 'utf-8');
     const parsed = JSON.parse(raw);
-    return normalizeAppConfig(parsed);
+    lastGoodAppConfig = normalizeAppConfig(parsed);
+    return lastGoodAppConfig;
   } catch (e) {
     console.error('[appConfig read]', e);
+    if (lastGoodAppConfig) {
+      console.warn('[appConfig read] using last known-good config');
+      return lastGoodAppConfig;
+    }
     return normalizeAppConfig();
   }
 }
@@ -273,7 +318,14 @@ console.log('[main] preload path =', PRELOAD, 'exists?', fs.existsSync(PRELOAD))
 
 // ---- data helpers ----
 const os = require('os');
-let sageIntegrationActive = false;
+// Purchase-order processing is coordinated across machines via sage_lock.json
+// (only one machine at a time). Invoice processing runs locally on any machine
+// and is never gated by the lock. Track the two independently.
+let sagePoActive = false;
+let sageInvoiceActive = false;
+const getSagePoActive = () => sagePoActive;
+const getSageInvoiceActive = () => sageInvoiceActive;
+const getSageAnyActive = () => sagePoActive || sageInvoiceActive;
 
 function getMachineId() {
   return os.hostname() || 'unknown';
@@ -309,6 +361,40 @@ function clearSageLock() {
     if (fs.existsSync(f)) fs.unlinkSync(f);
   } catch (e) {
     console.error('[sage-lock] clear failed', e);
+  }
+}
+
+// A lock is "live" only while its owner keeps heartbeating. If a machine dies or
+// closes without releasing, the heartbeat goes stale and another machine may claim it.
+const SAGE_LOCK_HEARTBEAT_MS = 10000;
+const SAGE_LOCK_STALE_MS = 30000;
+let sageHeartbeatTimer = null;
+
+function sageLockIsLive(lock) {
+  if (!lock || !lock.machineId) return false;
+  const beat = lock.heartbeatAt || lock.lockedAt || 0;
+  return (Date.now() - beat) < SAGE_LOCK_STALE_MS;
+}
+
+function startSageHeartbeat() {
+  stopSageHeartbeat();
+  sageHeartbeatTimer = setInterval(() => {
+    try {
+      const lock = readSageLock();
+      if (lock && lock.machineId === getMachineId()) {
+        writeSageLock({ ...lock, heartbeatAt: Date.now() });
+      }
+    } catch (e) {
+      console.error('[sage-lock] heartbeat failed', e);
+    }
+  }, SAGE_LOCK_HEARTBEAT_MS);
+  if (sageHeartbeatTimer.unref) sageHeartbeatTimer.unref();
+}
+
+function stopSageHeartbeat() {
+  if (sageHeartbeatTimer) {
+    clearInterval(sageHeartbeatTimer);
+    sageHeartbeatTimer = null;
   }
 }
 
@@ -434,16 +520,33 @@ function ensureDataFileAt(file) {
     console.error('[ensureDataFileAt]', file, e);
   }
 }
+// Read a JSON-array file. A missing or blank file is a legitimate empty list,
+// but a file we FAILED to read or parse is NOT — returning [] for those cases
+// used to let a transient network/SMB glitch or a mid-write partial read be
+// mistaken for "no items", and a later save would then erase the real data.
+// Such failures now throw after a few quick retries; callers must abort
+// instead of writing.
 function readItemsAt(file) {
   ensureDataFileAt(file);
-  try {
-    const raw = fs.readFileSync(file, 'utf-8');
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
-  } catch (e) {
-    console.error('[readItemsAt]', e);
-    return [];
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const raw = fs.readFileSync(file, 'utf-8');
+      if (raw.trim() === '') return []; // genuinely empty file
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch (e) {
+      lastErr = e;
+      // brief blocking pause before retry — this is a rare error path
+      const until = Date.now() + 60;
+      while (Date.now() < until) { /* spin */ }
+    }
   }
+  console.error('[readItemsAt] unreadable after retries', file, lastErr);
+  const err = new Error(`Failed to read ${path.basename(file)}: ${lastErr?.message || 'unknown error'}`);
+  err.code = 'ITEMS_READ_FAILED';
+  err.file = file;
+  throw err;
 }
 function writeItemsAt(file, items) {
   ensureDataFileAt(file);
@@ -451,7 +554,19 @@ function writeItemsAt(file, items) {
 }
 function readQueueItems(queue) {
   const file = getQueueFile(queue);
-  const items = readItemsAt(file);
+  let items = readItemsAt(file);
+  // Items written by legacy/AHK tools have no uid. Writes now upsert by uid
+  // (no implicit deletions), so every item needs a stable identity — stamp
+  // missing uids once and persist them so all machines see the same ids.
+  if ((items || []).some((it) => it && !it.uid)) {
+    items = (items || []).map((it) => (it && !it.uid ? { ...it, uid: randomUUID() } : it));
+    try {
+      writeItemsAt(file, items);
+      console.log('[items] stamped missing uids in', path.basename(file));
+    } catch (e) {
+      console.error('[items] failed to persist stamped uids', file, e);
+    }
+  }
   return (items || []).map((it) => ({
     ...it,
     accountingPath: queue,
@@ -471,6 +586,8 @@ const itemsService = createItemsService({
   writeItemsAt,
   splitItemsByQueue,
   randomUUID,
+  fs,
+  path,
 });
 const { readAllQueueItems, writeItems } = itemsService;
 
@@ -570,9 +687,13 @@ function getArchivedOrderRefs(activeOrders, options = {}) {
   const vendor = (options.vendor || '').toString().trim().toLowerCase();
   const preferReferenceVendors = new Set(['world', 'transbec', 'bestbuy', 'proforce']);
   const preferReference = preferReferenceVendors.has(vendor);
+  // An active order must be recognized under every value that can identify it.
+  // normalizeOrderRef() prefers sage_reference (the invoice number once one is
+  // filled), so keying on it alone can leave an order's own `reference` (for
+  // BestBuy, the packing slip) looking archived when it is actually active.
   const activeSet = new Set(
     (activeOrders || [])
-      .map((o) => normalizeOrderRef(o))
+      .flatMap((o) => [normalizeOrderRef(o), o?.reference ? String(o.reference).trim().toUpperCase() : ''])
       .filter(Boolean)
   );
   const index = readOrdersIndex();
@@ -679,6 +800,225 @@ function meetsArchiveCriteria(order) {
     order.valueCheckAlert !== true
   );
 }
+// Derives a "YYYYMM" grouping key for a World order's invoice month, preferring
+// sageDate (DDMMYY, the date the invoice itself is dated) and falling back to
+// orderDate/archivedAt so every order still lands in some month folder.
+function getInvoiceMonthFolderKey(order) {
+  const sageDate = String(order?.sageDate || '').trim();
+  if (/^\d{6}$/.test(sageDate)) {
+    const yy = sageDate.slice(4, 6);
+    const mm = sageDate.slice(2, 4);
+    return `${2000 + Number(yy)}${mm}`;
+  }
+  const fallback = order?.orderDate || order?.archivedAt || '';
+  const parsed = new Date(fallback);
+  if (!isNaN(parsed.getTime())) {
+    return `${parsed.getFullYear()}${String(parsed.getMonth() + 1).padStart(2, '0')}`;
+  }
+  return null;
+}
+
+function csvEscape(value) {
+  const s = String(value ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+// Gather every vendor-invoice number we already have on file — from active
+// orders, the orders archive, and every <vendor>_YYYYMM/invoices.csv manifest —
+// so an Epicor range scan can flag invoices that are NOT yet in our records.
+// Matches on invoice-number fields only (source_invoice / invoiceNum / manifest
+// invoice_number), never on order reference, so a truly-missing invoice is never
+// mistaken for one we already have.
+function collectKnownInvoiceNumbers() {
+  const known = new Set();
+  const add = (v) => {
+    const k = String(v || '').trim().toUpperCase();
+    if (k) known.add(k);
+  };
+  const fromOrders = (list) => {
+    (list || []).forEach((o) => {
+      if (!o) return;
+      add(o.source_invoice);
+      add(o.invoiceNum);
+    });
+  };
+  try { fromOrders(readOrders()); } catch (e) { console.error('[epicor-known] readOrders failed', e); }
+  try { fromOrders(readOrdersArchive()); } catch (e) { console.error('[epicor-known] readOrdersArchive failed', e); }
+
+  // Every vendor's archive manifest shares one schema:
+  // reference,invoice_number,billed_total,archived_at — invoice number is col 1.
+  try {
+    const sharedDir = getSharedDataDir();
+    fs.readdirSync(sharedDir, { withFileTypes: true }).forEach((ent) => {
+      if (!ent.isDirectory() || !/_\d{6}$/.test(ent.name)) return;
+      const manifestPath = path.join(sharedDir, ent.name, 'invoices.csv');
+      if (!fs.existsSync(manifestPath)) return;
+      const text = fs.readFileSync(manifestPath, 'utf-8');
+      text.split(/\r?\n/).forEach((line) => {
+        if (!line.trim() || line.startsWith('reference,')) return; // skip header/blank
+        const invoice = (line.split(',')[1] || '').replace(/^"|"$/g, '').trim();
+        add(invoice);
+      });
+    });
+  } catch (e) {
+    console.error('[epicor-known] manifest scan failed', e);
+  }
+  return known;
+}
+
+// When a World order that went through the Epicor invoice lookup gets
+// archived, move its scanned invoice image out of the per-machine instance
+// folder into a shared world_YYYYMM folder (creating it if needed), and
+// append a row to that folder's invoices.csv manifest.
+function archiveWorldEpicorAssets(archivedOrders) {
+  const candidates = (archivedOrders || []).filter((o) => o && o.source === 'world' && o.epicorInvoiceImage);
+  if (!candidates.length) return;
+
+  const sharedDir = getSharedDataDir();
+  const epicorDir = getEpicorAssetsDir();
+
+  candidates.forEach((order) => {
+    try {
+      const sourcePath = path.join(epicorDir, order.epicorInvoiceImage);
+      if (!fs.existsSync(sourcePath)) {
+        console.warn(`[orders] archive: epicor invoice image missing, skipping move: ${sourcePath}`);
+        return;
+      }
+
+      const monthKey = getInvoiceMonthFolderKey(order);
+      if (!monthKey) {
+        console.warn(`[orders] archive: could not determine invoice month for order ${order.reference}; leaving image in place`);
+        return;
+      }
+
+      const destDir = path.join(sharedDir, `world_${monthKey}`);
+      fs.mkdirSync(destDir, { recursive: true });
+
+      const destPath = path.join(destDir, order.epicorInvoiceImage);
+      fs.copyFileSync(sourcePath, destPath);
+      fs.unlinkSync(sourcePath);
+
+      const manifestPath = path.join(destDir, 'invoices.csv');
+      const isNewManifest = !fs.existsSync(manifestPath);
+      const row = [
+        csvEscape(order.reference || ''),
+        csvEscape(order.source_invoice || ''),
+        csvEscape(order.billed_total ?? ''),
+        csvEscape(order.archivedAt || ''),
+      ].join(',');
+      const header = 'reference,invoice_number,billed_total,archived_at\n';
+      fs.appendFileSync(manifestPath, (isNewManifest ? header : '') + row + '\n', 'utf-8');
+
+      console.log(`[orders] archived epicor invoice image for ${order.reference} -> ${destPath}`);
+    } catch (e) {
+      console.error(`[orders] failed to archive epicor invoice image for order ${order?.reference}`, e);
+    }
+  });
+}
+
+// Transbec analog of archiveWorldEpicorAssets: when a Transbec order whose
+// invoice came from Gmail gets archived, move its saved invoice PDF out of the
+// per-machine gmail folder into a shared transbec_YYYYMM folder and append a row
+// to that folder's invoices.csv manifest.
+function archiveTransbecGmailAssets(archivedOrders) {
+  // transbecInvoiceFile holds the .pdf name; older records stored a .png name in
+  // transbecInvoiceImage — the PDF sits beside it, so derive it for those too.
+  const transbecPdfName = (o) =>
+    o.transbecInvoiceFile || (o.transbecInvoiceImage ? o.transbecInvoiceImage.replace(/\.png$/i, '.pdf') : '');
+  const candidates = (archivedOrders || []).filter((o) => o && o.source === 'transbec' && transbecPdfName(o));
+  if (!candidates.length) return;
+
+  const sharedDir = getSharedDataDir();
+  const gmailDir = getGmailAssetsDir();
+
+  candidates.forEach((order) => {
+    try {
+      const monthKey = getInvoiceMonthFolderKey(order);
+      if (!monthKey) {
+        console.warn(`[orders] archive: could not determine invoice month for order ${order.reference}; leaving Transbec assets in place`);
+        return;
+      }
+      const destDir = path.join(sharedDir, `transbec_${monthKey}`);
+      fs.mkdirSync(destDir, { recursive: true });
+
+      // Move the saved invoice PDF into the shared month folder.
+      const fileName = transbecPdfName(order);
+      const sourcePath = path.join(gmailDir, fileName);
+      if (fs.existsSync(sourcePath)) {
+        const destPath = path.join(destDir, fileName);
+        fs.copyFileSync(sourcePath, destPath);
+        fs.unlinkSync(sourcePath);
+      } else {
+        console.warn(`[orders] archive: Transbec invoice PDF missing for order ${order.reference}; recording manifest only`);
+      }
+
+      const manifestPath = path.join(destDir, 'invoices.csv');
+      const isNewManifest = !fs.existsSync(manifestPath);
+      const row = [
+        csvEscape(order.reference || ''),
+        csvEscape(order.source_invoice || ''),
+        csvEscape(order.billed_total ?? ''),
+        csvEscape(order.archivedAt || ''),
+      ].join(',');
+      const header = 'reference,invoice_number,billed_total,archived_at\n';
+      fs.appendFileSync(manifestPath, (isNewManifest ? header : '') + row + '\n', 'utf-8');
+
+      console.log(`[orders] archived Transbec invoice assets for ${order.reference} -> ${destDir}`);
+    } catch (e) {
+      console.error(`[orders] failed to archive Transbec invoice assets for order ${order?.reference}`, e);
+    }
+  });
+}
+
+// BestBuy analog: move the per-invoice PDF (split out of the batch) from the
+// gmail folder into a shared bestbuy_YYYYMM folder, appending to invoices.csv.
+function archiveBestbuyGmailAssets(archivedOrders) {
+  const candidates = (archivedOrders || []).filter((o) => o && o.source === 'bestbuy' && o.bestbuyInvoiceFile);
+  if (!candidates.length) return;
+
+  const sharedDir = getSharedDataDir();
+  const gmailDir = getGmailAssetsDir();
+
+  candidates.forEach((order) => {
+    try {
+      const monthKey = getInvoiceMonthFolderKey(order);
+      if (!monthKey) {
+        console.warn(`[orders] archive: could not determine invoice month for order ${order.reference}; leaving BestBuy assets in place`);
+        return;
+      }
+      const destDir = path.join(sharedDir, `bestbuy_${monthKey}`);
+      fs.mkdirSync(destDir, { recursive: true });
+
+      const fileName = order.bestbuyInvoiceFile;
+      const sourcePath = path.join(gmailDir, fileName);
+      // Batch PDFs are shared across several orders, so copy (don't move) those;
+      // per-invoice split PDFs are unique to one order, so move them.
+      const isBatch = /^bestbuy_batch_/i.test(fileName);
+      if (fs.existsSync(sourcePath)) {
+        fs.copyFileSync(sourcePath, path.join(destDir, fileName));
+        if (!isBatch) fs.unlinkSync(sourcePath);
+      } else {
+        console.warn(`[orders] archive: BestBuy invoice PDF missing for order ${order.reference}; recording manifest only`);
+      }
+
+      const manifestPath = path.join(destDir, 'invoices.csv');
+      const isNewManifest = !fs.existsSync(manifestPath);
+      const row = [
+        csvEscape(order.reference || ''),
+        csvEscape(order.source_invoice || ''),
+        csvEscape(order.billed_total ?? ''),
+        csvEscape(order.archivedAt || ''),
+      ].join(',');
+      const header = 'reference,invoice_number,billed_total,archived_at\n';
+      fs.appendFileSync(manifestPath, (isNewManifest ? header : '') + row + '\n', 'utf-8');
+
+      console.log(`[orders] archived BestBuy invoice assets for ${order.reference} -> ${destDir}`);
+    } catch (e) {
+      console.error(`[orders] failed to archive BestBuy invoice assets for order ${order?.reference}`, e);
+    }
+  });
+}
+
 function archiveCompletedOrders(options = {}) {
   let minDays = options;
   if (options && typeof options === 'object') {
@@ -703,14 +1043,17 @@ function archiveCompletedOrders(options = {}) {
 
   const keepActive = [];
   let archivedCount = 0;
+  const newlyArchivedOrders = [];
   const nowIso = new Date().toISOString();
 
   (active || []).forEach((order) => {
     if (isOrderCompleteForArchive(order, minDays)) {
       const key = normalizeOrderRef(order);
       if (key && !archiveByKey.has(key)) {
-        archiveByKey.set(key, { ...order, archivedAt: nowIso });
+        const archivedOrder = { ...order, archivedAt: nowIso };
+        archiveByKey.set(key, archivedOrder);
         archivedCount += 1;
+        newlyArchivedOrders.push(archivedOrder);
       }
     } else {
       keepActive.push(order);
@@ -720,6 +1063,22 @@ function archiveCompletedOrders(options = {}) {
   const mergedArchive = Array.from(archiveByKey.values());
   writeOrdersArchive(mergedArchive);
   writeOrders(keepActive);
+
+  try {
+    archiveWorldEpicorAssets(newlyArchivedOrders);
+  } catch (e) {
+    console.error('[orders] archiveWorldEpicorAssets failed', e);
+  }
+  try {
+    archiveTransbecGmailAssets(newlyArchivedOrders);
+  } catch (e) {
+    console.error('[orders] archiveTransbecGmailAssets failed', e);
+  }
+  try {
+    archiveBestbuyGmailAssets(newlyArchivedOrders);
+  } catch (e) {
+    console.error('[orders] archiveBestbuyGmailAssets failed', e);
+  }
 
   return {
     ok: true,
@@ -789,24 +1148,41 @@ function searchOrdersArchive(term) {
   return { ok: true, results };
 }
 
-function archiveOrderByKey(refKeyRaw) {
+// A reference is unique per vendor but could (rarely) collide across vendors, so
+// when a source is supplied we scope the match to that vendor. The archive is
+// keyed by source+reference (not reference alone) for the same reason.
+function normalizeSource(o) {
+  return String((o && o.source) || '').trim().toUpperCase();
+}
+function orderMatchesKeyAndSource(order, key, src) {
+  return orderMatchesKey(order, key) && (!src || normalizeSource(order) === src);
+}
+function archiveDedupeKey(o) {
+  return `${normalizeSource(o)}|${normalizeOrderRef(o)}`;
+}
+
+function archiveOrderByKey(refKeyRaw, source) {
   const key = (refKeyRaw || '').toString().trim().toUpperCase();
   if (!key) return { ok: false, error: 'Missing reference key.' };
+  const src = (source || '').toString().trim().toUpperCase();
 
   const active = readOrders();
   const archive = readOrdersArchive();
   const archiveByKey = new Map();
   (archive || []).forEach((o) => {
-    const k = normalizeOrderRef(o);
+    const k = archiveDedupeKey(o);
     if (!k || archiveByKey.has(k)) return;
     archiveByKey.set(k, o);
   });
 
+  // Only the FIRST order matching this key (and source, when given) is pulled;
+  // any coincidental same-reference order from another vendor stays active
+  // instead of being silently dropped.
   let found = null;
   const keepActive = [];
   (active || []).forEach((order) => {
     if (!order) return;
-    if (orderMatchesKey(order, key)) {
+    if (!found && orderMatchesKeyAndSource(order, key, src)) {
       found = order;
       return;
     }
@@ -818,16 +1194,59 @@ function archiveOrderByKey(refKeyRaw) {
     return { ok: false, error: 'Order does not meet archive criteria.' };
   }
 
-  const normKey = normalizeOrderRef(found);
+  const normKey = archiveDedupeKey(found);
+  let archivedOrder = null;
   if (normKey && !archiveByKey.has(normKey)) {
-    archiveByKey.set(normKey, { ...found, archivedAt: new Date().toISOString() });
+    archivedOrder = { ...found, archivedAt: new Date().toISOString() };
+    archiveByKey.set(normKey, archivedOrder);
   }
 
   const mergedArchive = Array.from(archiveByKey.values());
   writeOrdersArchive(mergedArchive);
   writeOrders(keepActive);
 
+  if (archivedOrder) {
+    try {
+      archiveWorldEpicorAssets([archivedOrder]);
+    } catch (e) {
+      console.error('[orders] archiveWorldEpicorAssets failed', e);
+    }
+    try {
+      archiveTransbecGmailAssets([archivedOrder]);
+    } catch (e) {
+      console.error('[orders] archiveTransbecGmailAssets failed', e);
+    }
+    try {
+      archiveBestbuyGmailAssets([archivedOrder]);
+    } catch (e) {
+      console.error('[orders] archiveBestbuyGmailAssets failed', e);
+    }
+  }
+
   return { ok: true, archived: 1, remaining: keepActive.length };
+}
+
+// Permanently drop an order from active orders.json (no archive, no invoice
+// manifest) — used to clean up throwaway orders such as ones created from an
+// Epicor scan by mistake. Matches on reference / invoice # / __row, scoped to
+// the given vendor source when supplied so a same-reference order from another
+// vendor is never removed by mistake.
+function deleteOrderByKey(refKeyRaw, source) {
+  const key = (refKeyRaw || '').toString().trim().toUpperCase();
+  if (!key) return { ok: false, error: 'Missing reference key.' };
+  const src = (source || '').toString().trim().toUpperCase();
+  const active = readOrders();
+  let removed = 0;
+  const keep = (active || []).filter((order) => {
+    if (order && orderMatchesKeyAndSource(order, key, src)) {
+      removed += 1;
+      return false;
+    }
+    return true;
+  });
+  if (!removed) return { ok: false, error: 'Order not found.' };
+  writeOrders(keep);
+  return { ok: true, removed, remaining: keep.length };
 }
 
 const sageDomain = createSageDomain({ readOrders, writeOrders, orderMatchesKey });
@@ -846,6 +1265,22 @@ const vendorOrdersService = createVendorOrdersService({
   getProforceOrders,
   getCbkOrders,
   getBestBuyOrders,
+  openEpicorSite,
+  fetchTransbecInvoicesScraper: fetchTransbecInvoices,
+  fetchBestbuyInvoicesScraper: fetchBestbuyInvoices,
+  fetchBestbuyCreditInvoicesScraper: fetchBestbuyCreditInvoices,
+  fetchCbkInvoicesScraper: fetchCbkInvoices,
+  getEpicorAssetsDir,
+  getGmailAssetsDir,
+  getTransbecInvoiceCachePath,
+  getBestbuyInvoiceCachePath,
+  getBestbuyCreditInvoiceCachePath,
+  getCbkInvoiceCachePath,
+  runInteractiveAuth,
+  verifyConnection,
+  saveConfig,
+  shell,
+  collectKnownInvoiceNumbers,
 });
 const {
   fetchWorldOrders,
@@ -853,6 +1288,16 @@ const {
   fetchProforceOrders,
   fetchCbkOrders,
   fetchBestBuyOrders,
+  openEpicor,
+  scanEpicorRange,
+  rescanEpicorInvoice,
+  getEpicorScannedInvoices,
+  fetchTransbecInvoices: fetchTransbecInvoicesService,
+  fetchBestbuyInvoices: fetchBestbuyInvoicesService,
+  fetchBestbuyCreditInvoices: fetchBestbuyCreditInvoicesService,
+  fetchCbkInvoices: fetchCbkInvoicesService,
+  connectGmail,
+  getGmailStatus,
 } = vendorOrdersService;
 
 function ensureDir(dirPath) {
@@ -1018,7 +1463,8 @@ const sageService = createSageService({
   applySageResult,
   applyInvoiceResult,
   applyReconcileResult,
-  getSageIntegrationActive: () => sageIntegrationActive,
+  getSagePoActive,
+  getSageInvoiceActive,
 });
 const {
   runSagePurchase,
@@ -1062,12 +1508,16 @@ const watchersService = createWatchersService({
   readOrders,
   readSharedBubbleData,
   scheduleSageProcessing,
-  getSageIntegrationActive: () => sageIntegrationActive,
+  getSageIntegrationActive: getSageAnyActive,
+  getSagePoActive,
   getSageLockFile,
   readSageLock,
+  sageLockIsLive,
   getMachineId,
   onSageLockForcedOff: () => {
-    sageIntegrationActive = false;
+    // The lock only governs purchase-order processing; invoices keep running locally.
+    sagePoActive = false;
+    stopSageHeartbeat();
   },
   getBubbleLocksFile,
   readBubbleLocks,
@@ -1116,6 +1566,7 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,              // TEMP for easier debugging; set true later
+      plugins: true,               // enables Chromium's built-in PDF viewer (Verify Invoice modal)
     },
   });
   win.maximize();
@@ -1125,11 +1576,16 @@ async function createWindow() {
   // lifecycle logs
   win.webContents.on('did-finish-load', () => {
     console.log('[main] did-finish-load');
-    // initial push (never before this)
-    const arr = readItems();
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('items:updated', arr);
-      console.log('[main] initial items sent:', Array.isArray(arr) ? arr.length : arr);
+    // initial push (never before this). If the read fails, send nothing —
+    // the renderer will fetch via items:read and surface the error itself.
+    try {
+      const arr = readItems();
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('items:updated', arr);
+        console.log('[main] initial items sent:', Array.isArray(arr) ? arr.length : arr);
+      }
+    } catch (e) {
+      console.error('[main] initial items read failed — not sending', e);
     }
   });
 
@@ -1232,6 +1688,16 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
+// Release the PO lock on clean exit so another machine can claim it immediately
+// instead of waiting for the heartbeat to go stale.
+app.on('before-quit', () => {
+  try {
+    stopSageHeartbeat();
+    if (sagePoActive) clearSageLock();
+  } catch (e) {
+    console.error('[sage-lock] release on quit failed', e);
+  }
+});
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
@@ -1271,6 +1737,7 @@ function registerAllIpc() {
     getPaymentsFile,
     archiveCompletedOrders,
     archiveOrderByKey,
+    deleteOrderByKey,
     searchOrdersArchive,
     purgeOldOrdersArchive,
     readOrdersArchive,
@@ -1279,8 +1746,10 @@ function registerAllIpc() {
     stopOrdersWatching,
     startOrdersWatching,
     scheduleSageProcessing,
-    getSageIntegrationActive: () => sageIntegrationActive,
-    setSageIntegrationActive: (next) => { sageIntegrationActive = next; },
+    getSagePoActive,
+    setSagePoActive: (next) => { sagePoActive = Boolean(next); },
+    getSageInvoiceActive,
+    setSageInvoiceActive: (next) => { sageInvoiceActive = Boolean(next); },
     syncOutstandingInvoices,
     makeOutstandingFromLine,
     loadConfig,
@@ -1289,6 +1758,21 @@ function registerAllIpc() {
     fetchProforceOrders,
     fetchCbkOrders,
     fetchBestBuyOrders,
+    openEpicor,
+    scanEpicorRange,
+    rescanEpicorInvoice,
+    getEpicorScannedInvoices,
+    // Passed as functions, not static strings: the shared folder is a runtime
+    // Settings value, so this must resolve fresh on every image request rather
+    // than bake in whatever it was when the app started.
+    getEpicorAssetsDir,
+    fetchTransbecInvoices: fetchTransbecInvoicesService,
+    fetchBestbuyInvoices: fetchBestbuyInvoicesService,
+    fetchBestbuyCreditInvoices: fetchBestbuyCreditInvoicesService,
+    fetchCbkInvoices: fetchCbkInvoicesService,
+    connectGmail,
+    getGmailStatus,
+    getGmailAssetsDir,
     orderMatchesKey,
     runSageReconcile,
     runSageSalesInvoice,
@@ -1323,6 +1807,9 @@ function registerAllIpc() {
     readSageLock,
     writeSageLock,
     clearSageLock,
+    sageLockIsLive,
+    startSageHeartbeat,
+    stopSageHeartbeat,
     getMachineId,
     readBubbleLocks,
     writeBubbleLock,

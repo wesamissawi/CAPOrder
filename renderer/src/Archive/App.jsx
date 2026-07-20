@@ -137,8 +137,10 @@ export default function App() {
   const draggedItemUidRef = useRef(null);
 
   // Anti save/watch loop
-  const lastSavedRef = useRef("");
+  // "[]" matches the initial items state so autosave can't fire before load
+  const lastSavedRef = useRef("[]");
   const skipNextSaveRef = useRef(false);
+  const itemsLoadedRef = useRef(false);
 
   const isEditingAllocatedForRef = useRef(false);
 
@@ -148,10 +150,13 @@ export default function App() {
     api.readItems().then((arr) => {
       const norm = normalizeItems(arr || []);
       console.log("[init] readItems ->", norm);
+      itemsLoadedRef.current = true;
       setItems(norm);
       lastSavedRef.current = JSON.stringify(norm);
       // ⬇️ make sure bubbles exist for all allocated_to values
       ensureBubblesForItems(norm, setBubbles);
+    }).catch((e) => {
+      console.error("[init] readItems failed — saving disabled until load succeeds", e);
     });
 
     // const off = api.onItemsUpdated((arr) => {
@@ -171,6 +176,7 @@ export default function App() {
 
         
         const norm = normalizeItems(arr || []);
+        itemsLoadedRef.current = true; // main only pushes successfully-read data
         setItems((prev) => {
             const merged = mergeItems(prev, norm);
             lastSavedRef.current = JSON.stringify(merged);
@@ -203,6 +209,8 @@ export default function App() {
 useEffect(() => {
   // If nothing in items, nothing to save
   if (!items) return;
+  // Never autosave before the first successful load — empty state would erase files
+  if (!itemsLoadedRef.current) return;
 
   const id = setTimeout(() => {
     if (skipNextSaveRef.current) {
