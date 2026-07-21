@@ -276,13 +276,13 @@ export default function OrderManagementView({
 
   const filters = [
     { value: "all", label: "All" },
-    { value: "not-entered-sage", label: "To Process" },
+    { value: "not-entered-sage", label: "To Process", badge: true, badgeTone: "green" },
     { value: "not-arrived", label: "Not Arrived", badge: true },
     { value: "no-invoice", label: "Invoice Mismatch", badge: true },
     { value: "not-confirmed", label: "Not Confirmed", badge: true },
     { value: "not-printed", label: "Not Printed", badge: true },
     { value: "not-picked", label: "Not Picked Up", badge: true },
-    { value: "needs-archive", label: "Needs Archive", badge: true },
+    { value: "needs-archive", label: "Needs Archive", badge: true, badgeTone: "green" },
     { value: "credit", label: "Credit", badge: true },
   ];
   const primaryFilter = filters[0];
@@ -434,6 +434,12 @@ export default function OrderManagementView({
                 {secondaryFilters.map((filter) => {
                   const isActive = ordersPickupFilter === filter.value;
                   const count = orderFilterCounts?.[filter.value] ?? 0;
+                  const badgeActiveOn =
+                    filter.badgeTone === "green" ? "bg-white text-emerald-600" : "bg-white text-red-600";
+                  const badgeIdleOn =
+                    filter.badgeTone === "green"
+                      ? "bg-emerald-100 text-emerald-700 border border-emerald-200"
+                      : "bg-red-100 text-red-700 border border-red-200";
                   return (
                     <button
                       key={filter.value}
@@ -451,8 +457,8 @@ export default function OrderManagementView({
                           className={`px-1.5 py-0.5 rounded-full text-[11px] font-bold ${
                             count > 0
                               ? isActive
-                                ? "bg-white text-red-600"
-                                : "bg-red-100 text-red-700 border border-red-200"
+                                ? badgeActiveOn
+                                : badgeIdleOn
                               : isActive
                               ? "bg-white/20 text-white"
                               : "bg-slate-100 text-slate-500 border border-slate-200"

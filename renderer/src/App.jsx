@@ -3224,13 +3224,20 @@ export default function App() {
         ? epicorReviewLinesDraft
             .map((l) => {
               const part = String(l.part || "").trim();
+              // Keep costPrice (raw) and costPriceValue (parsed number) in step:
+              // downstream cost math prefers costPriceValue, so writing only the
+              // string would let a stale __orig number override an edited price.
+              const priceStr = l.costPrice === undefined || l.costPrice === null ? "" : String(l.costPrice).trim();
+              const priceNum = parseFloat(priceStr);
               return {
                 ...(l.__orig || { addedToOutstanding: false, source: "epicor-ocr" }),
                 partLineCode: "",
                 partNumber: part,
                 quantity: l.quantity,
                 partDescription: String(l.partDescription || "").trim(),
-                ...(l.costPrice !== undefined && l.costPrice !== "" ? { costPrice: l.costPrice } : {}),
+                ...(priceStr !== ""
+                  ? { costPrice: priceStr, costPriceValue: Number.isFinite(priceNum) ? priceNum : null }
+                  : {}),
               };
             })
             .filter((li) => String(li.partNumber || "").trim() || String(li.partDescription || "").trim())
@@ -4833,8 +4840,8 @@ export default function App() {
                       </button>
                     </div>
                     <p className="text-xs text-slate-400">
-                      Read by OCR — check each against the invoice and fix the part #, quantity, or
-                      description as needed.
+                      Read by OCR — check each against the invoice and fix the part #, quantity,
+                      description, or price as needed.
                     </p>
                     {epicorReviewLinesDraft.length === 0 && (
                       <div className="text-xs text-slate-400 border border-dashed border-slate-200 rounded-lg p-3">
@@ -4863,9 +4870,16 @@ export default function App() {
                               value={l.quantity}
                               onChange={(e) => updateEpicorReviewLine(idx, "quantity", e.target.value)}
                             />
-                            {l.costPrice !== "" && l.costPrice !== undefined && (
-                              <span className="text-xs text-slate-400">@ ${l.costPrice}</span>
-                            )}
+                            <div className="flex items-center gap-1">
+                              <span className="text-xs text-slate-400">@ $</span>
+                              <input
+                                className="w-20 rounded-lg border border-slate-300 px-2 py-1.5 text-sm text-right"
+                                placeholder="Price"
+                                inputMode="decimal"
+                                value={l.costPrice ?? ""}
+                                onChange={(e) => updateEpicorReviewLine(idx, "costPrice", e.target.value)}
+                              />
+                            </div>
                             <button
                               type="button"
                               className="ml-auto text-xs font-semibold text-red-600 hover:text-red-700"

@@ -11,7 +11,7 @@ const { BrowserWindow } = require('electron');
 // no rendering from us, at the cost of a bundled binary.
 //   'chromium' — Electron's built-in viewer + webContents.print(). No deps.
 //   'sumatra'  — pdf-to-printer (bundled SumatraPDF/MuPDF). Rock-solid.
-const PDF_PRINT_METHOD = 'chromium';
+const PDF_PRINT_METHOD = 'sumatra';
 
 // Resolve a stored invoice-asset file name against its vendor's data dir,
 // refusing anything that tries to escape the folder (traversal / absolute path).
@@ -258,21 +258,33 @@ const registerVendorIpc = (ipcMain, deps) => {
       if (!ready) {
         return { ok: false, error: 'Timed out waiting for the invoice to render for printing.' };
       }
-      const result = await new Promise((resolve) => {
-        win.webContents.print(
-          {
-            silent: true,
-            printBackground: true,
-            deviceName: printerName || undefined,
-            margins: { marginType: 'none' },
-            // Invoice PDFs can run multiple pages (line items, return stub);
-            // the printout is normally just page 1 (0-based pageRanges).
-            // Omitting pageRanges entirely prints every page.
-            ...(allPages ? {} : { pageRanges: [{ from: 0, to: 0 }] }),
-          },
-          (success, errorType) => resolve({ success, errorType })
-        );
-      });
+      const doPrint = (marginType) =>
+        new Promise((resolve) => {
+          win.webContents.print(
+            {
+              silent: true,
+              printBackground: true,
+              deviceName: printerName || undefined,
+              margins: { marginType },
+              // Invoice PDFs can run multiple pages (line items, return stub);
+              // the printout is normally just page 1 (0-based pageRanges).
+              // Omitting pageRanges entirely prints every page.
+              ...(allPages ? {} : { pageRanges: [{ from: 0, to: 0 }] }),
+            },
+            (success, errorType) => resolve({ success, errorType })
+          );
+        });
+      // Preferred: borderless (marginType 'none') so the invoice fills the page.
+      // Some generic/class printer drivers (e.g. Brother's in-box "Type 1 Class
+      // Driver") reject a zero-margin ticket during silent-print negotiation and
+      // Chromium reports "Print job canceled" without ever spooling the job. If
+      // that happens, retry once with default margins, which those drivers accept
+      // — printers that honored 'none' never reach the retry, so their output is
+      // unchanged.
+      let result = await doPrint('none');
+      if (!result.success) {
+        result = await doPrint('default');
+      }
       if (!result.success) {
         return { ok: false, error: result.errorType || 'Print failed.' };
       }
