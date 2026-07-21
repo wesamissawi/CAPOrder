@@ -68,6 +68,8 @@ export default function SettingsView() {
   const [transbecMaxPages, setTransbecMaxPages] = useState(1);
   const [cbkUser, setCbkUser] = useState("");
   const [cbkPass, setCbkPass] = useState("");
+  const [tigerUser, setTigerUser] = useState("");
+  const [tigerPass, setTigerPass] = useState("");
   const [bestbuyUser, setBestbuyUser] = useState("");
   const [bestbuyPass, setBestbuyPass] = useState("");
   const [proforceStore, setProforceStore] = useState("");
@@ -203,6 +205,8 @@ export default function SettingsView() {
           );
           setCbkUser(cfg.CBK_USER || "");
           setCbkPass(cfg.CBK_PASS || "");
+          setTigerUser(cfg.TIGER_USER || "");
+          setTigerPass(cfg.TIGER_PASS || "");
           setBestbuyUser(cfg.BESTBUY_USER || "");
           setBestbuyPass(cfg.BESTBUY_PASS || "");
           setProforceStore(cfg.PROFORCE_STORE || "");
@@ -312,6 +316,8 @@ export default function SettingsView() {
             : 1,
         CBK_USER: cbkUser || "",
         CBK_PASS: cbkPass || "",
+        TIGER_USER: tigerUser || "",
+        TIGER_PASS: tigerPass || "",
         BESTBUY_USER: bestbuyUser || "",
         BESTBUY_PASS: bestbuyPass || "",
         PROFORCE_STORE: proforceStore || "",
@@ -537,7 +543,7 @@ export default function SettingsView() {
             <div>
               <h2 className="text-xl font-semibold text-slate-800">Scraper Credentials</h2>
               <p className="text-sm text-slate-500">
-                Stored per-machine in app data. Used by World, Transbec, CBK, BestBuy, Proforce, and Epicor scrapers.
+                Stored per-machine in app data. Used by World, Transbec, CBK, Tiger, BestBuy, Proforce, and Epicor scrapers.
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -629,6 +635,24 @@ export default function SettingsView() {
                 type="password"
                 value={cbkPass}
                 onChange={(e) => setCbkPass(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Tiger Account #</label>
+              <input
+                type="text"
+                value={tigerUser}
+                onChange={(e) => setTigerUser(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Tiger Password</label>
+              <input
+                type="password"
+                value={tigerPass}
+                onChange={(e) => setTigerPass(e.target.value)}
                 className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
               />
             </div>

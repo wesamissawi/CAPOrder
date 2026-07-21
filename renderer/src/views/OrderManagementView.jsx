@@ -1,6 +1,28 @@
 import React, { useState } from "react";
 import Card from "../components/Card";
 
+function DismissibleMessage({ tone, onDismiss, children }) {
+  const boxStyles =
+    tone === "error"
+      ? "bg-red-50 border-red-200 text-red-700"
+      : "bg-emerald-50 border-emerald-200 text-emerald-700";
+  const btnStyles =
+    tone === "error" ? "text-red-400 hover:text-red-700" : "text-emerald-500 hover:text-emerald-800";
+  return (
+    <div className={`mt-3 flex items-start gap-2 rounded-xl border px-3 py-2 text-sm whitespace-pre-line ${boxStyles}`}>
+      <div className="flex-1">{children}</div>
+      <button
+        type="button"
+        onClick={onDismiss}
+        className={`shrink-0 font-bold leading-none ${btnStyles}`}
+        title="Dismiss"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 // sageDate is DDMMYY (e.g. "170726").
 function parseSageDate(ddmmyy) {
   const clean = String(ddmmyy || "").trim();
@@ -53,6 +75,7 @@ export default function OrderManagementView({
   loadOrders,
   handleSaveOrders,
   filteredOrders,
+  orderFilterCounts,
   handleOrderCheckboxChange,
   handleOrderFieldChange,
   onMarkForSage,
@@ -62,6 +85,32 @@ export default function OrderManagementView({
   onArchiveOrder,
   onDeleteOrder,
   hasSearch,
+  onGetWorldOrders,
+  worldOrdersRunning,
+  worldOrdersStatus,
+  worldOrdersError,
+  onGetCbkOrders,
+  cbkOrdersRunning,
+  cbkOrdersStatus,
+  cbkOrdersError,
+  onGetTigerOrders,
+  tigerOrdersRunning,
+  tigerOrdersStatus,
+  tigerOrdersError,
+  onGetBestBuyOrders,
+  bestBuyOrdersRunning,
+  bestBuyOrdersStatus,
+  bestBuyOrdersError,
+  onGetTransbecOrders,
+  transbecOrdersRunning,
+  transbecOrdersStatus,
+  transbecOrdersError,
+  onGetProforceOrders,
+  proforceRunning,
+  proforceStatus,
+  proforceError,
+  onClearOrderFetchMessage,
+  onClearInvoiceFetchMessage,
   onOpenEpicor,
   epicorOpening,
   epicorStatus,
@@ -92,6 +141,10 @@ export default function OrderManagementView({
   onVerifyCbkInvoice,
   onPrintCbkInvoice,
   invoicePrintingRef,
+  onPrintAllNotPrinted,
+  printAllRunning,
+  onArchiveAllNeedsArchive,
+  archiveAllRunning,
   onUpdateInvoiceTrigger,
   onConfirmOrderEdit,
 }) {
@@ -222,11 +275,13 @@ export default function OrderManagementView({
 
   const filters = [
     { value: "all", label: "All" },
-    { value: "not-picked", label: "Not Picked Up" },
-    { value: "not-arrived", label: "Not Arrived" },
-    { value: "not-entered-sage", label: "Not Entered in Sage" },
-    { value: "totals-not-verified", label: "Totals Not Verified" },
-    { value: "no-invoice", label: "No Invoice #" },
+    { value: "not-entered-sage", label: "To Process" },
+    { value: "not-arrived", label: "Not Arrived", badge: true },
+    { value: "no-invoice", label: "Invoice Mismatch", badge: true },
+    { value: "not-confirmed", label: "Not Confirmed", badge: true },
+    { value: "not-printed", label: "Not Printed", badge: true },
+    { value: "not-picked", label: "Not Picked Up", badge: true },
+    { value: "needs-archive", label: "Needs Archive", badge: true },
   ];
   const primaryFilter = filters[0];
   const secondaryFilters = filters.slice(1);
@@ -243,6 +298,35 @@ export default function OrderManagementView({
   }
   `;
 
+  const orderFetchButtons = [
+    { key: "world", label: "World", onClick: onGetWorldOrders, running: worldOrdersRunning, status: worldOrdersStatus, error: worldOrdersError },
+    { key: "transbec-orders", label: "Transbec", onClick: onGetTransbecOrders, running: transbecOrdersRunning, status: transbecOrdersStatus, error: transbecOrdersError },
+    { key: "bestbuy-orders", label: "BestBuy", onClick: onGetBestBuyOrders, running: bestBuyOrdersRunning, status: bestBuyOrdersStatus, error: bestBuyOrdersError },
+    { key: "cbk", label: "CBK", onClick: onGetCbkOrders, running: cbkOrdersRunning, status: cbkOrdersStatus, error: cbkOrdersError },
+    { key: "proforce", label: "Proforce", onClick: onGetProforceOrders, running: proforceRunning, status: proforceStatus, error: proforceError },
+    { key: "tiger", label: "Tiger", onClick: onGetTigerOrders, running: tigerOrdersRunning, status: tigerOrdersStatus, error: tigerOrdersError },
+  ];
+
+  const isInvoiceNotPrinted = (order) => {
+    const vendor = (order?.source || "").toString().trim().toLowerCase();
+    if (!["bestbuy", "transbec", "cbk"].includes(vendor)) return false;
+    const hasInvoiceFile = Boolean(
+      order.transbecInvoiceFile ||
+        order.transbecInvoiceImage ||
+        order.bestbuyInvoiceFile ||
+        order.bestbuyCreditFile ||
+        order.cbkInvoiceFile
+    );
+    if (!hasInvoiceFile) return false;
+    const printed = Boolean(
+      order.transbecInvoicePrinted ||
+        order.bestbuyInvoicePrinted ||
+        order.bestbuyCreditInvoicePrinted ||
+        order.cbkInvoicePrinted
+    );
+    return !printed;
+  };
+
   const canArchiveOrder = (order) =>
     Boolean(
       order &&
@@ -253,7 +337,8 @@ export default function OrderManagementView({
         order.enteredInSage === true &&
         order.inStore === true &&
         order.invoiceNeedsSync !== true &&
-        order.valueCheckAlert !== true
+        order.valueCheckAlert !== true &&
+        !isInvoiceNotPrinted(order)
     );
 
   return (
@@ -261,17 +346,55 @@ export default function OrderManagementView({
       <style>{valueCheckStyles}</style>
       <section>
         <Card>
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-            <div className="text-sm uppercase tracking-wide text-slate-400">Orders feed</div>
-            <div className="text-base font-semibold text-slate-700">Live orders from your local server</div>
-            <div className="text-xs text-slate-400 mt-1">
-              Source:{" "}
-              <code className="text-indigo-600 break-all">
-                  {ordersSourcePath || "orders.json (user data folder)"}
-                </code>
+          <div className="text-sm uppercase tracking-wide text-slate-400 font-semibold">Order Fetcher</div>
+          <div className="mt-2 flex flex-wrap gap-3">
+            {orderFetchButtons.map((v) => (
+              <button
+                key={v.key}
+                type="button"
+                onClick={v.onClick}
+                disabled={v.running}
+                className="px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-semibold disabled:opacity-60"
+              >
+                {v.running ? "Fetching..." : v.label}
+              </button>
+            ))}
+          </div>
+          {orderFetchButtons.map((v) =>
+            v.error ? (
+              <div
+                key={`${v.key}-error`}
+                className="mt-3 flex items-start gap-2 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700"
+              >
+                <div className="flex-1 whitespace-pre-line">{v.error}</div>
+                <button
+                  type="button"
+                  onClick={() => onClearOrderFetchMessage?.(v.key)}
+                  className="shrink-0 text-red-400 hover:text-red-700 font-bold leading-none"
+                  title="Dismiss"
+                >
+                  ×
+                </button>
               </div>
-            </div>
+            ) : v.status ? (
+              <div
+                key={`${v.key}-status`}
+                className="mt-3 flex items-start gap-2 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700"
+              >
+                <div className="flex-1 whitespace-pre-line">{v.status}</div>
+                <button
+                  type="button"
+                  onClick={() => onClearOrderFetchMessage?.(v.key)}
+                  className="shrink-0 text-emerald-500 hover:text-emerald-800 font-bold leading-none"
+                  title="Dismiss"
+                >
+                  ×
+                </button>
+              </div>
+            ) : null
+          )}
+
+          <div className="mt-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-start">
             <div className="flex flex-col sm:flex-row sm:items-center gap-2">
               <input
                 type="search"
@@ -308,18 +431,34 @@ export default function OrderManagementView({
                 </button>
                 {secondaryFilters.map((filter) => {
                   const isActive = ordersPickupFilter === filter.value;
+                  const count = orderFilterCounts?.[filter.value] ?? 0;
                   return (
                     <button
                       key={filter.value}
                       type="button"
                       onClick={() => setOrdersPickupFilter(filter.value)}
-                      className={`px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold border transition ${
+                      className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold border transition ${
                         isActive
                           ? "bg-indigo-600 text-white border-indigo-600 shadow-sm"
                           : "bg-white text-slate-700 border-slate-200 hover:bg-indigo-50"
                       }`}
                     >
                       {filter.label}
+                      {filter.badge && (
+                        <span
+                          className={`px-1.5 py-0.5 rounded-full text-[11px] font-bold ${
+                            count > 0
+                              ? isActive
+                                ? "bg-white text-red-600"
+                                : "bg-red-100 text-red-700 border border-red-200"
+                              : isActive
+                              ? "bg-white/20 text-white"
+                              : "bg-slate-100 text-slate-500 border border-slate-200"
+                          }`}
+                        >
+                          {count}
+                        </span>
+                      )}
                     </button>
                   );
                 })}
@@ -345,50 +484,74 @@ export default function OrderManagementView({
               </button>
             </div>
           </div>
-          {ordersError && (
-            <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
-              {ordersError}
+          {ordersPickupFilter === "not-printed" && (
+            <div className="mt-4">
+              <button
+                type="button"
+                onClick={() => onPrintAllNotPrinted?.(filteredOrders)}
+                disabled={printAllRunning || filteredOrders.length === 0}
+                className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-semibold disabled:opacity-60"
+              >
+                {printAllRunning ? "Printing..." : `Print All (${filteredOrders.length})`}
+              </button>
             </div>
+          )}
+          {ordersPickupFilter === "needs-archive" && (
+            <div className="mt-4">
+              <button
+                type="button"
+                onClick={() => onArchiveAllNeedsArchive?.(filteredOrders)}
+                disabled={archiveAllRunning || filteredOrders.length === 0}
+                className="px-4 py-2 rounded-xl bg-slate-900 text-white text-sm font-semibold disabled:opacity-60"
+              >
+                {archiveAllRunning ? "Archiving..." : `Archive All (${filteredOrders.length})`}
+              </button>
+            </div>
+          )}
+          {ordersError && (
+            <DismissibleMessage tone="error" onDismiss={() => onClearInvoiceFetchMessage?.("orders")}>
+              {ordersError}
+            </DismissibleMessage>
           )}
           {epicorError && (
-            <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+            <DismissibleMessage tone="error" onDismiss={() => onClearInvoiceFetchMessage?.("epicor")}>
               {epicorError}
-            </div>
+            </DismissibleMessage>
           )}
           {epicorStatus && !epicorError && (
-            <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700">
+            <DismissibleMessage tone="status" onDismiss={() => onClearInvoiceFetchMessage?.("epicor")}>
               {epicorStatus}
-            </div>
+            </DismissibleMessage>
           )}
           {transbecError && (
-            <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700 whitespace-pre-line">
+            <DismissibleMessage tone="error" onDismiss={() => onClearInvoiceFetchMessage?.("transbec")}>
               {transbecError}
-            </div>
+            </DismissibleMessage>
           )}
           {transbecStatus && !transbecError && (
-            <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700 whitespace-pre-line">
+            <DismissibleMessage tone="status" onDismiss={() => onClearInvoiceFetchMessage?.("transbec")}>
               {transbecStatus}
-            </div>
+            </DismissibleMessage>
           )}
           {bestbuyError && (
-            <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700 whitespace-pre-line">
+            <DismissibleMessage tone="error" onDismiss={() => onClearInvoiceFetchMessage?.("bestbuy")}>
               {bestbuyError}
-            </div>
+            </DismissibleMessage>
           )}
           {bestbuyStatus && !bestbuyError && (
-            <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700 whitespace-pre-line">
+            <DismissibleMessage tone="status" onDismiss={() => onClearInvoiceFetchMessage?.("bestbuy")}>
               {bestbuyStatus}
-            </div>
+            </DismissibleMessage>
           )}
           {cbkError && (
-            <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700 whitespace-pre-line">
+            <DismissibleMessage tone="error" onDismiss={() => onClearInvoiceFetchMessage?.("cbk")}>
               {cbkError}
-            </div>
+            </DismissibleMessage>
           )}
           {cbkStatus && !cbkError && (
-            <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700 whitespace-pre-line">
+            <DismissibleMessage tone="status" onDismiss={() => onClearInvoiceFetchMessage?.("cbk")}>
               {cbkStatus}
-            </div>
+            </DismissibleMessage>
           )}
         </Card>
       </section>

@@ -19,6 +19,7 @@ const registerOrdersIpc = (ipcMain, deps) => {
     fetchTransbecOrders,
     fetchProforceOrders,
     fetchCbkOrders,
+    fetchTigerOrders,
     fetchBestBuyOrders,
     orderMatchesKey,
     runSageReconcile,
@@ -206,6 +207,10 @@ const registerOrdersIpc = (ipcMain, deps) => {
 
   ipcMain.handle('orders:fetch-cbk', async () => {
     return fetchCbkOrders();
+  });
+
+  ipcMain.handle('orders:fetch-tiger', async () => {
+    return fetchTigerOrders();
   });
 
   ipcMain.handle('orders:fetch-bestbuy', async () => {

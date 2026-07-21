@@ -46,6 +46,7 @@ function registerAllIpc(ipcMain, deps) {
     fetchTransbecOrders: deps.fetchTransbecOrders,
     fetchProforceOrders: deps.fetchProforceOrders,
     fetchCbkOrders: deps.fetchCbkOrders,
+    fetchTigerOrders: deps.fetchTigerOrders,
     fetchBestBuyOrders: deps.fetchBestBuyOrders,
     orderMatchesKey: deps.orderMatchesKey,
     runSageReconcile: deps.runSageReconcile,

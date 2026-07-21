@@ -28,6 +28,7 @@ const { getTransbecOrders } = require('./src/scrapers/transbecScraper');
 const { getProforceOrders } = require('./src/scrapers/proforceScraper');
 const { getBestBuyOrders } = require('./src/scrapers/bestBuyScraper');
 const { getCbkOrders } = require('./src/scrapers/cbkScraper');
+const { getTigerOrders } = require('./src/scrapers/tigerScraper');
 const { openEpicorSite } = require('./src/scrapers/epicorScraper');
 const { fetchTransbecInvoices } = require('./src/scrapers/transbecInvoice');
 const { fetchBestbuyInvoices } = require('./src/scrapers/bestbuyInvoice');
@@ -98,6 +99,10 @@ const VENDOR_PATHS = {
   cbk: {
     dataDir: path.join(INSTANCE_DIR, 'cbk'),
     storageState: path.join(INSTANCE_DIR, 'cbk', 'cbk_storage_state.json'),
+  },
+  tiger: {
+    dataDir: path.join(INSTANCE_DIR, 'tiger'),
+    storageState: path.join(INSTANCE_DIR, 'tiger', 'tiger_storage_state.json'),
   },
   epicor: {
     // Playwright browser session (cookies) — machine-specific, stays local.
@@ -1019,6 +1024,25 @@ function archiveBestbuyGmailAssets(archivedOrders) {
   });
 }
 
+// Auto-adds any order line items not yet in Outstanding to the NEW STOCK
+// bubble right before the order leaves active status — same effect as
+// clicking "Bubblify" on the order, but always targets the existing NEW STOCK
+// bubble instead of creating a fresh per-order one, and only touches items
+// that haven't already been added (mirrors orders:bubblify-order's own guard).
+// Runs for every archive path (single-order and bulk) since both funnel
+// through here rather than the renderer.
+function addOrderLineItemsToNewStock(order) {
+  if (!order || !Array.isArray(order.lineItems)) return { order, newItems: [] };
+  const newItems = [];
+  const updatedLineItems = order.lineItems.map((line) => {
+    if (!line || line.addedToOutstanding === true) return line;
+    newItems.push({ ...makeOutstandingFromLine(order, line), allocated_to: 'NEW STOCK' });
+    return { ...line, addedToOutstanding: true };
+  });
+  if (!newItems.length) return { order, newItems: [] };
+  return { order: { ...order, lineItems: updatedLineItems }, newItems };
+}
+
 function archiveCompletedOrders(options = {}) {
   let minDays = options;
   if (options && typeof options === 'object') {
@@ -1044,13 +1068,16 @@ function archiveCompletedOrders(options = {}) {
   const keepActive = [];
   let archivedCount = 0;
   const newlyArchivedOrders = [];
+  const allNewOutstandingItems = [];
   const nowIso = new Date().toISOString();
 
   (active || []).forEach((order) => {
     if (isOrderCompleteForArchive(order, minDays)) {
       const key = normalizeOrderRef(order);
       if (key && !archiveByKey.has(key)) {
-        const archivedOrder = { ...order, archivedAt: nowIso };
+        const { order: withOutstanding, newItems } = addOrderLineItemsToNewStock(order);
+        if (newItems.length) allNewOutstandingItems.push(...newItems);
+        const archivedOrder = { ...withOutstanding, archivedAt: nowIso };
         archiveByKey.set(key, archivedOrder);
         archivedCount += 1;
         newlyArchivedOrders.push(archivedOrder);
@@ -1059,6 +1086,14 @@ function archiveCompletedOrders(options = {}) {
       keepActive.push(order);
     }
   });
+
+  if (allNewOutstandingItems.length) {
+    try {
+      writeItems(readItems().concat(allNewOutstandingItems));
+    } catch (e) {
+      console.error('[orders] failed to add order items to Outstanding before bulk archive', e);
+    }
+  }
 
   const mergedArchive = Array.from(archiveByKey.values());
   writeOrdersArchive(mergedArchive);
@@ -1194,6 +1229,16 @@ function archiveOrderByKey(refKeyRaw, source) {
     return { ok: false, error: 'Order does not meet archive criteria.' };
   }
 
+  const { order: withOutstanding, newItems } = addOrderLineItemsToNewStock(found);
+  if (newItems.length) {
+    try {
+      writeItems(readItems().concat(newItems));
+    } catch (e) {
+      console.error('[orders] failed to add order items to Outstanding before archive', e);
+    }
+  }
+  found = withOutstanding;
+
   const normKey = archiveDedupeKey(found);
   let archivedOrder = null;
   if (normKey && !archiveByKey.has(normKey)) {
@@ -1264,6 +1309,7 @@ const vendorOrdersService = createVendorOrdersService({
   getTransbecOrders,
   getProforceOrders,
   getCbkOrders,
+  getTigerOrders,
   getBestBuyOrders,
   openEpicorSite,
   fetchTransbecInvoicesScraper: fetchTransbecInvoices,
@@ -1287,6 +1333,7 @@ const {
   fetchTransbecOrders,
   fetchProforceOrders,
   fetchCbkOrders,
+  fetchTigerOrders,
   fetchBestBuyOrders,
   openEpicor,
   scanEpicorRange,
@@ -1757,6 +1804,7 @@ function registerAllIpc() {
     fetchTransbecOrders,
     fetchProforceOrders,
     fetchCbkOrders,
+    fetchTigerOrders,
     fetchBestBuyOrders,
     openEpicor,
     scanEpicorRange,

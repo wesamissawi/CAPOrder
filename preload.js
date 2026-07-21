@@ -65,6 +65,7 @@ contextBridge.exposeInMainWorld('api', {
   fetchTransbecOrders: () => ipcRenderer.invoke('orders:fetch-transbec'),
   fetchProforceOrders: () => ipcRenderer.invoke('orders:fetch-proforce'),
   fetchCbkOrders: () => ipcRenderer.invoke('orders:fetch-cbk'),
+  fetchTigerOrders: () => ipcRenderer.invoke('orders:fetch-tiger'),
   fetchBestBuyOrders: () => ipcRenderer.invoke('orders:fetch-bestbuy'),
   openEpicor: (payload) => ipcRenderer.invoke('vendor:open-epicor', payload),
   scanEpicorRange: (payload) => ipcRenderer.invoke('vendor:scan-epicor-range', payload),

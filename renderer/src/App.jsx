@@ -23,6 +23,65 @@ import {
 
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
 
+// Shared between the orders pickup-filter switch and the filter-button badge
+// counts, so the two never drift out of sync.
+function matchesOrdersPickupFilter(order, value) {
+  switch (value) {
+    case "not-picked":
+      return !order.pickedUp;
+    case "not-arrived":
+      return !order.inStore;
+    case "not-entered-sage":
+      return !order.enteredInSage;
+    case "no-invoice": {
+      const inv = (order.source_invoice || "").toString().trim();
+      return (
+        (order.enteredInSage && !inv) ||
+        Boolean(order.invoiceNeedsSync) ||
+        Boolean(order.environmentalFeeAlert)
+      );
+    }
+    case "not-confirmed":
+      return !order.totalVerified;
+    case "not-printed": {
+      const vendor = (order.source || "").toString().trim().toLowerCase();
+      if (!["bestbuy", "transbec", "cbk"].includes(vendor)) return false;
+      const hasInvoiceFile = Boolean(
+        order.transbecInvoiceFile ||
+          order.transbecInvoiceImage ||
+          order.bestbuyInvoiceFile ||
+          order.bestbuyCreditFile ||
+          order.cbkInvoiceFile
+      );
+      if (!hasInvoiceFile) return false;
+      const printed = Boolean(
+        order.transbecInvoicePrinted ||
+          order.bestbuyInvoicePrinted ||
+          order.bestbuyCreditInvoicePrinted ||
+          order.cbkInvoicePrinted
+      );
+      return !printed;
+    }
+    // Mirrors OrderManagementView's canArchiveOrder — everything required to
+    // actually click "Archive Order" is already true.
+    case "needs-archive":
+      return Boolean(
+        order &&
+          order.detailStored === true &&
+          order.pickedUp === true &&
+          order.hasInvoiceNum === true &&
+          order.totalVerified === true &&
+          order.enteredInSage === true &&
+          order.inStore === true &&
+          order.invoiceNeedsSync !== true &&
+          order.valueCheckAlert !== true &&
+          !matchesOrdersPickupFilter(order, "not-printed")
+      );
+    default:
+      return true;
+  }
+}
+
 // Best-effort convert an Epicor grid date into Sage's DDMMYY, so an order
 // created from an Epicor invoice lands in the right world_YYYYMM folder when
 // archived. Returns "" for anything we can't confidently parse, in which case
@@ -70,23 +129,35 @@ const VIEWS = [
   { id: "payment-management", label: "Payment Management" },
 ];
 
-function ViewTabs({ currentView, onSelect }) {
+function ViewTabs({ currentView, onSelect, badges }) {
   return (
     <div className="w-full">
       <div className="flex flex-wrap gap-2 justify-start items-stretch">
-        {VIEWS.map((view) => (
-          <button
-            key={view.id}
-            onClick={() => onSelect(view.id)}
-            className={`h-11 min-w-[150px] px-4 rounded-full border text-sm font-semibold whitespace-nowrap transition ${
-              currentView === view.id
-                ? "bg-indigo-600 text-white border-indigo-600 shadow"
-                : "bg-white border-slate-200 text-slate-600 hover:text-indigo-600"
-            }`}
-          >
-            {view.label}
-          </button>
-        ))}
+        {VIEWS.map((view) => {
+          const badgeCount = badges?.[view.id] || 0;
+          const hasBadge = badgeCount > 0;
+          const isActive = currentView === view.id;
+          return (
+            <button
+              key={view.id}
+              onClick={() => onSelect(view.id)}
+              className={`relative h-11 min-w-[150px] px-4 rounded-full border text-sm font-semibold whitespace-nowrap transition ${
+                isActive
+                  ? "bg-indigo-600 text-white border-indigo-600 shadow"
+                  : hasBadge
+                  ? "bg-red-50 border-red-300 text-red-700 hover:bg-red-100"
+                  : "bg-white border-slate-200 text-slate-600 hover:text-indigo-600"
+              }`}
+            >
+              {view.label}
+              {hasBadge && (
+                <span className="absolute -top-1.5 -right-1.5 min-w-[20px] h-5 px-1 rounded-full bg-red-600 text-white text-[11px] font-bold flex items-center justify-center shadow">
+                  {badgeCount}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -102,7 +173,7 @@ export default function App() {
   const [bubbleZOrder, setBubbleZOrder] = useState([]);
   const [activeBubbleKey, setActiveBubbleKey] = useState(null);
   const [uiStateReady, setUiStateReady] = useState(false);
-  const [currentView, setCurrentView] = useState("stock-flow");
+  const [currentView, setCurrentView] = useState("order-management");
   const [returnsFilterEnabled, setReturnsFilterEnabled] = useState(false);
   const [returnsFilterDays, setReturnsFilterDays] = useState(0);
   const [timeFilterEnabled, setTimeFilterEnabled] = useState(false);
@@ -150,6 +221,9 @@ export default function App() {
   const [cbkOrdersRunning, setCbkOrdersRunning] = useState(false);
   const [cbkOrdersStatus, setCbkOrdersStatus] = useState("");
   const [cbkOrdersError, setCbkOrdersError] = useState("");
+  const [tigerOrdersRunning, setTigerOrdersRunning] = useState(false);
+  const [tigerOrdersStatus, setTigerOrdersStatus] = useState("");
+  const [tigerOrdersError, setTigerOrdersError] = useState("");
   const [bestBuyOrdersRunning, setBestBuyOrdersRunning] = useState(false);
   const [bestBuyOrdersStatus, setBestBuyOrdersStatus] = useState("");
   const [bestBuyOrdersError, setBestBuyOrdersError] = useState("");
@@ -187,6 +261,8 @@ export default function App() {
   const [cbkStatus, setCbkStatus] = useState("");
   const [cbkError, setCbkError] = useState("");
   const [invoicePrintingRef, setInvoicePrintingRef] = useState("");
+  const [printAllRunning, setPrintAllRunning] = useState(false);
+  const [archiveAllRunning, setArchiveAllRunning] = useState(false);
   const [outstandingRunning, setOutstandingRunning] = useState(false);
   const [outstandingStatus, setOutstandingStatus] = useState("");
   const [outstandingError, setOutstandingError] = useState("");
@@ -2063,6 +2139,33 @@ export default function App() {
     }
   }
 
+  // "Archive All" for the Needs Archive filter: archives each order the same
+  // way its own "Archive Order" button would, but first pops a native message
+  // box per order reminding the user to record the journal entry (showing
+  // whatever's currently stored in that order's journalEntry field) as a last
+  // confirmation — Cancel skips just that order and moves on to the next.
+  async function handleArchiveAllNeedsArchive(ordersToArchive) {
+    const list = Array.isArray(ordersToArchive) ? ordersToArchive : [];
+    if (!list.length || archiveAllRunning) return;
+    setArchiveAllRunning(true);
+    try {
+      for (const order of list) {
+        const refKey = order.reference || order.__row;
+        if (!refKey) continue;
+        const proceed = api?.confirm
+          ? await api.confirm(
+              `Record the journal entry before archiving order ${order.reference || refKey}.`,
+              `Journal Entry: ${order.journalEntry || "(none recorded)"}`
+            )
+          : true;
+        if (!proceed) continue;
+        await handleArchiveOrder(refKey, order.source);
+      }
+    } finally {
+      setArchiveAllRunning(false);
+    }
+  }
+
   // A vendor crawler builds its result from orders.json ON DISK, and we then
   // replace renderer state with that result wholesale. Edits that only live in
   // React state would therefore be silently dropped — and most order fields
@@ -2147,6 +2250,36 @@ export default function App() {
       setCbkOrdersError(e?.message || "Failed to fetch CBK orders.");
     } finally {
       setCbkOrdersRunning(false);
+    }
+  }
+
+  async function handleGetTigerOrders() {
+    if (!api?.fetchTigerOrders) return;
+    try {
+      setTigerOrdersRunning(true);
+      setTigerOrdersError("");
+      setTigerOrdersStatus("");
+      setOrdersError(null);
+      if (!(await flushPendingOrderEdits())) throw new Error(FLUSH_FAILED_MSG);
+      const res = await api.fetchTigerOrders();
+      if (!res?.ok) {
+        throw new Error(res?.error || "Failed to fetch Tiger orders.");
+      }
+      const list = Array.isArray(res.orders) ? res.orders : [];
+      setOrders(list);
+      ordersLastSavedRef.current = JSON.stringify(list);
+      setOrdersDirty(false);
+      setOrdersInitialized(true);
+      if (res.path) setOrdersSourcePath(res.path);
+      const baseMsg = `Fetched ${list.length} Tiger order(s) and saved to ${res.path || "orders.json"}.`;
+      const logMsg =
+        Array.isArray(res.statusLog) && res.statusLog.length ? `\n${res.statusLog.join("\n")}` : "";
+      setTigerOrdersStatus(baseMsg + logMsg);
+    } catch (e) {
+      console.error("[orders] tiger fetch error", e);
+      setTigerOrdersError(e?.message || "Failed to fetch Tiger orders.");
+    } finally {
+      setTigerOrdersRunning(false);
     }
   }
 
@@ -2235,6 +2368,63 @@ export default function App() {
       setProforceError(e?.message || "Failed to fetch Proforce orders.");
     } finally {
       setProforceRunning(false);
+    }
+  }
+
+  function clearOrderFetchMessage(vendor) {
+    switch (vendor) {
+      case "world":
+        setWorldOrdersStatus("");
+        setWorldOrdersError("");
+        break;
+      case "cbk":
+        setCbkOrdersStatus("");
+        setCbkOrdersError("");
+        break;
+      case "tiger":
+        setTigerOrdersStatus("");
+        setTigerOrdersError("");
+        break;
+      case "bestbuy-orders":
+        setBestBuyOrdersStatus("");
+        setBestBuyOrdersError("");
+        break;
+      case "transbec-orders":
+        setTransbecOrdersStatus("");
+        setTransbecOrdersError("");
+        break;
+      case "proforce":
+        setProforceStatus("");
+        setProforceError("");
+        break;
+      default:
+        break;
+    }
+  }
+
+  function clearInvoiceFetchMessage(vendor) {
+    switch (vendor) {
+      case "orders":
+        setOrdersError(null);
+        break;
+      case "epicor":
+        setEpicorStatus("");
+        setEpicorError("");
+        break;
+      case "transbec":
+        setTransbecStatus("");
+        setTransbecError("");
+        break;
+      case "bestbuy":
+        setBestbuyStatus("");
+        setBestbuyError("");
+        break;
+      case "cbk":
+        setCbkStatus("");
+        setCbkError("");
+        break;
+      default:
+        break;
     }
   }
 
@@ -3373,6 +3563,33 @@ export default function App() {
     }
   }
 
+  // "Print All" for the Not Printed filter: prints each order the same way its
+  // own "Print Invoice" button would, one at a time (reuses invoicePrintingRef
+  // so there's never more than one silent print job in flight).
+  async function handlePrintAllNotPrinted(ordersToPrint) {
+    const list = Array.isArray(ordersToPrint) ? ordersToPrint : [];
+    if (!list.length || printAllRunning) return;
+    setPrintAllRunning(true);
+    try {
+      for (const order of list) {
+        if ((order.transbecInvoiceFile || order.transbecInvoiceImage) && !order.transbecInvoicePrinted) {
+          await handlePrintVendorInvoice(order, "transbec");
+        }
+        if (order.bestbuyInvoiceFile && !order.bestbuyInvoicePrinted) {
+          await handlePrintVendorInvoice(order, "bestbuy");
+        }
+        if (order.bestbuyCreditFile && !order.bestbuyCreditInvoicePrinted) {
+          await handlePrintVendorInvoice(order, "bestbuy-credit");
+        }
+        if (order.cbkInvoiceFile && !order.cbkInvoicePrinted) {
+          await handlePrintVendorInvoice(order, "cbk");
+        }
+      }
+    } finally {
+      setPrintAllRunning(false);
+    }
+  }
+
   async function handleAddOutstanding() {
     if (!api?.addOrdersToOutstanding) return;
     try {
@@ -3705,7 +3922,22 @@ export default function App() {
     setSageReadyOrders((orders || []).filter((o) => o && o.sage_trigger));
   }, [orders]);
 
-  const filteredOrders = useMemo(() => {
+  const todayRangeMs = () => {
+    const now = new Date();
+    return {
+      start: new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(),
+      end: new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime(),
+    };
+  };
+
+  const isOrderToday = (order, todayStart, todayEnd) => {
+    const raw = order?.orderDate || order?.orderDateRaw;
+    const time = new Date(raw || 0).getTime();
+    if (Number.isNaN(time)) return false;
+    return time >= todayStart && time < todayEnd;
+  };
+
+  const { filteredOrders, orderFilterCounts } = useMemo(() => {
     const q = ordersSearch.trim().toLowerCase();
     const filtered = !q
       ? orders
@@ -3727,39 +3959,17 @@ export default function App() {
 
     const pickupFiltered = filtered.filter((order) => {
       if (order?._localDirty) return true;
-      switch (ordersPickupFilter) {
-        case "not-picked":
-          return !order.pickedUp;
-        case "not-arrived":
-          return !order.inStore;
-        case "not-entered-sage":
-          return !order.enteredInSage;
-        case "totals-not-verified":
-          return order.enteredInSage && !order.totalVerified;
-        case "no-invoice": {
-          const inv = (order.source_invoice || "").toString().trim();
-          return order.enteredInSage && !inv;
-        }
-        default:
-          return true;
-      }
+      return matchesOrdersPickupFilter(order, ordersPickupFilter);
     });
 
-    const now = new Date();
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime();
+    const { start: todayStart, end: todayEnd } = todayRangeMs();
 
     const todayFiltered = ordersTodayOnly
-      ? pickupFiltered.filter((order) => {
-          const raw = order?.orderDate || order?.orderDateRaw;
-          const time = new Date(raw || 0).getTime();
-          if (Number.isNaN(time)) return false;
-          return time >= todayStart && time < todayEnd;
-        })
+      ? pickupFiltered.filter((order) => isOrderToday(order, todayStart, todayEnd))
       : pickupFiltered;
 
     // sort by orderDate descending (newest first), fallback to orderDateRaw string
-    return [...(todayFiltered || [])].sort((a, b) => {
+    const sorted = [...(todayFiltered || [])].sort((a, b) => {
       const da = new Date(a?.orderDate || a?.orderDateRaw || 0).getTime();
       const db = new Date(b?.orderDate || b?.orderDateRaw || 0).getTime();
       if (Number.isNaN(da) && Number.isNaN(db)) return 0;
@@ -3767,10 +3977,36 @@ export default function App() {
       if (Number.isNaN(db)) return -1;
       return db - da;
     });
+
+    // Badge counts for the filter buttons: scoped by search + Today (same as
+    // the visible list) but NOT by which pickup filter is currently selected,
+    // so every button always shows how many orders it would surface.
+    const countScope = ordersTodayOnly
+      ? filtered.filter((order) => isOrderToday(order, todayStart, todayEnd))
+      : filtered;
+    const counts = {};
+    [
+      "not-picked",
+      "not-arrived",
+      "not-entered-sage",
+      "no-invoice",
+      "not-confirmed",
+      "not-printed",
+      "needs-archive",
+    ].forEach((value) => {
+      counts[value] = countScope.filter((order) => matchesOrdersPickupFilter(order, value)).length;
+    });
+
+    return { filteredOrders: sorted, orderFilterCounts: counts };
   }, [orders, ordersSearch, ordersPickupFilter, ordersTodayOnly]);
 
   const hasSearch = ordersSearch.trim().length > 0;
 
+  const epicorNeedsAssignmentCount = useMemo(
+    () => epicorScanInvoices.filter((i) => !i.known && !i.created && !i.assignedTo).length,
+    [epicorScanInvoices]
+  );
+  const viewBadges = { epicor: epicorNeedsAssignmentCount };
 
   const currentViewMeta = VIEWS.find((v) => v.id === currentView);
   const isBubbleFlowView =
@@ -3783,13 +4019,7 @@ export default function App() {
       <div className="w-full px-4 sm:px-6 lg:px-8 space-y-6">
         <header className="bg-white/70 rounded-3xl shadow border border-white/60">
           <div className="w-full flex flex-col gap-4 p-4 sm:flex-col sm:items-start sm:justify-start">
-            <div className="shrink-0 text-left">
-              <h1 className="text-2xl sm:text-3xl font-bold text-slate-800">
-                Business Control Center
-              </h1>
-              <p className="text-sm text-slate-500">Manage pipelines, orders, and payments from one dashboard.</p>
-            </div>
-            <ViewTabs currentView={currentView} onSelect={setCurrentView} />
+            <ViewTabs currentView={currentView} onSelect={setCurrentView} badges={viewBadges} />
           </div>
         </header>
 
@@ -3807,26 +4037,6 @@ export default function App() {
             setTimeFilterHours={setTimeFilterHours}
             timeFilterDays={timeFilterDays}
             setTimeFilterDays={setTimeFilterDays}
-            onGetWorldOrders={handleGetWorldOrders}
-            worldOrdersRunning={worldOrdersRunning}
-            worldOrdersStatus={worldOrdersStatus}
-            worldOrdersError={worldOrdersError}
-            onGetCbkOrders={handleGetCbkOrders}
-            cbkOrdersRunning={cbkOrdersRunning}
-            cbkOrdersStatus={cbkOrdersStatus}
-            cbkOrdersError={cbkOrdersError}
-            onGetBestBuyOrders={handleGetBestBuyOrders}
-            bestBuyOrdersRunning={bestBuyOrdersRunning}
-            bestBuyOrdersStatus={bestBuyOrdersStatus}
-            bestBuyOrdersError={bestBuyOrdersError}
-            onGetTransbecOrders={handleGetTransbecOrders}
-            transbecOrdersRunning={transbecOrdersRunning}
-            transbecOrdersStatus={transbecOrdersStatus}
-            transbecOrdersError={transbecOrdersError}
-            onGetProforceOrders={handleGetProforceOrders}
-            proforceRunning={proforceRunning}
-            proforceStatus={proforceStatus}
-            proforceError={proforceError}
             onAddOutstanding={handleAddOutstanding}
             outstandingRunning={outstandingRunning}
             outstandingStatus={outstandingStatus}
@@ -3974,6 +4184,7 @@ export default function App() {
             loadOrders={loadOrders}
             handleSaveOrders={handleSaveOrders}
             filteredOrders={filteredOrders}
+            orderFilterCounts={orderFilterCounts}
             handleOrderCheckboxChange={handleOrderCheckboxChange}
             handleOrderFieldChange={handleOrderFieldChange}
             onMarkForSage={handleOrderSageTrigger}
@@ -3983,6 +4194,32 @@ export default function App() {
             onArchiveOrder={handleArchiveOrder}
             onDeleteOrder={handleDeleteEpicorOrder}
             hasSearch={hasSearch}
+            onGetWorldOrders={handleGetWorldOrders}
+            worldOrdersRunning={worldOrdersRunning}
+            worldOrdersStatus={worldOrdersStatus}
+            worldOrdersError={worldOrdersError}
+            onGetCbkOrders={handleGetCbkOrders}
+            cbkOrdersRunning={cbkOrdersRunning}
+            cbkOrdersStatus={cbkOrdersStatus}
+            cbkOrdersError={cbkOrdersError}
+            onGetTigerOrders={handleGetTigerOrders}
+            tigerOrdersRunning={tigerOrdersRunning}
+            tigerOrdersStatus={tigerOrdersStatus}
+            tigerOrdersError={tigerOrdersError}
+            onGetBestBuyOrders={handleGetBestBuyOrders}
+            bestBuyOrdersRunning={bestBuyOrdersRunning}
+            bestBuyOrdersStatus={bestBuyOrdersStatus}
+            bestBuyOrdersError={bestBuyOrdersError}
+            onGetTransbecOrders={handleGetTransbecOrders}
+            transbecOrdersRunning={transbecOrdersRunning}
+            transbecOrdersStatus={transbecOrdersStatus}
+            transbecOrdersError={transbecOrdersError}
+            onGetProforceOrders={handleGetProforceOrders}
+            proforceRunning={proforceRunning}
+            proforceStatus={proforceStatus}
+            proforceError={proforceError}
+            onClearOrderFetchMessage={clearOrderFetchMessage}
+            onClearInvoiceFetchMessage={clearInvoiceFetchMessage}
             onOpenEpicor={handleOpenEpicor}
             onConfirmOrderEdit={(key) => updateOrderByKeyAndSave(key, {})}
             epicorOpening={epicorOpening}
@@ -4014,6 +4251,10 @@ export default function App() {
             onVerifyCbkInvoice={handleOpenEpicorReview}
             onPrintCbkInvoice={(order) => handlePrintVendorInvoice(order, "cbk")}
             invoicePrintingRef={invoicePrintingRef}
+            onPrintAllNotPrinted={handlePrintAllNotPrinted}
+            printAllRunning={printAllRunning}
+            onArchiveAllNeedsArchive={handleArchiveAllNeedsArchive}
+            archiveAllRunning={archiveAllRunning}
             onUpdateInvoiceTrigger={handleUpdateInvoiceTrigger}
           />
         ) : currentView === "epicor" ? (

@@ -45,6 +45,7 @@ const createVendorOrdersService = (deps) => {
     getTransbecOrders,
     getProforceOrders,
     getCbkOrders,
+    getTigerOrders,
     getBestBuyOrders,
     openEpicorSite,
     fetchTransbecInvoicesScraper,
@@ -207,6 +208,36 @@ const createVendorOrdersService = (deps) => {
     } catch (e) {
       console.error('[orders:fetch-cbk]', e);
       return { ok: false, error: e?.message || 'Failed to fetch CBK orders.' };
+    }
+  }
+
+  async function fetchTigerOrders() {
+    try {
+      const config = loadConfig();
+      const tigerUser = typeof config.TIGER_USER === 'string' ? config.TIGER_USER : '';
+      const tigerPass = typeof config.TIGER_PASS === 'string' ? config.TIGER_PASS : '';
+      if (!tigerUser || !tigerPass) {
+        return { ok: false, error: 'Missing TIGER credentials. Set them in Settings.' };
+      }
+      ensureDir(VENDOR_PATHS.tiger.dataDir);
+      const targetOrdersPath = getOrdersFile();
+      const existing = readOrders();
+      const archivedRefs = getArchivedOrderRefs(existing, { vendor: 'tiger' });
+      const res = await getTigerOrders({
+        storageDir: VENDOR_PATHS.tiger.dataDir,
+        storageStatePath: VENDOR_PATHS.tiger.storageState,
+        ordersPath: targetOrdersPath,
+        existingOrders: existing,
+        existingRefs: archivedRefs,
+        credentials: { user: tigerUser, pass: tigerPass },
+      });
+      if (res?.ok && Array.isArray(res.orders)) {
+        writeOrders(res.orders);
+      }
+      return { ok: true, ...(res || {}), path: targetOrdersPath };
+    } catch (e) {
+      console.error('[orders:fetch-tiger]', e);
+      return { ok: false, error: e?.message || 'Failed to fetch Tiger orders.' };
     }
   }
 
@@ -599,6 +630,7 @@ const createVendorOrdersService = (deps) => {
     fetchTransbecOrders,
     fetchProforceOrders,
     fetchCbkOrders,
+    fetchTigerOrders,
     fetchBestBuyOrders,
     openEpicor,
     scanEpicorRange,

@@ -44,6 +44,10 @@ export default function EpicorView({
   }, []);
 
   const invoices = Array.isArray(results) ? results : [];
+  const needsAssignmentCount = useMemo(
+    () => invoices.filter((i) => !i.known && !i.created && !i.assignedTo).length,
+    [invoices]
+  );
   const visible = useMemo(
     // Keep just-created invoices visible (with a badge) even though they now
     // count as "on file", so the user sees the confirmation.
@@ -190,6 +194,15 @@ export default function EpicorView({
               </span>
               <span className="px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
                 {scannedCount - unknownCount} already on file
+              </span>
+              <span
+                className={`px-2 py-1 rounded-full border font-semibold ${
+                  needsAssignmentCount > 0
+                    ? "bg-red-100 text-red-700 border-red-200"
+                    : "bg-slate-100 text-slate-500 border-slate-200"
+                }`}
+              >
+                {needsAssignmentCount} not assigned to an order
               </span>
             </div>
             <label className="flex items-center gap-2 text-sm text-slate-600">

@@ -45,6 +45,7 @@ const fallbackApi = {
   getPaymentsPath: warnAsync("getPaymentsPath", async () => ({ path: "(not in Electron)" })),
   fetchWorldOrders: warnAsync("fetchWorldOrders"),
   fetchCbkOrders: warnAsync("fetchCbkOrders"),
+  fetchTigerOrders: warnAsync("fetchTigerOrders"),
   fetchBestBuyOrders: warnAsync("fetchBestBuyOrders"),
   openEpicor: warnAsync("openEpicor"),
   scanEpicorRange: warnAsync("scanEpicorRange"),
