@@ -194,10 +194,15 @@ async function downloadAttachment(gmail, messageId, attachmentId) {
 
 // Search for candidate invoice emails. Query mirrors the user's chosen anchor:
 // sender + subject pattern, restricted to messages that carry an attachment.
-async function searchInvoiceEmails(gmail, { sender, subjectPattern, maxResults = 25 }) {
+// `after`/`before` are optional Gmail-format date strings ("YYYY/MM/DD"); when
+// omitted (every existing caller) the search is unbounded, so this is fully
+// backward-compatible with the invoice pipelines that don't use a date range.
+async function searchInvoiceEmails(gmail, { sender, subjectPattern, maxResults = 25, after, before }) {
   const parts = ["has:attachment"];
   if (sender) parts.push(`from:(${sender})`);
   if (subjectPattern) parts.push(`subject:(${subjectPattern})`);
+  if (after) parts.push(`after:${after}`);
+  if (before) parts.push(`before:${before}`);
   const q = parts.join(" ");
   console.log(`[transbec-invoice] Gmail search query: ${q}`);
   const listRes = await gmail.users.messages.list({ userId: "me", q, maxResults });

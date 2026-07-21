@@ -33,6 +33,7 @@ const { openEpicorSite } = require('./src/scrapers/epicorScraper');
 const { fetchTransbecInvoices } = require('./src/scrapers/transbecInvoice');
 const { fetchBestbuyInvoices } = require('./src/scrapers/bestbuyInvoice');
 const { fetchBestbuyCreditInvoices } = require('./src/scrapers/bestbuyCreditInvoice');
+const { fetchTransbecCreditInvoices } = require('./src/scrapers/transbecCreditInvoice');
 const { fetchCbkInvoices } = require('./src/scrapers/cbkInvoice');
 const { runInteractiveAuth, verifyConnection } = require('./src/scrapers/gmail.auth');
 
@@ -132,6 +133,9 @@ function getBestbuyCreditInvoiceCachePath() {
 }
 function getCbkInvoiceCachePath() {
   return path.join(getGmailAssetsDir(), 'cbk_invoice_cache.json');
+}
+function getTransbecCreditInvoiceCachePath() {
+  return path.join(getGmailAssetsDir(), 'transbec_credit_invoice_cache.json');
 }
 
 const PRELOAD = path.resolve(__dirname, 'preload.js');
@@ -928,8 +932,12 @@ function archiveWorldEpicorAssets(archivedOrders) {
 function archiveTransbecGmailAssets(archivedOrders) {
   // transbecInvoiceFile holds the .pdf name; older records stored a .png name in
   // transbecInvoiceImage — the PDF sits beside it, so derive it for those too.
+  // transbecCreditFile is the analogous field for a credit-memo order created
+  // from the Transbec Credits scan (no invoice — just a credit attachment).
   const transbecPdfName = (o) =>
-    o.transbecInvoiceFile || (o.transbecInvoiceImage ? o.transbecInvoiceImage.replace(/\.png$/i, '.pdf') : '');
+    o.transbecInvoiceFile ||
+    o.transbecCreditFile ||
+    (o.transbecInvoiceImage ? o.transbecInvoiceImage.replace(/\.png$/i, '.pdf') : '');
   const candidates = (archivedOrders || []).filter((o) => o && o.source === 'transbec' && transbecPdfName(o));
   if (!candidates.length) return;
 
@@ -1043,6 +1051,83 @@ function addOrderLineItemsToNewStock(order) {
   return { order: { ...order, lineItems: updatedLineItems }, newItems };
 }
 
+function itemCodeKey(v) {
+  return String(v || '').trim().toUpperCase().replace(/\s+/g, ' ');
+}
+
+// Credit/return orders (order.isCredit === true, currently only Transbec
+// credit memos — see [[transbec-credit-memos]]) run through archiving
+// differently from every other order: instead of adding their (negative)
+// line items as fresh NEW STOCK — which would be wrong, since a credit isn't
+// new inventory arriving — this "rakes out" stock that's ALREADY sitting in
+// the RETURNS bubble, matched by itemcode (partLineCode + partNumber). Per
+// explicit instruction: if there's no matching item in RETURNS, the line is
+// left alone entirely and NOTHING is added to stock flow for it — a credit
+// with no corresponding physical return on hand must not invent a stock
+// movement. Unlike addOrderLineItemsToNewStock (pure upsert of brand-new
+// rows), this can both decrement an existing row's quantity and fully
+// delete it, so it performs its own read+write instead of returning
+// newItems for the caller to concat.
+function reconcileCreditReturnAgainstStock(order) {
+  if (!order || !Array.isArray(order.lineItems) || !order.lineItems.length) return order;
+
+  let currentItems;
+  try {
+    currentItems = readItems() || [];
+  } catch (e) {
+    console.error('[orders] reconcileCreditReturnAgainstStock: readItems failed', e);
+    return order;
+  }
+
+  const nowIso = new Date().toISOString();
+  const upserts = [];
+  const deletedUids = [];
+  // Guards against two credit line items for the same part both matching the
+  // same physical Returns row within one reconciliation pass.
+  const consumedUids = new Set();
+
+  const updatedLineItems = order.lineItems.map((line) => {
+    if (!line || line.addedToOutstanding === true) return line;
+    const code = itemCodeKey(`${line.partLineCode || ''} ${line.partNumber || ''}`);
+    const returnQty = Math.abs(Number(line.quantity) || 0);
+    if (!code || !returnQty) return { ...line, addedToOutstanding: true };
+
+    const match = currentItems.find(
+      (it) =>
+        it &&
+        !consumedUids.has(it.uid) &&
+        itemCodeKey(it.itemcode) === code &&
+        String(it.allocated_to || '').trim().toUpperCase() === 'RETURNS'
+    );
+
+    if (!match) {
+      console.log(
+        `[orders] credit ${order.reference || ''}: no matching Returns item for "${code}" — leaving stock flow untouched`
+      );
+      return { ...line, addedToOutstanding: true };
+    }
+
+    consumedUids.add(match.uid);
+    const nextQty = (Number(match.quantity) || 0) - returnQty;
+    if (nextQty > 0) {
+      upserts.push({ ...match, quantity: nextQty, last_moved_at: nowIso });
+    } else {
+      deletedUids.push(match.uid);
+    }
+    return { ...line, addedToOutstanding: true };
+  });
+
+  if (upserts.length || deletedUids.length) {
+    try {
+      writeItems(upserts, { deletedUids });
+    } catch (e) {
+      console.error('[orders] reconcileCreditReturnAgainstStock: writeItems failed', e);
+    }
+  }
+
+  return { ...order, lineItems: updatedLineItems };
+}
+
 function archiveCompletedOrders(options = {}) {
   let minDays = options;
   if (options && typeof options === 'object') {
@@ -1075,9 +1160,18 @@ function archiveCompletedOrders(options = {}) {
     if (isOrderCompleteForArchive(order, minDays)) {
       const key = normalizeOrderRef(order);
       if (key && !archiveByKey.has(key)) {
-        const { order: withOutstanding, newItems } = addOrderLineItemsToNewStock(order);
-        if (newItems.length) allNewOutstandingItems.push(...newItems);
-        const archivedOrder = { ...withOutstanding, archivedAt: nowIso };
+        let processedOrder;
+        if (order.isCredit) {
+          // Performs its own read+write immediately (it can decrement/delete
+          // existing Returns rows, not just add new ones) — see the function
+          // comment for why this can't be batched with allNewOutstandingItems.
+          processedOrder = reconcileCreditReturnAgainstStock(order);
+        } else {
+          const { order: withOutstanding, newItems } = addOrderLineItemsToNewStock(order);
+          if (newItems.length) allNewOutstandingItems.push(...newItems);
+          processedOrder = withOutstanding;
+        }
+        const archivedOrder = { ...processedOrder, archivedAt: nowIso };
         archiveByKey.set(key, archivedOrder);
         archivedCount += 1;
         newlyArchivedOrders.push(archivedOrder);
@@ -1229,15 +1323,19 @@ function archiveOrderByKey(refKeyRaw, source) {
     return { ok: false, error: 'Order does not meet archive criteria.' };
   }
 
-  const { order: withOutstanding, newItems } = addOrderLineItemsToNewStock(found);
-  if (newItems.length) {
-    try {
-      writeItems(readItems().concat(newItems));
-    } catch (e) {
-      console.error('[orders] failed to add order items to Outstanding before archive', e);
+  if (found.isCredit) {
+    found = reconcileCreditReturnAgainstStock(found);
+  } else {
+    const { order: withOutstanding, newItems } = addOrderLineItemsToNewStock(found);
+    if (newItems.length) {
+      try {
+        writeItems(readItems().concat(newItems));
+      } catch (e) {
+        console.error('[orders] failed to add order items to Outstanding before archive', e);
+      }
     }
+    found = withOutstanding;
   }
-  found = withOutstanding;
 
   const normKey = archiveDedupeKey(found);
   let archivedOrder = null;
@@ -1316,12 +1414,14 @@ const vendorOrdersService = createVendorOrdersService({
   fetchBestbuyInvoicesScraper: fetchBestbuyInvoices,
   fetchBestbuyCreditInvoicesScraper: fetchBestbuyCreditInvoices,
   fetchCbkInvoicesScraper: fetchCbkInvoices,
+  fetchTransbecCreditInvoicesScraper: fetchTransbecCreditInvoices,
   getEpicorAssetsDir,
   getGmailAssetsDir,
   getTransbecInvoiceCachePath,
   getBestbuyInvoiceCachePath,
   getBestbuyCreditInvoiceCachePath,
   getCbkInvoiceCachePath,
+  getTransbecCreditInvoiceCachePath,
   runInteractiveAuth,
   verifyConnection,
   saveConfig,
@@ -1343,6 +1443,9 @@ const {
   fetchBestbuyInvoices: fetchBestbuyInvoicesService,
   fetchBestbuyCreditInvoices: fetchBestbuyCreditInvoicesService,
   fetchCbkInvoices: fetchCbkInvoicesService,
+  fetchTransbecCreditInvoices: fetchTransbecCreditInvoicesService,
+  getTransbecCreditInvoices,
+  resetTransbecCreditScans,
   connectGmail,
   getGmailStatus,
 } = vendorOrdersService;
@@ -1818,6 +1921,9 @@ function registerAllIpc() {
     fetchBestbuyInvoices: fetchBestbuyInvoicesService,
     fetchBestbuyCreditInvoices: fetchBestbuyCreditInvoicesService,
     fetchCbkInvoices: fetchCbkInvoicesService,
+    fetchTransbecCreditInvoices: fetchTransbecCreditInvoicesService,
+    getTransbecCreditInvoices,
+    resetTransbecCreditScans,
     connectGmail,
     getGmailStatus,
     getGmailAssetsDir,

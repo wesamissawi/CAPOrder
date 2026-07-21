@@ -26,6 +26,10 @@ const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
 // Shared between the orders pickup-filter switch and the filter-button badge
 // counts, so the two never drift out of sync.
 function matchesOrdersPickupFilter(order, value) {
+  // Credit orders live entirely under their own "Credit" filter — regardless
+  // of what state they're in (confirmed, picked up, invoiced, etc.) they must
+  // never surface under any other filter, including "All".
+  if (value !== "credit" && order?.isCredit === true) return false;
   switch (value) {
     case "not-picked":
       return !order.pickedUp;
@@ -62,6 +66,12 @@ function matchesOrdersPickupFilter(order, value) {
       );
       return !printed;
     }
+    // Every credit invoice, any vendor — Transbec's standalone credit orders
+    // set isCredit at creation; BestBuy's credit patch (handleFetchBestbuyInvoices)
+    // sets it on the existing order it patches. A future vendor's credit
+    // pipeline just needs to set this same flag to show up in this filter.
+    case "credit":
+      return order.isCredit === true;
     // Mirrors OrderManagementView's canArchiveOrder — everything required to
     // actually click "Archive Order" is already true.
     case "needs-archive":
@@ -251,6 +261,14 @@ export default function App() {
   const [epicorReviewLoading, setEpicorReviewLoading] = useState(false);
   const [epicorReviewSaving, setEpicorReviewSaving] = useState(false);
   const [epicorReviewError, setEpicorReviewError] = useState("");
+  // Epicor view: Transbec credit memos from Gmail — unlike the World scan
+  // above, there's no vendor site to scan; it's a Gmail search (periodic
+  // "Check for Transbec Credits" button) whose hits have no pre-existing
+  // order, so each one gets its own "Create order" action.
+  const [transbecCreditScanning, setTransbecCreditScanning] = useState(false);
+  const [transbecCreditError, setTransbecCreditError] = useState("");
+  const [transbecCreditLog, setTransbecCreditLog] = useState([]);
+  const [transbecCredits, setTransbecCredits] = useState([]);
   const [transbecFetching, setTransbecFetching] = useState(false);
   const [transbecStatus, setTransbecStatus] = useState("");
   const [transbecError, setTransbecError] = useState("");
@@ -2139,6 +2157,23 @@ export default function App() {
     }
   }
 
+  // The individual "Archive Order" button's confirmation — same journal-entry
+  // reminder popup as "Archive All" (below) gives each order, just for the
+  // one order being archived. Cancel aborts, nothing is archived.
+  async function handleArchiveOrderWithConfirm(order) {
+    if (!order) return;
+    const refKey = order.reference || order.__row;
+    if (!refKey) return;
+    const proceed = api?.confirm
+      ? await api.confirm(
+          `Record the journal entry before archiving order ${order.reference || refKey}.`,
+          `Journal Entry: ${order.journalEntry || "(none recorded)"}`
+        )
+      : true;
+    if (!proceed) return;
+    await handleArchiveOrder(refKey, order.source);
+  }
+
   // "Archive All" for the Needs Archive filter: archives each order the same
   // way its own "Archive Order" button would, but first pops a native message
   // box per order reminding the user to record the journal entry (showing
@@ -2895,6 +2930,171 @@ export default function App() {
     if (!res?.ok) setOrdersError(res?.error || "Failed to delete order.");
   }
 
+  // Load whatever Transbec credit memos are already cached (no Gmail call) —
+  // mirrors handleLoadEpicorScanned, so a restart still shows prior results.
+  async function handleLoadTransbecCredits() {
+    if (!api?.getTransbecCredits) return;
+    try {
+      setTransbecCreditError("");
+      const res = await api.getTransbecCredits();
+      if (!res?.ok) throw new Error(res?.error || "Failed to load Transbec credits.");
+      setTransbecCredits(Array.isArray(res.credits) ? res.credits : []);
+    } catch (e) {
+      console.error("[vendor] load transbec credits failed", e);
+      setTransbecCreditError(e?.message || "Failed to load Transbec credits.");
+    }
+  }
+
+  // The "Check for Transbec Credits" button: searches Gmail for credit memo
+  // emails from Transbec (subject "Credit Memo for T30252 Cust PO") and lists
+  // whatever is found. There's no existing order to auto-match against — the
+  // user turns a discovery into an order with the per-row "Create order" button.
+  async function handleFetchTransbecCredits(fromDate, toDate) {
+    if (!api?.fetchTransbecCreditInvoices) return;
+    try {
+      setTransbecCreditScanning(true);
+      setTransbecCreditError("");
+      const res = await api.fetchTransbecCreditInvoices({ fromDate, toDate });
+      setTransbecCreditLog(Array.isArray(res?.statusLog) ? res.statusLog : []);
+      if (!res?.ok) throw new Error(res?.error || "Failed to check for Transbec credits.");
+      setTransbecCredits(Array.isArray(res.discoveries) ? res.discoveries : []);
+    } catch (e) {
+      console.error("[vendor] fetch transbec credits failed", e);
+      setTransbecCreditError(e?.message || "Failed to check for Transbec credits.");
+    } finally {
+      setTransbecCreditScanning(false);
+    }
+  }
+
+  // Turn a discovered Transbec credit memo into a new order in Order
+  // Management — there is no existing order to patch (unlike BestBuy credits),
+  // so this always creates one, keyed by the credit memo number the same way
+  // Epicor-created orders are keyed by invoice number. Reads the freshest
+  // orders from disk since the Epicor view can be used without Order
+  // Management being open.
+  async function handleCreateOrderFromTransbecCredit(credit) {
+    if (!credit || !api?.writeOrders) return { ok: false, error: "Saving orders is not available." };
+    const memoNum = String(credit.creditMemoNumber || "").trim();
+    if (!memoNum) return { ok: false, error: "This credit memo has no number to key an order by." };
+    try {
+      const ordersRes = await api?.readOrders?.();
+      const currentList = ordersRes?.state || ordersRes || [];
+      const base = Array.isArray(currentList) ? currentList : [];
+
+      const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+      const memoKey = norm(memoNum);
+      const already = base.some(
+        (o) => o && (norm(o.source_invoice) === memoKey || norm(o.invoiceNum) === memoKey)
+      );
+
+      if (!already) {
+        const totalNum = Number(credit.total);
+        const refValue = credit.reference ? String(credit.reference).trim() : memoNum;
+        const newOrder = {
+          source: "transbec",
+          isCredit: true,
+          reference: refValue,
+          __row: refValue,
+          warehouse: "Transbec Credit",
+          // Same Sage source code regular (scraped) Transbec orders use
+          // (transbecScraper.js) — credit orders are built manually here, so
+          // they'd otherwise go into Sage with no source code at all.
+          sage_source: "TRA505",
+          source_invoice: memoNum,
+          sage_reference: memoNum,
+          hasInvoiceNum: true,
+          // Credit orders have no separate detail-fetch step, same as
+          // Epicor/CBK/BestBuy Gmail orders — the credit total IS the detail.
+          detailStored: true,
+          ...(Number.isFinite(totalNum) ? { billed_total: totalNum } : {}),
+          ...(credit.fileName ? { transbecCreditFile: credit.fileName } : {}),
+          // The returned parts (qty/price), read straight off the credit memo
+          // — same field shape as any other Transbec order's lineItems, so
+          // e.g. archiving this order feeds them through the same
+          // addOrderLineItemsToNewStock path as a normal order (negative
+          // quantities net the returned units out of New Stock).
+          lineItems: Array.isArray(credit.lineItems) ? credit.lineItems : [],
+          ...(credit.poNumber ? { transbecCreditPoNumber: credit.poNumber } : {}),
+          ...(credit.customerNumber ? { transbecCreditCustomerNumber: credit.customerNumber } : {}),
+          lastUpdatedAt: new Date().toISOString(),
+        };
+        const nextList = normalizeOrdersForSave(base.concat(newOrder));
+        const saveRes = await api.writeOrders(nextList);
+        if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the new order.");
+        if (ordersInitialized) {
+          setOrders(nextList);
+          ordersLastSavedRef.current = JSON.stringify(nextList);
+          setOrdersDirty(false);
+        }
+      }
+
+      setTransbecCredits((prev) =>
+        prev.map((c) => (norm(c.creditMemoNumber) === memoKey ? { ...c, known: true, created: true } : c))
+      );
+      return { ok: true, duplicate: already };
+    } catch (e) {
+      console.error("[vendor] create order from transbec credit failed", e);
+      return { ok: false, error: e?.message || "Failed to create order." };
+    }
+  }
+
+  // Remove the order created from a Transbec credit memo, flipping the row
+  // back to "not created" so it can be re-created if needed — mirrors
+  // handleRemoveEpicorOrder.
+  async function handleRemoveTransbecCreditOrder(credit) {
+    const memoNum = String(credit?.creditMemoNumber || "").trim();
+    if (!memoNum) return { ok: false, error: "This credit memo has no number." };
+    const res = await handleDeleteOrder(memoNum, "transbec");
+    if (!res.ok) return res;
+    const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+    const memoKey = norm(memoNum);
+    setTransbecCredits((prev) =>
+      prev.map((c) => (norm(c.creditMemoNumber) === memoKey ? { ...c, known: false, created: false } : c))
+    );
+    return { ok: true };
+  }
+
+  // DEV-ONLY: wipe every cached Transbec credit scan result and downloaded PDF
+  // so a scan can be re-run from scratch while this feature is being built.
+  // Does not touch any order already created from a credit.
+  async function handleResetTransbecCredits() {
+    if (!api?.resetTransbecCredits) return { ok: false, error: "Reset is not available." };
+    const proceed = api?.confirm
+      ? await api.confirm(
+          "Clear all Transbec credit scan data?",
+          "This deletes the cached scan results and every downloaded credit memo PDF. Orders already created from a credit are not affected."
+        )
+      : true;
+    if (!proceed) return { ok: false };
+    try {
+      const res = await api.resetTransbecCredits();
+      if (!res?.ok) throw new Error(res?.error || "Failed to clear Transbec credit scans.");
+      setTransbecCredits([]);
+      setTransbecCreditLog([]);
+      setTransbecCreditError("");
+      return { ok: true };
+    } catch (e) {
+      console.error("[vendor] reset transbec credits failed", e);
+      setTransbecCreditError(e?.message || "Failed to clear Transbec credit scans.");
+      return { ok: false, error: e?.message };
+    }
+  }
+
+  // Credit memo PDFs share the gmail data dir with regular Transbec invoices,
+  // so viewing reuses that same IPC handler by file name.
+  async function handleViewTransbecCreditImage(fileName) {
+    if (!api?.openTransbecInvoiceImage || !fileName) return;
+    try {
+      const res = await api.openTransbecInvoiceImage(fileName);
+      if (!res?.ok) {
+        setTransbecCreditError(res?.error || "Failed to open credit memo file.");
+      }
+    } catch (e) {
+      console.error("[vendor] failed to open transbec credit file", e);
+      setTransbecCreditError(e?.message || "Failed to open credit memo file.");
+    }
+  }
+
   async function handleViewEpicorInvoiceImage(fileName) {
     if (!api?.openEpicorInvoiceImage || !fileName) return;
     try {
@@ -2916,6 +3116,9 @@ export default function App() {
   // beside it with the same base name, so derive it for those older records.
   function transbecPdfName(order) {
     if (order?.transbecInvoiceFile) return order.transbecInvoiceFile;
+    // Credit orders (isCredit: true) never have a regular invoice file, only
+    // this one — safe to fall back to unconditionally.
+    if (order?.transbecCreditFile) return order.transbecCreditFile;
     if (order?.transbecInvoiceImage) return order.transbecInvoiceImage.replace(/\.png$/i, ".pdf");
     return "";
   }
@@ -3309,6 +3512,10 @@ export default function App() {
                   invoiceNeedsSync,
                   ...(Number.isFinite(creditTotalNum) ? { billed_total: creditTotalNum } : {}),
                   ...(foundCredit.fileName ? { bestbuyCreditFile: foundCredit.fileName } : {}),
+                  // Uniform cross-vendor marker so the "Credit" order filter can
+                  // find every vendor's credits with one predicate — same flag
+                  // Transbec credit orders already set at creation.
+                  isCredit: true,
                 };
               }
             }
@@ -3538,10 +3745,14 @@ export default function App() {
       vendor === "transbec" ? setTransbecError : vendor === "cbk" ? setCbkError : setBestbuyError;
     if (!fileName || !api?.printInvoiceSilent || !order?.reference) return;
     const printKey = `${vendor}:${order.reference}`;
+    // Transbec credit memos print in full — the actual "Credit Memo BALANCE
+    // DUE" and signature stub live on page 2, unlike a regular invoice where
+    // page 1 alone is enough. Every other vendor/print stays page-1-only.
+    const allPages = vendor === "transbec" && fileName === order?.transbecCreditFile;
     try {
       setInvoicePrintingRef(printKey);
       setError("");
-      const res = await api.printInvoiceSilent(fileName);
+      const res = await api.printInvoiceSilent(fileName, allPages);
       if (!res?.ok) {
         throw new Error(res?.error || "Failed to print invoice.");
       }
@@ -3958,6 +4169,10 @@ export default function App() {
     });
 
     const pickupFiltered = filtered.filter((order) => {
+      // Credit orders are excluded even ahead of the dirty-edit bypass below —
+      // an in-progress edit on a credit order still must not leak it into any
+      // filter other than "Credit".
+      if (order?.isCredit === true) return ordersPickupFilter === "credit";
       if (order?._localDirty) return true;
       return matchesOrdersPickupFilter(order, ordersPickupFilter);
     });
@@ -3993,6 +4208,7 @@ export default function App() {
       "not-confirmed",
       "not-printed",
       "needs-archive",
+      "credit",
     ].forEach((value) => {
       counts[value] = countScope.filter((order) => matchesOrdersPickupFilter(order, value)).length;
     });
@@ -4191,7 +4407,7 @@ export default function App() {
             onBubblifyOrder={handleBubblifyOrder}
             onMarkComplete={handleMarkComplete}
             onReconcileTotals={handleReconcileTotals}
-            onArchiveOrder={handleArchiveOrder}
+            onArchiveOrder={handleArchiveOrderWithConfirm}
             onDeleteOrder={handleDeleteEpicorOrder}
             hasSearch={hasSearch}
             onGetWorldOrders={handleGetWorldOrders}
@@ -4234,6 +4450,7 @@ export default function App() {
             onViewTransbecInvoiceImage={handleViewTransbecInvoiceImage}
             onVerifyTransbecInvoice={handleOpenEpicorReview}
             onPrintTransbecInvoice={(order) => handlePrintVendorInvoice(order, "transbec")}
+            onViewTransbecCreditInvoiceImage={(order) => handleViewTransbecCreditImage(order?.transbecCreditFile)}
             onFetchBestbuyInvoices={handleFetchBestbuyInvoices}
             bestbuyFetching={bestbuyFetching}
             bestbuyStatus={bestbuyStatus}
@@ -4273,6 +4490,16 @@ export default function App() {
             onLoadScanned={handleLoadEpicorScanned}
             assignableOrders={assignableEpicorOrders}
             onAssignOrder={handleAssignEpicorInvoiceToOrder}
+            transbecCredits={transbecCredits}
+            transbecCreditScanning={transbecCreditScanning}
+            transbecCreditError={transbecCreditError}
+            transbecCreditLog={transbecCreditLog}
+            onFetchTransbecCredits={handleFetchTransbecCredits}
+            onLoadTransbecCredits={handleLoadTransbecCredits}
+            onCreateTransbecCreditOrder={handleCreateOrderFromTransbecCredit}
+            onRemoveTransbecCreditOrder={handleRemoveTransbecCreditOrder}
+            onViewTransbecCreditImage={handleViewTransbecCreditImage}
+            onResetTransbecCredits={handleResetTransbecCredits}
           />
         ) : currentView === "archive-search" ? (
           <ArchiveSearchView

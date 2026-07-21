@@ -68,6 +68,9 @@ const registerVendorIpc = (ipcMain, deps) => {
     fetchBestbuyInvoices,
     fetchBestbuyCreditInvoices,
     fetchCbkInvoices,
+    fetchTransbecCreditInvoices,
+    getTransbecCreditInvoices,
+    resetTransbecCreditScans,
     connectGmail,
     getGmailStatus,
     getGmailAssetsDir,
@@ -140,6 +143,24 @@ const registerVendorIpc = (ipcMain, deps) => {
     return fetchBestbuyCreditInvoices(payload);
   });
 
+  // --- Transbec CREDIT MEMOS from Gmail (separate search from the regular
+  // invoice pipeline above; a credit has no pre-existing order, so this is
+  // just a discovery list — PDFs land in the same gmail data dir, so viewing
+  // reuses the Transbec invoice image handlers above by file name) ---
+  ipcMain.handle('vendor:fetch-transbec-credit-invoices', async (_evt, payload) => {
+    return fetchTransbecCreditInvoices(payload);
+  });
+
+  ipcMain.handle('vendor:get-transbec-credits', async () => {
+    return getTransbecCreditInvoices();
+  });
+
+  // DEV-ONLY: wipe the Transbec credit scan cache + downloaded PDFs so a
+  // scan can be re-run from scratch while building this feature.
+  ipcMain.handle('vendor:reset-transbec-credits', async () => {
+    return resetTransbecCreditScans();
+  });
+
   // --- CBK invoices from Gmail (assets share the gmail data dir) ---
   ipcMain.handle('vendor:fetch-cbk-invoices', async (_evt, payload) => {
     return fetchCbkInvoices(payload);
@@ -176,11 +197,13 @@ const registerVendorIpc = (ipcMain, deps) => {
     }
   });
 
-  // Prints page 1 of a Transbec/BestBuy invoice straight to the configured (or
-  // OS default) printer with no dialog, same as Sage's print button.
-  ipcMain.handle('vendor:print-invoice-silent', async (_evt, fileName) => {
+  // Prints a Transbec/BestBuy invoice straight to the configured (or OS
+  // default) printer with no dialog, same as Sage's print button. Page 1 only
+  // by default; pass allPages:true (Transbec credit memos — the return stub
+  // with the actual balance due is on page 2) to print the whole document.
+  ipcMain.handle('vendor:print-invoice-silent', async (_evt, fileName, allPages) => {
     const printerName = (loadConfig && loadConfig().INVOICE_PRINTER) || '';
-    return printInvoiceSilently(getGmailAssetsDir(), fileName, printerName);
+    return printInvoiceSilently(getGmailAssetsDir(), fileName, printerName, Boolean(allPages));
   });
 
   async function openVendorImage(dataDir, fileName) {
@@ -206,8 +229,9 @@ const registerVendorIpc = (ipcMain, deps) => {
   // the engine that also renders the on-screen "Verify Invoice" preview, and
   // which handles the Type3 line-item font that pdf.js drops). The page is
   // never rasterized by us, so quality is native and nothing can be cropped
-  // off: page-range restricts the job to page 1 even on multi-page invoices.
-  async function printPdfViaChromium(filePath, printerName) {
+  // off: page-range restricts the job to page 1 on multi-page invoices unless
+  // allPages is set (Transbec credit memos, printed in full).
+  async function printPdfViaChromium(filePath, printerName, allPages) {
     const win = new BrowserWindow({
       show: false,
       webPreferences: { sandbox: true, plugins: true, backgroundThrottling: false },
@@ -242,8 +266,9 @@ const registerVendorIpc = (ipcMain, deps) => {
             deviceName: printerName || undefined,
             margins: { marginType: 'none' },
             // Invoice PDFs can run multiple pages (line items, return stub);
-            // the printout is always just page 1. pageRanges is 0-based.
-            pageRanges: [{ from: 0, to: 0 }],
+            // the printout is normally just page 1 (0-based pageRanges).
+            // Omitting pageRanges entirely prints every page.
+            ...(allPages ? {} : { pageRanges: [{ from: 0, to: 0 }] }),
           },
           (success, errorType) => resolve({ success, errorType })
         );
@@ -262,15 +287,16 @@ const registerVendorIpc = (ipcMain, deps) => {
   // the named printer with no Chromium involvement. Selected by flipping
   // PDF_PRINT_METHOD; requires the SumatraPDF binary to be asar-unpacked in
   // packaged builds (see build.asarUnpack in package.json).
-  async function printPdfViaSumatra(filePath, printerName) {
+  async function printPdfViaSumatra(filePath, printerName, allPages) {
     const ptp = require('pdf-to-printer');
-    const options = { pages: '1' };
+    const options = {};
+    if (!allPages) options.pages = '1';
     if (printerName) options.printer = printerName; // omitted → OS default printer
     await ptp.print(filePath, options);
     return { ok: true };
   }
 
-  async function printInvoiceSilently(dataDir, fileName, printerName) {
+  async function printInvoiceSilently(dataDir, fileName, printerName, allPages) {
     const filePath = resolveVendorImagePath(dataDir, fileName);
     if (!filePath) {
       return { ok: false, error: 'Invalid image file name.' };
@@ -282,8 +308,8 @@ const registerVendorIpc = (ipcMain, deps) => {
     try {
       if (/\.pdf$/i.test(filePath)) {
         return PDF_PRINT_METHOD === 'sumatra'
-          ? await printPdfViaSumatra(filePath, printerName)
-          : await printPdfViaChromium(filePath, printerName);
+          ? await printPdfViaSumatra(filePath, printerName, allPages)
+          : await printPdfViaChromium(filePath, printerName, allPages);
       }
       // Non-PDF invoices (e.g. BestBuy/CBK PNGs) are already raster with no
       // Type3 concern, so print them as a plain full-bleed image in a hidden,

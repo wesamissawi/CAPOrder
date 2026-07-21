@@ -52,12 +52,14 @@ const createVendorOrdersService = (deps) => {
     fetchBestbuyInvoicesScraper,
     fetchBestbuyCreditInvoicesScraper,
     fetchCbkInvoicesScraper,
+    fetchTransbecCreditInvoicesScraper,
     getEpicorAssetsDir,
     getGmailAssetsDir,
     getTransbecInvoiceCachePath,
     getBestbuyInvoiceCachePath,
     getBestbuyCreditInvoiceCachePath,
     getCbkInvoiceCachePath,
+    getTransbecCreditInvoiceCachePath,
     runInteractiveAuth,
     verifyConnection,
     saveConfig,
@@ -458,6 +460,10 @@ const createVendorOrdersService = (deps) => {
         typeof config.CBK_INVOICE_SENDER === 'string' ? config.CBK_INVOICE_SENDER : '',
       cbkSubject:
         typeof config.CBK_INVOICE_SUBJECT === 'string' ? config.CBK_INVOICE_SUBJECT : '',
+      transbecCreditSender:
+        typeof config.TRANSBEC_CREDIT_INVOICE_SENDER === 'string' ? config.TRANSBEC_CREDIT_INVOICE_SENDER : '',
+      transbecCreditSubject:
+        typeof config.TRANSBEC_CREDIT_INVOICE_SUBJECT === 'string' ? config.TRANSBEC_CREDIT_INVOICE_SUBJECT : '',
     };
   }
 
@@ -625,6 +631,109 @@ const createVendorOrdersService = (deps) => {
     }
   }
 
+  // Transbec CREDIT MEMOS from Gmail — unlike the other Gmail invoice pulls,
+  // a credit memo has no pre-existing order to patch: it's purely a discovery
+  // list, and the Epicor view's "Create order" button turns one into a new
+  // order. Powers the Epicor view's "Check for Transbec Credits" button.
+  async function fetchTransbecCreditInvoices(payload = {}) {
+    try {
+      const { clientId, clientSecret, refreshToken, transbecCreditSender, transbecCreditSubject } = getGmailCreds();
+      if (!clientId || !clientSecret) {
+        return { ok: false, error: 'Missing Gmail OAuth client id/secret. Set them in Settings.' };
+      }
+      if (!refreshToken) {
+        return { ok: false, error: 'Gmail is not connected. Click “Connect Gmail” in Settings.' };
+      }
+      const gmailDataDir = getGmailAssetsDir();
+      ensureDir(gmailDataDir);
+      const fromDate = typeof payload?.fromDate === 'string' ? payload.fromDate : '';
+      const toDate = typeof payload?.toDate === 'string' ? payload.toDate : '';
+      const res = await fetchTransbecCreditInvoicesScraper({
+        credentials: { clientId, clientSecret, refreshToken },
+        sender: transbecCreditSender || 'donotreply@transbec.ca',
+        subjectPattern: transbecCreditSubject || 'Credit Memo',
+        dataDir: gmailDataDir,
+        cachePath: getTransbecCreditInvoiceCachePath(),
+        fromDate,
+        toDate,
+      });
+      if (!res?.ok) return res;
+      const known = collectKnownInvoiceNumbers ? collectKnownInvoiceNumbers() : new Set();
+      const discoveries = (res.discoveries || []).map((d) => {
+        const key = String(d.creditMemoNumber || '').trim().toUpperCase();
+        return { ...d, known: Boolean(key) && known.has(key) };
+      });
+      return { ...res, discoveries };
+    } catch (e) {
+      console.error('[vendor:fetch-transbec-credit-invoices]', e);
+      return { ok: false, error: e?.message || 'Failed to fetch Transbec credit memos.' };
+    }
+  }
+
+  // List every credit memo already cached in transbec_credit_invoice_cache.json,
+  // WITHOUT hitting Gmail — lets the Epicor view show prior scan results right
+  // after an app restart, same pattern as getEpicorScannedInvoices.
+  async function getTransbecCreditInvoices() {
+    try {
+      const cachePath = getTransbecCreditInvoiceCachePath();
+      let cache = {};
+      if (fs.existsSync(cachePath)) {
+        const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) cache = parsed;
+      }
+      const known = collectKnownInvoiceNumbers ? collectKnownInvoiceNumbers() : new Set();
+      const credits = Object.values(cache)
+        .map((v) => v && v.discovery)
+        .filter(Boolean)
+        .map((d) => {
+          const key = String(d.creditMemoNumber || '').trim().toUpperCase();
+          return { ...d, known: Boolean(key) && known.has(key) };
+        })
+        .sort((a, b) => String(b.checkedAt || '').localeCompare(String(a.checkedAt || '')));
+      return {
+        ok: true,
+        credits,
+        scannedCount: credits.length,
+        unknownCount: credits.filter((c) => !c.known).length,
+      };
+    } catch (e) {
+      console.error('[vendor:get-transbec-credits]', e);
+      return { ok: false, error: e?.message || 'Failed to read Transbec credit memos.' };
+    }
+  }
+
+  // DEV-ONLY reset: wipe every trace of past Transbec credit scans — the cache
+  // file (so nothing is treated as "already found") and every downloaded
+  // credit-memo PDF (transbec_credit_*.pdf in the shared gmail assets dir).
+  // Does NOT touch any order already created from a credit (orders.json is
+  // untouched) — this only clears the scan/discovery data itself.
+  async function resetTransbecCreditScans() {
+    try {
+      const cachePath = getTransbecCreditInvoiceCachePath();
+      let removedFiles = 0;
+      if (fs.existsSync(cachePath)) {
+        fs.unlinkSync(cachePath);
+      }
+      const gmailDataDir = getGmailAssetsDir();
+      if (fs.existsSync(gmailDataDir)) {
+        fs.readdirSync(gmailDataDir).forEach((name) => {
+          if (/^transbec_credit_.*\.pdf$/i.test(name)) {
+            try {
+              fs.unlinkSync(path.join(gmailDataDir, name));
+              removedFiles += 1;
+            } catch (e) {
+              console.error(`[vendor:reset-transbec-credits] failed to delete ${name}`, e);
+            }
+          }
+        });
+      }
+      return { ok: true, removedFiles };
+    } catch (e) {
+      console.error('[vendor:reset-transbec-credits]', e);
+      return { ok: false, error: e?.message || 'Failed to reset Transbec credit scans.' };
+    }
+  }
+
   return {
     fetchWorldOrders,
     fetchTransbecOrders,
@@ -642,6 +751,9 @@ const createVendorOrdersService = (deps) => {
     fetchBestbuyInvoices,
     fetchBestbuyCreditInvoices,
     fetchCbkInvoices,
+    fetchTransbecCreditInvoices,
+    getTransbecCreditInvoices,
+    resetTransbecCreditScans,
   };
 };
 

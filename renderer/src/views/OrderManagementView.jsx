@@ -124,6 +124,7 @@ export default function OrderManagementView({
   onViewTransbecInvoiceImage,
   onVerifyTransbecInvoice,
   onPrintTransbecInvoice,
+  onViewTransbecCreditInvoiceImage,
   onFetchBestbuyInvoices,
   bestbuyFetching,
   bestbuyStatus,
@@ -282,6 +283,7 @@ export default function OrderManagementView({
     { value: "not-printed", label: "Not Printed", badge: true },
     { value: "not-picked", label: "Not Picked Up", badge: true },
     { value: "needs-archive", label: "Needs Archive", badge: true },
+    { value: "credit", label: "Credit", badge: true },
   ];
   const primaryFilter = filters[0];
   const secondaryFilters = filters.slice(1);
@@ -745,7 +747,7 @@ export default function OrderManagementView({
                       {canArchiveOrder(order) && (
                         <button
                           type="button"
-                          onClick={() => onArchiveOrder?.(refKey, order.source)}
+                          onClick={() => onArchiveOrder?.(order)}
                           className="px-3 py-2 rounded-xl text-sm font-semibold border bg-slate-900 text-white hover:bg-slate-800"
                         >
                           Archive Order
@@ -840,7 +842,7 @@ export default function OrderManagementView({
                           className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50 self-start"
                           title="Review the scanned invoice side-by-side with the stored invoice # and total, and correct if needed"
                         >
-                          Verify Invoice
+                          {order.totalVerified ? "Verify Again" : "Verify Invoice"}
                         </button>
                       )}
                       {order.source === "transbec" && !order.source_invoice && onFetchTransbecInvoices && (
@@ -870,7 +872,7 @@ export default function OrderManagementView({
                           className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50 self-start"
                           title="Review the invoice PDF side-by-side with the stored invoice # and total, and correct if needed"
                         >
-                          Verify Invoice
+                          {order.totalVerified ? "Verify Again" : "Verify Invoice"}
                         </button>
                       )}
                       {(order.transbecInvoiceFile || order.transbecInvoiceImage) && onPrintTransbecInvoice && (
@@ -886,6 +888,34 @@ export default function OrderManagementView({
                             : order.transbecInvoicePrinted
                             ? "Print Invoice Again"
                             : "Print Invoice"}
+                        </button>
+                      )}
+                      {/* Transbec credit orders (isCredit: true) never have a
+                          transbecInvoiceFile — only this one — so View/Print
+                          here are the only way to see the attachment. */}
+                      {order.transbecCreditFile && onViewTransbecCreditInvoiceImage && (
+                        <button
+                          type="button"
+                          onClick={() => onViewTransbecCreditInvoiceImage(order)}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-slate-700 border-slate-200 hover:bg-slate-50 self-start"
+                          title="Open the credit memo PDF in your default viewer"
+                        >
+                          View Credit PDF
+                        </button>
+                      )}
+                      {order.transbecCreditFile && onPrintTransbecInvoice && (
+                        <button
+                          type="button"
+                          onClick={() => onPrintTransbecInvoice(order)}
+                          disabled={invoicePrintingRef === `transbec:${order.reference}`}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
+                          title="Print page 1 of the credit memo"
+                        >
+                          {invoicePrintingRef === `transbec:${order.reference}`
+                            ? "Printing..."
+                            : order.transbecInvoicePrinted
+                            ? "Print Credit Again"
+                            : "Print Credit"}
                         </button>
                       )}
                       {order.source === "bestbuy" && !order.bestbuyInvoiceFile && !order.bestbuyCreditFile && onFetchBestbuyInvoices && (
@@ -915,7 +945,7 @@ export default function OrderManagementView({
                           className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50 self-start"
                           title="Review the invoice PDF side-by-side with the stored invoice # and total, and correct if needed"
                         >
-                          Verify Invoice
+                          {order.totalVerified ? "Verify Again" : "Verify Invoice"}
                         </button>
                       )}
                       {order.bestbuyInvoiceFile && onPrintBestbuyInvoice && (
@@ -989,7 +1019,7 @@ export default function OrderManagementView({
                           className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50 self-start"
                           title="Review the invoice PDF side-by-side with the stored invoice # and total, and correct if needed"
                         >
-                          Verify Invoice
+                          {order.totalVerified ? "Verify Again" : "Verify Invoice"}
                         </button>
                       )}
                       {order.cbkInvoiceFile && onPrintCbkInvoice && (

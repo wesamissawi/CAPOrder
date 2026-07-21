@@ -87,6 +87,8 @@ export default function SettingsView() {
   const [bestbuyCreditInvoiceSubject, setBestbuyCreditInvoiceSubject] = useState("invoice");
   const [cbkInvoiceSender, setCbkInvoiceSender] = useState("branch_05@cbkauto.com");
   const [cbkInvoiceSubject, setCbkInvoiceSubject] = useState("Invoice");
+  const [transbecCreditInvoiceSender, setTransbecCreditInvoiceSender] = useState("donotreply@transbec.ca");
+  const [transbecCreditInvoiceSubject, setTransbecCreditInvoiceSubject] = useState("Credit Memo");
   const [gmailConnected, setGmailConnected] = useState(false);
   const [gmailEmail, setGmailEmail] = useState("");
   const [gmailConnecting, setGmailConnecting] = useState(false);
@@ -224,6 +226,8 @@ export default function SettingsView() {
           setBestbuyCreditInvoiceSubject(cfg.BESTBUY_CREDIT_INVOICE_SUBJECT || "invoice");
           setCbkInvoiceSender(cfg.CBK_INVOICE_SENDER || "branch_05@cbkauto.com");
           setCbkInvoiceSubject(cfg.CBK_INVOICE_SUBJECT || "Invoice");
+          setTransbecCreditInvoiceSender(cfg.TRANSBEC_CREDIT_INVOICE_SENDER || "donotreply@transbec.ca");
+          setTransbecCreditInvoiceSubject(cfg.TRANSBEC_CREDIT_INVOICE_SUBJECT || "Credit Memo");
           setInvoicePrinter(cfg.INVOICE_PRINTER || "");
           setCredStatus("");
           setCredError("");
@@ -335,6 +339,8 @@ export default function SettingsView() {
         BESTBUY_CREDIT_INVOICE_SUBJECT: bestbuyCreditInvoiceSubject || "",
         CBK_INVOICE_SENDER: cbkInvoiceSender || "",
         CBK_INVOICE_SUBJECT: cbkInvoiceSubject || "",
+        TRANSBEC_CREDIT_INVOICE_SENDER: transbecCreditInvoiceSender || "",
+        TRANSBEC_CREDIT_INVOICE_SUBJECT: transbecCreditInvoiceSubject || "",
         INVOICE_PRINTER: invoicePrinter || "",
       });
       if (res?.ok) {
@@ -842,6 +848,29 @@ export default function SettingsView() {
                 onChange={(e) => setCbkInvoiceSubject(e.target.value)}
                 className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
               />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Transbec Credit Memo Sender (from:)</label>
+              <input
+                type="text"
+                placeholder="donotreply@transbec.ca"
+                value={transbecCreditInvoiceSender}
+                onChange={(e) => setTransbecCreditInvoiceSender(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Transbec Credit Memo Subject Contains</label>
+              <input
+                type="text"
+                placeholder="Credit Memo"
+                value={transbecCreditInvoiceSubject}
+                onChange={(e) => setTransbecCreditInvoiceSubject(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+              <p className="text-xs text-slate-400">
+                E.g. subject "Credit Memo for T30252 Cust PO" — the PO/reference is read from the subject.
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
