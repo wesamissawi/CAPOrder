@@ -30,8 +30,11 @@ function mergeItems(prev, incoming) {
     if (same) {
       result.push(existing);
     } else {
-      // changed on disk → use incoming version
-      result.push(incomingItem);
+      // Keep whichever has the higher rev so a stale push can't revert a local
+      // edit; on a tie prefer the incoming disk copy so machines converge.
+      const er = Number(existing && existing.rev) || 0;
+      const ir = Number(incomingItem && incomingItem.rev) || 0;
+      result.push(er > ir ? existing : incomingItem);
     }
 
     byUid.delete(incomingItem.uid);
@@ -81,6 +84,9 @@ function normalizeItems(arr) {
       itemcode: String(it.itemcode ?? ""),
       notes1: it.notes1 ?? "",
       notes2: it.notes2 ?? "",
+      // Preserve the per-item version so edits made here aren't rejected as
+      // stale by the version-gated write in the main process.
+      rev: Number.isFinite(Number(it.rev)) ? Number(it.rev) : 0,
       quantity:
         typeof it.quantity === "number"
           ? it.quantity
@@ -90,6 +96,12 @@ function normalizeItems(arr) {
       sold_status: String(it.sold_status ?? ""),
     };
   });
+}
+
+// Bump the per-item version whenever this window edits an item.
+function nextRev(it) {
+  const r = Number(it && it.rev);
+  return (Number.isFinite(r) ? r : 0) + 1;
 }
 
 function ensureBubblesForItems(items, setBubblesFn) {
@@ -230,7 +242,7 @@ useEffect(() => {
 
   // ==== Helpers ====
   function updateItemByKey(uid, patch) {
-    setItems((prev) => prev.map((it) => (it.uid === uid ? { ...it, ...patch } : it)));
+    setItems((prev) => prev.map((it) => (it.uid === uid ? { ...it, ...patch, rev: nextRev(it) } : it)));
   }
 
   function toggleExpand(uid) {
@@ -285,7 +297,7 @@ function handleAllocatedForBlur(it) {
     // Update items in React state
     setItems((prev) => {
       const next = prev.map((item) =>
-        item.uid === uid ? { ...item, allocated_for: normalized } : item
+        item.uid === uid ? { ...item, allocated_for: normalized, rev: nextRev(item) } : item
       );
       // Immediately persist this change
       lastSavedRef.current = JSON.stringify(next);

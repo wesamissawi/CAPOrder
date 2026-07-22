@@ -19,9 +19,22 @@ import {
   mergeItems,
   uniqueName,
   makeUid,
+  nextRev,
 } from "./utils/inventory";
 
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
+
+// Debug logger — prints to the renderer DevTools console AND forwards to the
+// main-process terminal (via api.debugLog) so logs can be copied from the
+// window where `npm start` runs. Prefixed/tagged so they're easy to grep.
+function dbg(tag, ...args) {
+  try {
+    console.log(`[cashpad] ${tag}`, ...args);
+    api.debugLog?.(`[cashpad] ${tag}`, ...args);
+  } catch {
+    /* never let logging throw */
+  }
+}
 
 // Shared between the orders pickup-filter switch and the filter-button badge
 // counts, so the two never drift out of sync.
@@ -414,10 +427,35 @@ export default function App() {
 
       const norm = filterPendingDeleted(normalizeItems(arr || []));
       itemsLoadedRef.current = true; // main only pushes successfully-read data
+      dbg('event:onItemsUpdated', {
+        incomingCount: norm.length,
+        pendingDeletes: Array.from(deletedUidsRef.current || []),
+      });
       setItems((prev) => {
         const merged = mergeItems(prev, norm);
         const prevStr = JSON.stringify(prev);
         const mergedStr = JSON.stringify(merged);
+        // Detect items whose allocation is about to change because of this
+        // external push — this is how a just-filled CashPad move can get
+        // reverted before autosave persists it.
+        const prevByUid = new Map(prev.map((it) => [it.uid, it]));
+        const reverts = [];
+        merged.forEach((it) => {
+          const before = prevByUid.get(it.uid);
+          if (before && before.allocated_to !== it.allocated_to) {
+            reverts.push({ uid: it.uid, from: before.allocated_to, to: it.allocated_to });
+          }
+        });
+        const droppedUids = prev
+          .filter((it) => !merged.some((m) => m.uid === it.uid))
+          .map((it) => ({ uid: it.uid, allocated_to: it.allocated_to }));
+        if (reverts.length || droppedUids.length) {
+          dbg('event:onItemsUpdated:ALLOC-CHANGES', {
+            changed: mergedStr !== prevStr,
+            reverts,
+            droppedUids,
+          });
+        }
         if (mergedStr === prevStr) {
           lastSavedRef.current = mergedStr;
           return prev;
@@ -472,16 +510,25 @@ export default function App() {
       const pendingDeletes = Array.from(deletedUidsRef.current);
       if (current === lastSavedRef.current && pendingDeletes.length === 0) return;
       lastSavedRef.current = current;
+      const allocSummary = (items || []).reduce((acc, it) => {
+        const k = it.allocated_to || "(none)";
+        acc[k] = (acc[k] || 0) + 1;
+        return acc;
+      }, {});
+      dbg('autosave:WRITE', { itemCount: items.length, pendingDeletes, allocSummary });
       console.log("[autosave] writing items to disk after idle", items);
       api.writeItems(items, pendingDeletes).then((res) => {
         if (res && res.ok === false) {
+          dbg('autosave:REJECTED', res.error);
           console.error("[autosave] write rejected by main:", res.error);
           // Allow a retry on the next change; keep pending deletions queued
           lastSavedRef.current = "";
         } else {
+          dbg('autosave:OK', { itemCount: items.length });
           confirmItemsDeleted(pendingDeletes);
         }
       }).catch((e) => {
+        dbg('autosave:FAILED', String(e));
         console.error("[autosave] write failed", e);
         lastSavedRef.current = "";
       });
@@ -505,7 +552,7 @@ export default function App() {
     setItems((prev) =>
       prev.map((it) => {
         if (it.uid !== uid) return it;
-        const next = { ...it, ...patch };
+        const next = { ...it, ...patch, rev: nextRev(it) };
         if (
           patch.hasOwnProperty("allocated_to") &&
           patch.allocated_to &&
@@ -569,6 +616,12 @@ export default function App() {
     const sharedLowerNames = new Set(entries.map((e) => norm(e.name || e.id)));
     const itemsLowerNames = new Set((items || []).map((it) => norm(it.allocated_to)));
     let keptIds = new Set();
+    dbg('applyShared:IN', {
+      incomingEntryCount: entries.length,
+      incomingNames: entries.map((e) => ({ id: e.id, name: e.name, deleted: !!e.deleted })),
+      sharedLowerNames: Array.from(sharedLowerNames),
+      itemsLowerNames: Array.from(itemsLowerNames),
+    });
 
     entries.forEach((entry) => {
       if (entry.deleted) {
@@ -584,10 +637,22 @@ export default function App() {
 
       prev.forEach((b) => {
         const lower = norm(b.name);
-        if (deleteIds.has(b.id) || deleteNames.has(lower)) return;
+        if (deleteIds.has(b.id) || deleteNames.has(lower)) {
+          dbg('applyShared:DROP(explicit-delete)', { id: b.id, name: b.name });
+          return;
+        }
         const keep =
           DEFAULT_BUBBLE_NAMES.has(b.name) || itemsLowerNames.has(lower) || sharedLowerNames.has(lower);
-        if (!keep) return;
+        if (!keep) {
+          dbg('applyShared:DROP(not-kept)', {
+            id: b.id,
+            name: b.name,
+            isDefault: DEFAULT_BUBBLE_NAMES.has(b.name),
+            hasItems: itemsLowerNames.has(lower),
+            inShared: sharedLowerNames.has(lower),
+          });
+          return;
+        }
         indexById.set(b.id, next.length);
         if (lower) indexByLower.set(lower, next.length);
         next.push(b);
@@ -638,6 +703,11 @@ export default function App() {
         deduped.push(b);
       });
       keptIds = new Set(deduped.map((b) => b.id));
+      dbg('applyShared:setBubbles', {
+        before: prev.length,
+        after: deduped.length,
+        keptNames: deduped.map((b) => b.name),
+      });
 
       return deduped;
     });
@@ -902,6 +972,10 @@ export default function App() {
     if (!api?.onBubbleSharedUpdated) return;
     const off = api.onBubbleSharedUpdated((payload) => {
       const shared = payload?.bubbles || {};
+      dbg('event:onBubbleSharedUpdated', {
+        keys: Object.keys(shared),
+        isPartial: !!payload?.partial,
+      });
       applySharedBubbleData(shared);
     });
     return () => off && off();
@@ -1157,9 +1231,10 @@ export default function App() {
         quantity: qtyToMove,
         allocated_to: targetBubble,
         last_moved_at: new Date().toISOString(),
+        rev: nextRev(item),
       };
       const next = [...prev];
-      next[idx] = { ...item, quantity: remainder };
+      next[idx] = { ...item, quantity: remainder, rev: nextRev(item) };
       next.splice(idx + 1, 0, newItem);
       ensureBubblesForItems(next, setBubbles);
       return next;
@@ -1249,7 +1324,7 @@ export default function App() {
       const nowIso = new Date().toISOString();
       const next = prev.map((it) =>
         it.allocated_to === bubble.name
-            ? { ...it, allocated_to: fallback, last_moved_at: nowIso }
+            ? { ...it, allocated_to: fallback, last_moved_at: nowIso, rev: nextRev(it) }
           : it
       );
       updatedItemsSnapshot = next;
@@ -1331,6 +1406,7 @@ export default function App() {
               allocated_to: "NEW STOCK",
               accountingPath: ACCOUNTING_PATHS.OUTSTANDING,
               last_moved_at: new Date().toISOString(),
+              rev: nextRev(it),
             }
           : it
       );
@@ -1373,7 +1449,7 @@ export default function App() {
     if (bubble?.name) {
       const updatedItems = items.map((it) =>
         it.allocated_to === bubble.name
-          ? { ...it, accountingPath: targetPath, last_moved_at: now }
+          ? { ...it, accountingPath: targetPath, last_moved_at: now, rev: nextRev(it) }
           : it
       );
       setItems(updatedItems);
@@ -1414,7 +1490,14 @@ export default function App() {
     }
   }
 
-  function handleFillFromCashPad() {
+  async function handleFillFromCashPad() {
+    dbg('fill:START', {
+      markupInput: cashPadMarkup,
+      totalPayments: (payments || []).length,
+      totalItems: (items || []).length,
+      totalBubbles: bubbles.length,
+      bubbleMetaKeys: Object.keys(bubbleMeta).length,
+    });
     const TAX = 0.13;
     const markup = Math.max(0, parseFloat(cashPadMarkup) || 0) / 100;
     const toAmt = (v) => parseFloat((v ?? '').toString().replace(/[^0-9.-]/g, '')) || 0;
@@ -1424,12 +1507,21 @@ export default function App() {
       Object.values(bubbleMeta).flatMap((m) => m.paymentIds || [])
     );
     const unassigned = (payments || []).filter((p) => p?.id && !assignedIds.has(p.id));
+    dbg('fill:payments', {
+      assignedPaymentIds: Array.from(assignedIds),
+      unassignedCount: unassigned.length,
+      unassigned: unassigned.map((p) => ({ id: p.id, type: p.type, amount: p.amount })),
+    });
     if (!unassigned.length) { alert('No unassigned payments found.'); return; }
 
     // CASHPAD items only
     const cashpadItems = items.filter(
       (it) => (it.allocated_to || '').toUpperCase() === 'CASHPAD'
     );
+    dbg('fill:cashpadItems', {
+      count: cashpadItems.length,
+      items: cashpadItems.map((it) => ({ uid: it.uid, cost: it.cost, qty: it.quantity, desc: it.description })),
+    });
     if (!cashpadItems.length) { alert('CashPad is empty.'); return; }
 
     // Effective price: cost × (1 + markup) × (1 + tax), sort largest first
@@ -1458,9 +1550,17 @@ export default function App() {
       // Remove chosen from pool (reverse order to keep indices valid)
       for (let i = takenIdx.length - 1; i >= 0; i--) pool.splice(takenIdx[i], 1);
       assignments.push({ payment, chosen });
+      dbg('fill:assign', {
+        paymentId: payment.id,
+        target: target.toFixed(2),
+        spent: spent.toFixed(2),
+        chosenUids: chosen.map((c) => c.uid),
+        poolRemaining: pool.length,
+      });
     }
 
     if (!assignments.some((a) => a.chosen.length > 0)) {
+      dbg('fill:ABORT', 'no items could be assigned to any payment');
       alert('No items could be assigned — all items may exceed individual payment amounts.');
       return;
     }
@@ -1489,28 +1589,79 @@ export default function App() {
       sharedWrites.push({ bubbleId, bubbleName, paymentIds: [payment.id] });
       bubblesCreated++;
       itemsMoved += chosen.length;
+      dbg('fill:newBubble', { bubbleId, bubbleName, paymentId: payment.id, itemCount: chosen.length });
     }
 
-    setBubbles((prev) => [...prev, ...newBubbles]);
+    dbg('fill:applying', {
+      bubblesCreated,
+      itemsMoved,
+      newBubbleNames: newBubbles.map((b) => b.name),
+      itemToBubble: Array.from(itemToBubble.entries()),
+    });
+
+    setBubbles((prev) => {
+      const next = [...prev, ...newBubbles];
+      dbg('fill:setBubbles', { before: prev.length, after: next.length });
+      return next;
+    });
     setBubbleMeta((prev) => {
       const next = { ...prev, ...newMetaEntries };
       persistUIState(next);
       return next;
     });
-    setItems((prev) =>
-      prev.map((it) => {
-        const dest = itemToBubble.get(it.uid);
-        if (!dest) return it;
-        const discounted_price = (toAmt(it.cost) * (1 + markup)).toFixed(2);
-        return { ...it, allocated_to: dest, last_moved_at: now, discounted_price };
-      })
-    );
+
+    // Build the moved-items array explicitly so we can persist it to disk
+    // immediately (below) instead of waiting for the 10s idle autosave. If we
+    // wait, any items:updated push in that window — common when other machines
+    // are open — re-reads the stale on-disk copy and reverts the move.
+    let moved = 0;
+    const updatedItems = items.map((it) => {
+      const dest = itemToBubble.get(it.uid);
+      if (!dest) return it;
+      moved++;
+      const discounted_price = (toAmt(it.cost) * (1 + markup)).toFixed(2);
+      return { ...it, allocated_to: dest, last_moved_at: now, discounted_price, rev: nextRev(it) };
+    });
+    dbg('fill:setItems', { movedInThisUpdate: moved, expected: itemsMoved, totalItems: updatedItems.length });
+    setItems(updatedItems);
+    // Keep autosave from immediately re-writing the same snapshot.
+    lastSavedRef.current = JSON.stringify(updatedItems);
+
     sharedWrites.forEach(({ bubbleId, bubbleName, paymentIds }) => {
+      dbg('fill:sharedWrite', { bubbleId, bubbleName, paymentIds });
       api.writeSharedBubbleData?.({
         bubbleId, name: bubbleName, notes: '', extraLines: [], paymentIds,
-      }).catch((e) => console.warn('[cashpad-fill] shared write failed', e));
+      }).catch((e) => { dbg('fill:sharedWrite:FAILED', String(e)); console.warn('[cashpad-fill] shared write failed', e); });
     });
 
+    // Persist the moves right away. On failure (e.g. a transient SMB EPERM on
+    // the atomic rename) clear lastSavedRef so autosave retries, and tell the
+    // user rather than leaving the move only in memory.
+    dbg('fill:writeItems', { itemCount: updatedItems.length });
+    try {
+      const res = await api.writeItems(updatedItems);
+      if (res && res.ok === false) {
+        dbg('fill:writeItems:REJECTED', res.error);
+        lastSavedRef.current = "";
+        alert(
+          "The cash-sale fill was applied on screen but could not be saved to the shared folder:\n\n" +
+          (res.error || "Unknown error") +
+          "\n\nIt will retry automatically, but if other machines are open the fill may be reverted. Re-check after a few seconds."
+        );
+      } else {
+        dbg('fill:writeItems:OK', { itemCount: updatedItems.length });
+      }
+    } catch (e) {
+      dbg('fill:writeItems:FAILED', String(e));
+      lastSavedRef.current = "";
+      alert(
+        "The cash-sale fill was applied on screen but could not be saved to the shared folder:\n\n" +
+        (e?.message || String(e)) +
+        "\n\nIt will retry automatically."
+      );
+    }
+
+    dbg('fill:DONE', { bubblesCreated, itemsMoved });
     setFillCashPadResult(
       `Created ${bubblesCreated} bubble${bubblesCreated !== 1 ? 's' : ''}, moved ${itemsMoved} item${itemsMoved !== 1 ? 's' : ''}.`
     );
@@ -1992,7 +2143,7 @@ export default function App() {
     if (taken) { alert(`A bubble named "${trimmed}" already exists.`); return; }
 
     const renamedItems = items.map((it) =>
-      it.allocated_to === oldName ? { ...it, allocated_to: trimmed } : it
+      it.allocated_to === oldName ? { ...it, allocated_to: trimmed, rev: nextRev(it) } : it
     );
     lastSavedRef.current = JSON.stringify(renamedItems);
     setItems(renamedItems);

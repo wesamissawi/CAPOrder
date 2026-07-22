@@ -60,14 +60,36 @@ const createItemsService = (deps) => {
       });
     });
 
-    // 3) Apply incoming items (overwrite by uid)
+    // 3) Apply incoming items (upsert by uid, version-gated).
+    //    An incoming item overwrites the on-disk copy only when it is NOT
+    //    strictly older by rev. i.e. we reject a write whose rev is lower than
+    //    what's already on disk — that's a stale writer (e.g. another machine
+    //    saving its older in-memory copy, or a file-watch push that fired
+    //    before a local move was persisted) trying to revert a newer change.
+    //    Equal rev is accepted so writers that don't bump rev (e.g. lock
+    //    metadata, legacy paths) still save rather than being silently dropped;
+    //    the trade-off is that a true concurrent same-rev edit is last-writer-
+    //    wins, which would need a machineId tiebreak to resolve deterministically.
+    const revNum = (it) => {
+      const r = Number(it && it.rev);
+      return Number.isFinite(r) ? r : 0;
+    };
     const incomingUids = new Set();
+    let rejectedStale = 0;
     (items || []).forEach((it) => {
       if (!it) return;
       const uid = it.uid || randomUUID();
       incomingUids.add(uid);
+      const existing = map.get(uid);
+      if (existing && revNum(it) < revNum(existing)) {
+        rejectedStale += 1;
+        return; // keep the newer on-disk copy
+      }
       map.set(uid, { ...it, uid });
     });
+    if (rejectedStale > 0) {
+      console.warn(`[items] write rejected ${rejectedStale} stale item(s) (older rev than disk)`);
+    }
 
     // 3b) Apply deletions
     let removedCount = 0;

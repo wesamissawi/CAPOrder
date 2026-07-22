@@ -106,7 +106,18 @@ const createWatchersService = (deps) => {
         const win = getWin();
         if (win && !win.isDestroyed()) {
           win.webContents.send('items:updated', arr);
-          console.log('[main] watch -> items:updated', arr.length);
+          // Allocation summary makes it obvious when an incoming push still has
+          // items sitting in CASHPAD (i.e. it will revert a just-done fill).
+          let allocSummary = {};
+          try {
+            allocSummary = (arr || []).reduce((acc, it) => {
+              const k = (it && it.allocated_to) || '(none)';
+              acc[k] = (acc[k] || 0) + 1;
+              return acc;
+            }, {});
+          } catch {}
+          const changedFile = require('path').basename(file);
+          console.log('[main] watch -> items:updated', arr.length, 'changedFile=', changedFile, 'alloc=', JSON.stringify(allocSummary));
         }
       }, 'items');
       itemsWatchers.push(w);

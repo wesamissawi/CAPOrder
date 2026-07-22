@@ -68,6 +68,7 @@ const createItemsDomain = (deps) => {
       source_inv: inv || order?.source || 'world',
       warehouse: order?.warehouse || order?.seller || '',
       last_moved_at: nowIso,
+      rev: 1,
       quantity: qty,
       reference_num: order?.reference || '',
       sold_date: '',

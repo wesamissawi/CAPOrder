@@ -1110,7 +1110,7 @@ function reconcileCreditReturnAgainstStock(order) {
     consumedUids.add(match.uid);
     const nextQty = (Number(match.quantity) || 0) - returnQty;
     if (nextQty > 0) {
-      upserts.push({ ...match, quantity: nextQty, last_moved_at: nowIso });
+      upserts.push({ ...match, quantity: nextQty, last_moved_at: nowIso, rev: (Number(match.rev) || 0) + 1 });
     } else {
       deletedUids.push(match.uid);
     }
@@ -1986,6 +1986,12 @@ function registerAllIpc() {
       detail: detail || '',
     });
     return result.response === 1;
+  });
+
+  // Forward renderer debug logs to the main-process terminal so they can be
+  // captured/copied from the console where `npm start` runs.
+  ipcMain.on('debug:log', (_evt, ...args) => {
+    console.log('[renderer]', ...args);
   });
 }
 function readUIState() {

@@ -134,7 +134,12 @@ const registerItemsIpc = (ipcMain, deps) => {
 
     // Don't keep the lock field in the final saved item
     const { lock_expires_at, ...rest } = it;
-    const updated = { ...rest, ...(patch || {}) };
+    // Bump rev so this edit supersedes stale copies on other machines. If the
+    // patch itself carries a rev, respect it (it's already newer); otherwise
+    // increment from the current value.
+    const patchRev = Number(patch && patch.rev);
+    const bumpedRev = Number.isFinite(patchRev) ? patchRev : (Number(rest.rev) || 0) + 1;
+    const updated = { ...rest, ...(patch || {}), rev: bumpedRev };
     items[idx] = updated;
 
     writeItems(items);

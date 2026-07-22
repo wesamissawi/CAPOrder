@@ -4,6 +4,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 console.log('[preload] loaded');
 
 contextBridge.exposeInMainWorld('api', {
+  // debug logging -> main-process terminal
+  debugLog: (...args) => ipcRenderer.send('debug:log', ...args),
+
   // data
   readItems: () => ipcRenderer.invoke('items:read'),
   writeItems: (items, deletedUids) => ipcRenderer.invoke('items:write', items, deletedUids),

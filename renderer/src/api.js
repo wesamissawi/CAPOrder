@@ -17,6 +17,7 @@ const warnAsync = (method, fallback) => async (...args) => {
 };
 
 const fallbackApi = {
+  debugLog: (...args) => console.log("[renderer]", ...args),
   readItems: async () => [],
   writeItems: warnAsync("writeItems"),
   exportItems: warnAsync("exportItems"),
