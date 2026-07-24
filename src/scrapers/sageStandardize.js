@@ -1,6 +1,8 @@
 // src/scrapers/sageStandardize.js
 // Utility to normalize orders/line items into a Sage-friendly shape across scrapers.
 
+const { resolveCapCode } = require("./capRules");
+
 function cleanMoneyString(val) {
   if (val === null || val === undefined) return "";
   return String(val).replace(/[^\d.-]/g, "").trim();
@@ -12,16 +14,26 @@ function toNumber(val) {
   return Number.isFinite(n) ? n : null;
 }
 
-function normalizeLineItem(item = {}) {
+function normalizeLineItem(item = {}, warehouse = "") {
   const costRaw = item.costPrice ?? item.cost ?? item.net ?? item.extended ?? "";
   const extendedRaw = item.extended ?? item.total ?? item.extendedValue ?? "";
+  const partLineCode = item.partLineCode || item.brand || item.line || "";
+  const partNumber = item.partNumber || item.part || item.sku || "";
+  const partDescription = item.partDescription || item.description || item.notes || "";
+  // Resolved CAP/Sage identity for this line. partLineCode/partNumber stay RAW
+  // (the purchase-entry AHK re-applies ourRules to them), but sageCode holds the
+  // final code the part will actually carry in Sage — the same value the bubble
+  // stores — so the two never drift. See src/scrapers/capRules.js.
+  const resolved = resolveCapCode(warehouse, partLineCode, partNumber, partDescription);
   return {
     ...item,
-    partLineCode: item.partLineCode || item.brand || item.line || "",
-    partNumber: item.partNumber || item.part || item.sku || "",
+    partLineCode,
+    partNumber,
     costPrice: cleanMoneyString(costRaw),
     costPriceValue: item.costPriceValue ?? toNumber(costRaw),
-    partDescription: item.partDescription || item.description || item.notes || "",
+    partDescription,
+    sageCode: resolved.code,
+    sageDescription: resolved.description,
     quantity: item.quantity ?? item.qty ?? item.count ?? "",
     extended: cleanMoneyString(extendedRaw),
     extendedValue: item.extendedValue ?? toNumber(extendedRaw),
@@ -44,7 +56,7 @@ function standardizeOrderForSage(order = {}) {
     sage_source,
     lastUpdatedAt,
     sage_lineItems: Array.isArray(order.lineItems)
-      ? order.lineItems.map((li) => normalizeLineItem(li || {}))
+      ? order.lineItems.map((li) => normalizeLineItem(li || {}, warehouse))
       : [],
   };
 }

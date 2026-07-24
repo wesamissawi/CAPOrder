@@ -1,3 +1,5 @@
+const { resolveCapCode } = require('../../src/scrapers/capRules');
+
 const createItemsDomain = (deps) => {
   const { randomUUID } = deps;
 
@@ -48,7 +50,15 @@ const createItemsDomain = (deps) => {
 
   function makeOutstandingFromLine(order, line) {
     const nowIso = new Date().toISOString();
-    const itemcode = `${line?.partLineCode || ''} ${line?.partNumber || ''}`.trim() || (line?.partNumber || line?.partLineCode || 'ITEM');
+    // Resolve the CAP/Sage code ONCE, here, when the scraped line becomes a
+    // stock item — so the bubble stores the exact code Sage will hold after the
+    // purchase (which applies the same ourRules). Falls back to the raw
+    // "<line> <part>" if the rules produce nothing. See src/scrapers/capRules.js.
+    const rawItemcode = `${line?.partLineCode || ''} ${line?.partNumber || ''}`.trim() || (line?.partNumber || line?.partLineCode || 'ITEM');
+    const warehouseForRules = order?.warehouse || order?.seller || order?.source || '';
+    const resolved = resolveCapCode(warehouseForRules, line?.partLineCode, line?.partNumber, line?.partDescription);
+    const itemcode = (resolved.code || '').trim() || rawItemcode;
+    const resolvedDescription = resolved.description || line?.partDescription || '';
     const costVal = line?.costPriceValue ?? line?.costPrice ?? line?.extendedValue ?? line?.extended;
     const qty = Number(line?.quantity ?? 1) || 1;
     const inv = (order?.source_invoice || order?.invoiceNum || '').trim();
@@ -63,7 +73,7 @@ const createItemsDomain = (deps) => {
       'invoiced date': '',
       'invoiced status': '',
       itemcode,
-      notes1: line?.partDescription || '',
+      notes1: resolvedDescription,
       notes2: '',
       source_inv: inv || order?.source || 'world',
       warehouse: order?.warehouse || order?.seller || '',

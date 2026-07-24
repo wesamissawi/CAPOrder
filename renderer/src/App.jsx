@@ -149,7 +149,7 @@ const VIEWS = [
   { id: "epicor", label: "Epicor" },
   { id: "archive-search", label: "Archive" },
   { id: "settings", label: "Settings" },
-  { id: "payment-management", label: "Payment Management" },
+  { id: "payment-management", label: "Payments" },
 ];
 
 function ViewTabs({ currentView, onSelect, badges }) {

@@ -134,22 +134,24 @@ async function navigateToOrdersTab(page) {
   return bodyFrame;
 }
 
-async function fetchOrderDetailsFromList(page, reference) {
-  if (!reference) return { ok: false, skipped: true, reason: "no-reference" };
+async function fetchOrderDetailsFromList(page, reference, detailUrl) {
+  if (!reference && !detailUrl) return { ok: false, skipped: true, reason: "no-reference" };
   await page.waitForLoadState("domcontentloaded").catch(() => {});
   let bodyFrame = await getBodyFrame(page);
 
-  const clickRes = await bodyFrame.evaluate((ref) => {
+  // Prefer the order id (oid) from the list link — unambiguous and immune to the
+  // <br> text quirks that break confirmation-number matching on multi-warehouse rows.
+  const oidMatch = /[?&]oid=(\d+)/.exec(detailUrl || "");
+  const oid = oidMatch ? oidMatch[1] : "";
+
+  const clickRes = await bodyFrame.evaluate(({ ref, oid }) => {
     const ORDER = (ref || "").trim();
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
-    const eq = (a, b) => norm(a).toUpperCase() === norm(b).toUpperCase();
+    // textContent collapses <br> to nothing, so "OH4189<br>OH4189" reads as
+    // "OH4189OH4189"; a tolerant "contains" match still finds the row.
+    const includesRef = (a, b) => !!b && norm(a).toUpperCase().includes(norm(b).toUpperCase());
 
-    function clickLinkInRow(tr) {
-      const link =
-        tr.querySelector("td:first-child a.COListLink") ||
-        tr.querySelector('td:first-child a[href*="orders_view"]') ||
-        tr.querySelector("a.COListLink") ||
-        tr.querySelector('a[title*="View" i]');
+    function clickAnchor(link) {
       if (!link) return false;
       link.scrollIntoView({ block: "center" });
       link.click();
@@ -158,15 +160,30 @@ async function fetchOrderDetailsFromList(page, reference) {
 
     function findAndClick(doc) {
       try {
-        const xp = `//table[contains(concat(' ',normalize-space(@class),' '),' ListWrapper ')]//tr[td[normalize-space()='${ORDER}']]`;
-        const row = doc.evaluate(xp, doc, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-        if (row && clickLinkInRow(row)) return true;
+        // 1) Match by oid — the robust path.
+        if (oid) {
+          const byOid =
+            doc.querySelector(`a.COListLink[href*="oid=${oid}"]`) ||
+            doc.querySelector(`a[href*="oid=${oid}"]`);
+          if (clickAnchor(byOid)) return true;
+        }
 
-        const tables = Array.from(doc.querySelectorAll("table.ListWrapper"));
-        for (const table of tables) {
-          for (const tr of table.querySelectorAll("tr")) {
-            const hasOrder = Array.from(tr.cells).some((td) => eq(td.textContent, ORDER));
-            if (hasOrder && clickLinkInRow(tr)) return true;
+        // 2) Fallback: tolerant confirmation-number text match.
+        if (ORDER) {
+          const tables = Array.from(doc.querySelectorAll("table.ListWrapper"));
+          for (const table of tables) {
+            for (const tr of table.querySelectorAll("tr")) {
+              const hasOrder = Array.from(tr.cells || []).some((td) =>
+                includesRef(td.textContent, ORDER)
+              );
+              if (!hasOrder) continue;
+              const link =
+                tr.querySelector("td:first-child a.COListLink") ||
+                tr.querySelector('td:first-child a[href*="orders_view"]') ||
+                tr.querySelector("a.COListLink") ||
+                tr.querySelector('a[title*="View" i]');
+              if (clickAnchor(link)) return true;
+            }
           }
         }
 
@@ -180,7 +197,7 @@ async function fetchOrderDetailsFromList(page, reference) {
     }
 
     return findAndClick(document);
-  }, reference);
+  }, { ref: reference, oid });
 
   if (!clickRes) {
     return { ok: false, reason: "click-failed" };
@@ -317,6 +334,16 @@ async function scrapeWorldOrders(page) {
 
   const orders = await bodyFrame.evaluate(() => {
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+    // Multi-warehouse orders stack one sub-line per seller (separated by <br>),
+    // so a single cell can repeat the same value. innerText renders <br> as a
+    // newline; split on it and de-duplicate to get clean, canonical values.
+    const uniqueLines = (raw) => {
+      const lines = (raw || "")
+        .split(/\r?\n/)
+        .map((s) => s.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+      return [...new Set(lines)];
+    };
     const parseTotal = (s) => {
       const n = parseFloat((s || "").replace(/[^\d.-]/g, ""));
       return Number.isFinite(n) ? n : null;
@@ -348,11 +375,13 @@ async function scrapeWorldOrders(page) {
       const orderDateRaw = norm(cells[1]?.innerText || "");
       const vehicleRaw = norm(cells[2]?.innerText || "");
       const status = norm(cells[3]?.innerText || "");
-      const reference = norm(cells[4]?.innerText || "");
+      // Confirmation # repeats per sub-order on multi-warehouse rows; the number
+      // is identical across sellers, so the first (unique) line is the key.
+      const reference = uniqueLines(cells[4]?.innerText || "")[0] || "";
       const poNumber = norm(cells[5]?.innerText || "");
       const totalRaw = norm(cells[6]?.innerText || "");
       const orderedBy = norm(cells[8]?.innerText || "");
-      const seller = norm(cells[9]?.innerText || "");
+      const seller = uniqueLines(cells[9]?.innerText || "").join(" / ");
       const descRaw = norm(cells[10]?.innerText || "");
 
       const vehicleBits = vehicleRaw.split(/\s+/);

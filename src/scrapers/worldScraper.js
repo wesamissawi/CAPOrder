@@ -120,7 +120,7 @@ async function getWorldOrders(options = {}) {
       await navigateToOrdersTab(page).catch(() => {});
       await page.waitForTimeout(stepWaitMs);
 
-      const detailRes = await fetchOrderDetailsFromList(page, order.reference);
+      const detailRes = await fetchOrderDetailsFromList(page, order.reference, order.detailUrl);
       if (detailRes.ok && detailRes.detail) {
         order.lineItems = detailRes.detail.lineItems || [];
         order.sageDate = order.sageDate || detailRes.detail.sageDate || "";
