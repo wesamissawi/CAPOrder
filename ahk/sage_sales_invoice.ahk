@@ -139,9 +139,15 @@ Loop, %itemCount% {
     qty         := item.quantity
     price       := item.price
 
-    ; Apply CAP rules to get the actual Sage item code
-    ruleResult := ourRules(warehouse, linecode, partnumber, description)
-    sageCode   := ruleResult[1]
+    ; The app already resolved the CAP/Sage code at bublify time (single source
+    ; of truth — see src/scrapers/capRules.js), passed through as item.sageCode.
+    ; Fall back to the legacy ourRules mapper only for pre-resolution stock.
+    if (item.HasKey("sageCode") && item.sageCode != "") {
+        sageCode := item.sageCode
+    } else {
+        ruleResult := ourRules(warehouse, linecode, partnumber, description)
+        sageCode   := ruleResult[1]
+    }
 
     Send, %sageCode%
     Sleep, 500

@@ -1,0 +1,780 @@
+{
+  "version": 1,
+  "defaultCode": [
+    {
+      "t": "var",
+      "field": "linecode"
+    },
+    {
+      "t": "lit",
+      "v": " "
+    },
+    {
+      "t": "var",
+      "field": "partnumber"
+    }
+  ],
+  "warehouses": {
+    "World": [
+      {
+        "id": "world-fra-1",
+        "enabled": true,
+        "label": "FRA DL* → DEF <part>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "FRA"
+          },
+          {
+            "type": "startsWith",
+            "field": "partnumber",
+            "value": "DL"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "DEF "
+          },
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-fra-2",
+        "enabled": true,
+        "label": "FRA CA*/FT* → <part> (drop line code)",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "FRA"
+          },
+          {
+            "type": "startsWithAny",
+            "field": "partnumber",
+            "values": [
+              "CA",
+              "FT"
+            ]
+          }
+        ],
+        "code": [
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-fra-3",
+        "enabled": true,
+        "label": "FRA CH*/CF* → FR <part>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "FRA"
+          },
+          {
+            "type": "startsWithAny",
+            "field": "partnumber",
+            "values": [
+              "CH",
+              "CF"
+            ]
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "FR "
+          },
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-fra-4",
+        "enabled": true,
+        "label": "FRA DA* → VIP <part w/o first 2 chars>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "FRA"
+          },
+          {
+            "type": "startsWith",
+            "field": "partnumber",
+            "value": "DA"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "VIP "
+          },
+          {
+            "t": "var",
+            "field": "partnumber",
+            "transform": "substr",
+            "start": 3
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-fra-5",
+        "enabled": true,
+        "label": "FRA (other) → FRA <part>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "FRA"
+          }
+        ],
+        "code": [
+          {
+            "t": "var",
+            "field": "linecode"
+          },
+          {
+            "t": "lit",
+            "v": " "
+          },
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-ngk-6",
+        "enabled": true,
+        "label": "NGK O2/Oxygen/NTK → NTK <part>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "NGK"
+          },
+          {
+            "type": "containsAny",
+            "field": "description",
+            "values": [
+              "Oxygen",
+              "NTK",
+              "o2"
+            ]
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "NTK "
+          },
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-ngk-7",
+        "enabled": true,
+        "label": "NGK RC-* wires → NGK <part>, relabel IGNITION WIRES",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "NGK"
+          },
+          {
+            "type": "startsWith",
+            "field": "description",
+            "value": "RC-"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "NGK "
+          },
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": [
+          {
+            "t": "lit",
+            "v": "IGNITION WIRES "
+          },
+          {
+            "t": "var",
+            "field": "description"
+          }
+        ]
+      },
+      {
+        "id": "world-ngk-8",
+        "enabled": true,
+        "label": "NGK (other) → NGK <part>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "NGK"
+          }
+        ],
+        "code": [
+          {
+            "t": "var",
+            "field": "linecode"
+          },
+          {
+            "t": "lit",
+            "v": " "
+          },
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-bsh-9",
+        "enabled": true,
+        "label": "BSH wiper/blade → BOS <part>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "BSH"
+          },
+          {
+            "type": "containsAny",
+            "field": "description",
+            "values": [
+              "WIPER",
+              "BLADE"
+            ]
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "BOS "
+          },
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-lua-10",
+        "enabled": true,
+        "label": "LUA → LUC <part>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "LUA"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "LUC "
+          },
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-ulr-11",
+        "enabled": true,
+        "label": "ULR → ASR <part w/o dashes>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "ULR"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "ASR "
+          },
+          {
+            "t": "var",
+            "field": "partnumber",
+            "transform": "stripDash"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-eur-12",
+        "enabled": true,
+        "label": "EUR shoe → ALS<part>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "EUR"
+          },
+          {
+            "type": "contains",
+            "field": "description",
+            "value": "SHOE"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "ALS"
+          },
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-eur-13",
+        "enabled": true,
+        "label": "EUR F1D*/ID* → EUR <part w/o dashes>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "EUR"
+          },
+          {
+            "type": "startsWithAny",
+            "field": "partnumber",
+            "values": [
+              "F1D",
+              "ID"
+            ]
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "EUR "
+          },
+          {
+            "t": "var",
+            "field": "partnumber",
+            "transform": "stripDash"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-eur-14",
+        "enabled": true,
+        "label": "EUR (other) → EUR <part>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "EUR"
+          }
+        ],
+        "code": [
+          {
+            "t": "var",
+            "field": "linecode"
+          },
+          {
+            "t": "lit",
+            "v": " "
+          },
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-spe-15",
+        "enabled": true,
+        "label": "SPE C-* → SPE <part w/o dashes>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "SPE"
+          },
+          {
+            "type": "startsWith",
+            "field": "partnumber",
+            "value": "C-"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "SPE "
+          },
+          {
+            "t": "var",
+            "field": "partnumber",
+            "transform": "stripDash"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-trk-16",
+        "enabled": true,
+        "label": "TRK → TRK <part w/o dashes>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "TRK"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "TRK "
+          },
+          {
+            "t": "var",
+            "field": "partnumber",
+            "transform": "stripDash"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-wag-17",
+        "enabled": true,
+        "label": "WAG QC/ZD/MX/PD/SX* → <part> (drop line code)",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "WAG"
+          },
+          {
+            "type": "startsWithAny",
+            "field": "partnumber",
+            "values": [
+              "QC",
+              "ZD",
+              "MX",
+              "PD",
+              "SX"
+            ]
+          }
+        ],
+        "code": [
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "world-pro-18",
+        "enabled": true,
+        "label": "PRO → <part> (drop line code)",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "PRO"
+          }
+        ],
+        "code": [
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      }
+    ],
+    "Transbec": [
+      {
+        "id": "trs-ic-19",
+        "enabled": true,
+        "label": "Interchange trsToCAP hit → mapped code",
+        "conditions": [
+          {
+            "type": "interchangeHasKey",
+            "file": "trsToCAP.json",
+            "key": "partnumber"
+          }
+        ],
+        "code": [
+          {
+            "t": "interchange",
+            "file": "trsToCAP.json",
+            "key": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "trs-bcd-20",
+        "enabled": true,
+        "label": "BCD* → BCD <part w/o prefix>, relabel Bremsen Ceramic",
+        "conditions": [
+          {
+            "type": "startsWith",
+            "field": "partnumber",
+            "value": "BCD"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "BCD "
+          },
+          {
+            "t": "var",
+            "field": "partnumber",
+            "transform": "substr",
+            "start": 4,
+            "trim": true
+          }
+        ],
+        "description": [
+          {
+            "t": "lit",
+            "v": "Bremsen Ceramic Disc Pads"
+          }
+        ]
+      },
+      {
+        "id": "trs-tk-21",
+        "enabled": true,
+        "label": "TK* → UC K<part w/o prefix>",
+        "conditions": [
+          {
+            "type": "startsWith",
+            "field": "partnumber",
+            "value": "TK"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "UC K"
+          },
+          {
+            "t": "var",
+            "field": "partnumber",
+            "transform": "substr",
+            "start": 3,
+            "trim": true
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "trs-tes-22",
+        "enabled": true,
+        "label": "TES* → UC ES<part w/o prefix>",
+        "conditions": [
+          {
+            "type": "startsWith",
+            "field": "partnumber",
+            "value": "TES"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "UC ES"
+          },
+          {
+            "t": "var",
+            "field": "partnumber",
+            "transform": "substr",
+            "start": 4,
+            "trim": true
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "trs-profusion-23",
+        "enabled": true,
+        "label": "PROFUSION Brake Disc + rotor interchange → mapped ASR code",
+        "conditions": [
+          {
+            "type": "startsWith",
+            "field": "description",
+            "value": "PROFUSION Brake Disc"
+          },
+          {
+            "type": "interchangeHasKey",
+            "file": "trsToASRotors.json",
+            "key": "partnumber"
+          }
+        ],
+        "code": [
+          {
+            "t": "interchange",
+            "file": "trsToASRotors.json",
+            "key": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "trs-bremsen-24",
+        "enabled": true,
+        "label": "BREMSEN Brake Disc → BRM <part>",
+        "conditions": [
+          {
+            "type": "startsWith",
+            "field": "description",
+            "value": "BREMSEN Brake Disc"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "BRM "
+          },
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      },
+      {
+        "id": "trs-blackbelt-25",
+        "enabled": true,
+        "label": "BLACK BELT Serpentine → SB 5<part[2:]>, relabel Serpentine Belt",
+        "conditions": [
+          {
+            "type": "startsWith",
+            "field": "description",
+            "value": "BLACK BELT Serpentine Belt"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "SB 5"
+          },
+          {
+            "t": "var",
+            "field": "partnumber",
+            "transform": "substr",
+            "start": 2
+          }
+        ],
+        "description": [
+          {
+            "t": "lit",
+            "v": "Serpentine Belt"
+          }
+        ]
+      }
+    ],
+    "Proforce": [
+      {
+        "id": "pfc-crd-26",
+        "enabled": true,
+        "label": "CRD* → CRD <part w/o prefix>, relabel PROFORCE Ceramic",
+        "conditions": [
+          {
+            "type": "startsWith",
+            "field": "partnumber",
+            "value": "CRD"
+          }
+        ],
+        "code": [
+          {
+            "t": "lit",
+            "v": "CRD "
+          },
+          {
+            "t": "var",
+            "field": "partnumber",
+            "transform": "substr",
+            "start": 4,
+            "trim": true
+          }
+        ],
+        "description": [
+          {
+            "t": "lit",
+            "v": "PROFORCE Ceramic Disc Pads"
+          }
+        ]
+      },
+      {
+        "id": "pfc-rot-27",
+        "enabled": true,
+        "label": "ROT → ROT <part>, relabel BRAKE ROTORS - <asr>",
+        "conditions": [
+          {
+            "type": "eq",
+            "field": "linecode",
+            "value": "ROT"
+          }
+        ],
+        "code": [
+          {
+            "t": "var",
+            "field": "linecode"
+          },
+          {
+            "t": "lit",
+            "v": " "
+          },
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": [
+          {
+            "t": "lit",
+            "v": "BRAKE ROTORS - "
+          },
+          {
+            "t": "interchange",
+            "file": "trsToASRotors.json",
+            "key": "partnumber"
+          }
+        ]
+      }
+    ]
+  }
+}

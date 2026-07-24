@@ -6,6 +6,7 @@ const { registerStockFlowIpc } = require('./stockflow.ipc');
 const { registerSettingsIpc } = require('./settings.ipc');
 const { registerUpdatesIpc } = require('./updates.ipc');
 const { registerBubbleLocksIpc } = require('./bubbleLocks.ipc');
+const { registerRulesIpc } = require('./rules.ipc');
 
 function registerAllIpc(ipcMain, deps) {
   registerItemsIpc(ipcMain, {
@@ -151,6 +152,8 @@ function registerAllIpc(ipcMain, deps) {
     releaseBubbleLock: deps.releaseBubbleLock,
     getMachineId: deps.getMachineId,
   });
+
+  registerRulesIpc(ipcMain);
 }
 
 module.exports = { registerAllIpc };

@@ -112,6 +112,12 @@ const fallbackApi = {
   migrateBusinessFilesToShared: warnAsync("migrateBusinessFilesToShared"),
   getConfig: warnAsync("getConfig", async () => ({ ok: false, config: {} })),
   setConfig: warnAsync("setConfig"),
+  getRules: warnAsync("getRules", async () => ({ ok: false, rules: { warehouses: {} }, isDefault: true, interchangeFiles: [] })),
+  saveRules: warnAsync("saveRules"),
+  resetRulesDefaults: warnAsync("resetRulesDefaults"),
+  testRule: warnAsync("testRule", async () => ({ ok: false, code: "", description: "" })),
+  getInterchange: warnAsync("getInterchange", async () => ({ ok: false, table: {} })),
+  saveInterchange: warnAsync("saveInterchange"),
 };
 
 const api = window.api ?? fallbackApi;

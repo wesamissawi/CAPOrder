@@ -125,6 +125,14 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('sage:lock-changed', listener);
     return () => ipcRenderer.removeListener('sage:lock-changed', listener);
   },
+  // CAP rules editor (Rules view)
+  getRules: () => ipcRenderer.invoke('rules:get'),
+  saveRules: (rules) => ipcRenderer.invoke('rules:save', rules),
+  resetRulesDefaults: () => ipcRenderer.invoke('rules:reset-defaults'),
+  testRule: (sample) => ipcRenderer.invoke('rules:test', sample),
+  getInterchange: (fileName) => ipcRenderer.invoke('rules:interchange-get', fileName),
+  saveInterchange: (fileName, table) => ipcRenderer.invoke('rules:interchange-save', fileName, table),
+
   getBubbleLocks: () => ipcRenderer.invoke('bubble-lock:get-all'),
   claimBubbleLock: (bubbleId, bubbleName, opts) => ipcRenderer.invoke('bubble-lock:claim', bubbleId, bubbleName, opts),
   releaseBubbleLock: (bubbleId, opts) => ipcRenderer.invoke('bubble-lock:release', bubbleId, opts),

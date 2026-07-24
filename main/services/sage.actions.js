@@ -343,6 +343,11 @@ const createSageActions = (deps) => {
         const linecode  = spaceIdx > -1 ? raw.slice(0, spaceIdx) : raw;
         const partnumber = spaceIdx > -1 ? raw.slice(spaceIdx + 1).trim() : '';
         return {
+          // The bubble's itemcode was already resolved through the CAP rules at
+          // bublify time (single source of truth — see capRules.js), so send it
+          // verbatim as sageCode. linecode/partnumber remain for the AHK legacy
+          // fallback used on any pre-resolution stock.
+          sageCode: raw,
           linecode,
           partnumber,
           warehouse:   String(i.warehouse   || ''),

@@ -11,6 +11,7 @@ import ReturnsManagementView from "./views/ReturnsManagementView";
 import ManageStockView from "./views/ManageStockView";
 import ArchiveSearchView from "./views/ArchiveSearchView";
 import SettingsView from "./views/SettingsView";
+import RulesView from "./views/RulesView";
 import {
   DEFAULT_BUBBLES,
   normalizeItems,
@@ -150,6 +151,7 @@ const VIEWS = [
   { id: "archive-search", label: "Archive" },
   { id: "settings", label: "Settings" },
   { id: "payment-management", label: "Payments" },
+  { id: "rules", label: "Rules" },
 ];
 
 function ViewTabs({ currentView, onSelect, badges }) {
@@ -4699,6 +4701,8 @@ export default function App() {
           />
         ) : currentView === "settings" ? (
           <SettingsView />
+        ) : currentView === "rules" ? (
+          <RulesView currentViewMeta={currentViewMeta} />
         ) : (
           <PaymentManagementView currentViewMeta={currentViewMeta} />
         )}

@@ -285,14 +285,23 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
         msgExtInfo  := "Extended field raw: " . extendedRaw
         ; MsgBox, 64, Ext Debug, % msgLineInfo . "`n" . msgPartInfo . "`n" . msgCostInfo . "`n" . msgExtInfo
 
-        ; your custom rule mapper: should return [type, description]
-        resultList := ourRules(ruleSource
-            , lineItems[idx].partLineCode
-            , lineItems[idx].partNumber
-            , lineItems[idx].partDescription)
+        ; Prefer the CAP/Sage code the app already resolved (single source of
+        ; truth — see src/scrapers/capRules.js). Orders scraped before that
+        ; existed have no sageCode, so fall back to the legacy ourRules mapper.
+        if (lineItems[idx].HasKey("sageCode") && lineItems[idx].sageCode != "") {
+            type := lineItems[idx].sageCode
+            description := (lineItems[idx].HasKey("sageDescription") && lineItems[idx].sageDescription != "")
+                ? lineItems[idx].sageDescription
+                : lineItems[idx].partDescription
+        } else {
+            resultList := ourRules(ruleSource
+                , lineItems[idx].partLineCode
+                , lineItems[idx].partNumber
+                , lineItems[idx].partDescription)
 
-        type        := resultList[1]
-        description := resultList[2]
+            type        := resultList[1]
+            description := resultList[2]
+        }
 
         ; Type out the item "type" char-by-char (keeps Sage autocomplete happy)
         Loop, Parse, type
