@@ -1,8 +1,8 @@
 // src/components/BubbleColumn.jsx
 import React from "react";
 import Card from "./Card";
-import LabeledField from "./LabeledField"; 
-import LabeledInput from "./LabeledInput"; // adjust path as needed
+import DraftInput from "./DraftInput";
+import LabeledField from "./LabeledField";
 
 
 
@@ -20,7 +20,7 @@ const toNumber = (value) => {
 
 const FALLBACK_DELETE_INFO = ["NEW STOCK", "SHELF", "CASH SALES", "RETURNS"];
 
-export default function BubbleColumn({
+function BubbleColumn({
   bubble,
   items,
   bubbles,
@@ -536,18 +536,20 @@ export default function BubbleColumn({
           </div>
         </div>
       )}
-      <textarea
+      <DraftInput
+        as="textarea"
         rows={2}
         className={`mt-2 w-full rounded-xl border p-2 text-sm focus:outline-none ${canEdit ? 'border-slate-300 focus:ring-2 focus:ring-indigo-300' : 'border-slate-200 bg-slate-50 text-slate-500 cursor-default'}`}
         placeholder={canEdit ? "Bubble notes…" : ""}
-        value={notes}
+        value={notes ?? ""}
         readOnly={!canEdit}
-        onChange={(e) => canEdit && onUpdateBubbleNotes(id, e.target.value)}
-        onFocus={onFieldFocus}
-        onBlur={(e) => {
-          onFieldBlur?.(e);
-          if (canEdit) onBubbleNotesBlur?.(id);
+        onCommit={(next) => {
+          if (!canEdit) return;
+          onUpdateBubbleNotes(id, next);
+          onBubbleNotesBlur?.(id, next);
         }}
+        onFocus={onFieldFocus}
+        onBlur={onFieldBlur}
       />
 
       <div className="grid grid-cols-1 gap-3">
@@ -605,7 +607,7 @@ export default function BubbleColumn({
                 </div>
                 <div className="flex items-center gap-1 text-sm text-slate-600">
                   <span className="text-xs font-semibold text-slate-500">$</span>
-                  <input
+                  <DraftInput
                     type="text"
                     step="0.01"
                     inputMode="decimal"
@@ -613,14 +615,14 @@ export default function BubbleColumn({
                     readOnly={!canEdit}
                     onFocus={(e) => { if (canEdit) { e.target.select(); onFieldFocus?.(e); } }}
                     value={it.allocated_for ?? ""}
-                    onChange={(e) => canEdit && onUpdateItem(uid, { allocated_for: e.target.value })}
+                    onCommit={(next) => canEdit && onUpdateItem(uid, { allocated_for: next })}
                     onBlur={canEdit ? onFieldBlur : undefined}
                   />
                 </div>
                 {showCashSalesMetrics && (
                   <div className="flex items-center gap-1 text-sm text-slate-600">
                     <span className="text-xs font-semibold text-slate-500">Disc</span>
-                    <input
+                    <DraftInput
                       type="text"
                       step="0.01"
                       inputMode="decimal"
@@ -632,7 +634,7 @@ export default function BubbleColumn({
                           ? it.discounted_price
                           : it.allocated_for ?? ""
                       }
-                      onChange={(e) => canEdit && onUpdateItem(uid, { discounted_price: e.target.value })}
+                      onCommit={(next) => canEdit && onUpdateItem(uid, { discounted_price: next })}
                       onBlur={canEdit ? onFieldBlur : undefined}
                     />
                   </div>
@@ -790,13 +792,16 @@ export default function BubbleColumn({
                     </div>
                   </LabeledField>
 
-                  <LabeledInput label="Sold Status"
-                    value={it.sold_status}
-                    readOnly={!canEdit}
-                    onChange={(e) => canEdit && onUpdateItem(itemKey(it), { sold_status: e.target.value })}
-                    onFocus={canEdit ? onFieldFocus : undefined}
-                    onBlur={canEdit ? onFieldBlur : undefined}
-                  />
+                  <LabeledField label="Sold Status">
+                    <DraftInput
+                      className="w-full border rounded-lg p-2"
+                      value={it.sold_status ?? ""}
+                      readOnly={!canEdit}
+                      onCommit={(next) => canEdit && onUpdateItem(itemKey(it), { sold_status: next })}
+                      onFocus={canEdit ? onFieldFocus : undefined}
+                      onBlur={canEdit ? onFieldBlur : undefined}
+                    />
+                  </LabeledField>
                
 
 
@@ -813,12 +818,13 @@ export default function BubbleColumn({
                   
                   <LabeledField label="Notes 1">
                   
-                    <textarea
+                    <DraftInput
+                      as="textarea"
                       className={`w-full border rounded-lg p-2 ${!canEdit ? 'bg-slate-50 text-slate-500' : ''}`}
                       rows={2}
                       readOnly={!canEdit}
-                      value={it.notes1}
-                      onChange={(e) => canEdit && onUpdateItem(itemKey(it), { notes1: e.target.value })}
+                      value={it.notes1 ?? ""}
+                      onCommit={(next) => canEdit && onUpdateItem(itemKey(it), { notes1: next })}
                       onFocus={canEdit ? onFieldFocus : undefined}
                       onBlur={canEdit ? onFieldBlur : undefined}
                     />
@@ -826,12 +832,13 @@ export default function BubbleColumn({
                   </LabeledField>
                   <LabeledField label="Notes 2">
 
-                    <textarea
+                    <DraftInput
+                      as="textarea"
                       className={`w-full border rounded-lg p-2 ${!canEdit ? 'bg-slate-50 text-slate-500' : ''}`}
                       rows={2}
                       readOnly={!canEdit}
-                      value={it.notes2}
-                      onChange={(e) => canEdit && onUpdateItem(itemKey(it), { notes2: e.target.value })}
+                      value={it.notes2 ?? ""}
+                      onCommit={(next) => canEdit && onUpdateItem(itemKey(it), { notes2: next })}
                       onFocus={canEdit ? onFieldFocus : undefined}
                       onBlur={canEdit ? onFieldBlur : undefined}
                     />
@@ -1210,3 +1217,5 @@ export default function BubbleColumn({
     </div>
   );
 }
+
+export default React.memo(BubbleColumn);

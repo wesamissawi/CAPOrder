@@ -9,7 +9,8 @@ contextBridge.exposeInMainWorld('api', {
 
   // data
   readItems: () => ipcRenderer.invoke('items:read'),
-  writeItems: (items, deletedUids) => ipcRenderer.invoke('items:write', items, deletedUids),
+  writeItems: (items, deletedUids, options) => ipcRenderer.invoke('items:write', items, deletedUids, options),
+  readItemHistory: () => ipcRenderer.invoke('items:read-history'),
   exportItems: (items) => ipcRenderer.invoke('items:export', items),
 
   // updates
@@ -100,7 +101,7 @@ contextBridge.exposeInMainWorld('api', {
   archiveOrder: (refKey, source) => ipcRenderer.invoke('orders:archive-one', refKey, source),
   deleteOrder: (refKey, source) => ipcRenderer.invoke('orders:delete-one', refKey, source),
   searchOrdersArchive: (term) => ipcRenderer.invoke('orders-archive:search', term),
-  addArchiveLineToCashSales: (order, line) => ipcRenderer.invoke('orders-archive:add-to-cash-sales', order, line),
+  addArchiveLineToCashSales: (order, line, target) => ipcRenderer.invoke('orders-archive:add-to-cash-sales', order, line, target),
   purgeOldOrdersArchive: () => ipcRenderer.invoke('orders-archive:purge-old'),
   archiveBubble: (payload) => ipcRenderer.invoke('archive:save-bubble', payload),
   searchArchive: (query) => ipcRenderer.invoke('archive:search', query),

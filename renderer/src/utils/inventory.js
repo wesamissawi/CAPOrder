@@ -71,6 +71,13 @@ export function normalizeItems(arr) {
       reference_num: String(it.reference_num ?? ""),
       sold_date: String(it.sold_date ?? ""),
       sold_status: String(it.sold_status ?? ""),
+      // Returns requisition association. Empty = unassigned (sits in the
+      // warehouse's Unassigned Returns group); set = belongs to that slip.
+      return_slip_id: String(it.return_slip_id ?? ""),
+      return_slip_date: String(it.return_slip_date ?? ""),
+      return_slip_po: String(it.return_slip_po ?? ""),
+      // "" / "open" = active requisition; "waiting" = set aside, awaiting return.
+      return_slip_status: String(it.return_slip_status ?? ""),
     };
   });
 }

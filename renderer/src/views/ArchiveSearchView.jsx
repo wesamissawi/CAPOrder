@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import Card from "../components/Card";
 import api from "../api";
 
@@ -11,6 +11,46 @@ function formatDate(raw) {
   return raw;
 }
 
+function formatWhen(raw) {
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (!isNaN(d.getTime())) {
+    return d.toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  }
+  return String(raw);
+}
+
+// Lifecycle event presentation for the item trace.
+const HISTORY_EVENTS = {
+  created: { label: "Created", dot: "bg-slate-400" },
+  moved: { label: "Moved", dot: "bg-indigo-500" },
+  sent_to_sage: { label: "Sent to Sage", dot: "bg-violet-600" },
+  sent_to_cashpad: { label: "Sent to CashPad", dot: "bg-emerald-600" },
+  returned_to_stock: { label: "Returned to stock", dot: "bg-sky-500" },
+  archived: { label: "Archived (sold)", dot: "bg-amber-500" },
+  credit_received: { label: "Credit received", dot: "bg-emerald-600" },
+  deleted: { label: "Deleted", dot: "bg-red-600" },
+};
+
+function historyDetail(h) {
+  if (h.event === "created") return h.allocated_to ? `into ${h.allocated_to}` : "";
+  // Moves/queue changes: show only the destination, not the origin bubble.
+  if (h.to_bubble) return `to ${h.to_bubble}`;
+  if (
+    (h.event === "deleted" || h.event === "archived" || h.event === "credit_received") &&
+    h.allocated_to
+  ) {
+    return `from ${h.allocated_to}`;
+  }
+  return "";
+}
+
 function PurchasesSearch({
   searchTerm,
   setSearchTerm,
@@ -20,11 +60,24 @@ function PurchasesSearch({
   error,
   onPurge,
   onAddLineToCashSales,
+  onMoveItemToBubble,
   items = [],
+  itemHistory = [],
 }) {
   const [purging, setPurging] = useState(false);
   const [purgeMsg, setPurgeMsg] = useState("");
   const [lineStatus, setLineStatus] = useState({});
+  // Which bubble the two views target. Drives both the direct Add button (add
+  // straight to Returns/CashPad — no CashPad detour) and the post-add Move
+  // button. "returns" -> RETURNS, "cashpad" -> CASHPAD.
+  const [moveTarget, setMoveTarget] = useState("returns");
+  const targetName = moveTarget === "returns" ? "RETURNS" : "CASHPAD";
+  const targetLabel = moveTarget === "returns" ? "Returns" : "CashPad";
+  const targetSpec = {
+    allocated_to: targetName,
+    accountingPath: moveTarget === "returns" ? "OUTSTANDING" : "CASH_SALE",
+  };
+  const searchInputRef = useRef(null);
 
   useEffect(() => {
     const initial = {};
@@ -38,25 +91,45 @@ function PurchasesSearch({
 
   const handleKey = (e) => { if (e.key === "Enter") onSearch(); };
 
-  function findItemLocation(order, line) {
+  function findActiveItem(order, line) {
     if (!items.length) return null;
     const targetCode = (`${line.partLineCode || ''} ${line.partNumber || ''}`).trim().toUpperCase()
       || (line.partNumber || '').toUpperCase();
     if (!targetCode) return null;
-    const match = items.find(
-      (it) =>
-        (it.itemcode || '').toUpperCase() === targetCode &&
-        (it.reference_num || '') === (order.reference || '')
+    return (
+      items.find(
+        (it) =>
+          (it.itemcode || '').toUpperCase() === targetCode &&
+          (it.reference_num || '') === (order.reference || '')
+      ) || null
     );
-    return match ? (match.allocated_to || 'Unknown') : null;
+  }
+
+  // Full lifecycle trace for a line (created / moved / sent to Sage-CashPad /
+  // deleted), oldest-first, so a looked-up part shows its whole journey.
+  function findItemHistory(order, line) {
+    if (!itemHistory.length) return [];
+    const targetCode = (`${line.partLineCode || ''} ${line.partNumber || ''}`).trim().toUpperCase()
+      || (line.partNumber || '').toUpperCase();
+    if (!targetCode) return [];
+    return itemHistory
+      .filter(
+        (h) =>
+          (h.itemcode || '').toUpperCase() === targetCode &&
+          (h.reference_num || '') === (order.reference || '')
+      )
+      .sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
   }
 
   async function handleAddLine(order, line, key) {
     setLineStatus((prev) => ({ ...prev, [key]: "adding" }));
     try {
-      const res = await onAddLineToCashSales(order, line);
+      const res = await onAddLineToCashSales(order, line, targetSpec);
       if (!res?.ok) throw new Error(res?.error || "Failed.");
       setLineStatus((prev) => ({ ...prev, [key]: "added" }));
+      // Re-focus + select the search box so the next search just needs typing.
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
     } catch (e) {
       setLineStatus((prev) => ({ ...prev, [key]: "error:" + (e?.message || "Failed") }));
     }
@@ -97,6 +170,7 @@ function PurchasesSearch({
                 Part number
               </label>
               <input
+                ref={searchInputRef}
                 className="rounded-xl border border-slate-200 px-3 py-2 text-sm"
                 placeholder="e.g. RDA540 or NAPA 540"
                 value={searchTerm}
@@ -113,6 +187,38 @@ function PurchasesSearch({
             </button>
           </div>
           {error && <div className="text-sm text-red-600">{error}</div>}
+          <div className="flex items-center gap-3 border-t border-slate-100 pt-3">
+            <span className="text-xs uppercase tracking-wide text-slate-500">
+              Move target
+            </span>
+            <div className="inline-flex overflow-hidden rounded-xl border border-slate-200">
+              <button
+                type="button"
+                onClick={() => setMoveTarget("returns")}
+                className={`px-4 py-1.5 text-xs font-semibold transition-colors ${
+                  moveTarget === "returns"
+                    ? "bg-indigo-600 text-white"
+                    : "bg-white text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                Returns
+              </button>
+              <button
+                type="button"
+                onClick={() => setMoveTarget("cashpad")}
+                className={`px-4 py-1.5 text-xs font-semibold transition-colors ${
+                  moveTarget === "cashpad"
+                    ? "bg-indigo-600 text-white"
+                    : "bg-white text-slate-600 hover:bg-slate-50"
+                }`}
+              >
+                CashPad
+              </button>
+            </div>
+            <span className="text-xs text-slate-400">
+              Found items move to {moveTarget === "returns" ? "RETURNS" : "CASHPAD"}.
+            </span>
+          </div>
           <div className="border-t border-slate-100 pt-3 flex items-center gap-3">
             <button
               className="rounded-xl bg-red-600 text-white px-4 py-2 text-sm font-semibold shadow hover:bg-red-700 disabled:opacity-60"
@@ -168,6 +274,8 @@ function PurchasesSearch({
             {order.lines.map((line, li) => {
               const key = `${oi}-${li}`;
               const status = lineStatus[key];
+              const trail = findItemHistory(order, line);
+              const lastEvt = trail.length ? trail[trail.length - 1] : null;
               return (
                 <div
                   key={`${order.reference}-${li}-${line.partNumber}`}
@@ -198,25 +306,70 @@ function PurchasesSearch({
                       <div className="flex flex-col items-end gap-1.5 min-w-[110px]">
                         <div className="text-xs font-semibold text-green-700">Added ✓</div>
                         {(() => {
-                          const loc = findItemLocation(order, line);
-                          if (loc) {
-                            return <div className="text-xs text-indigo-600 font-medium">📍 {loc}</div>;
+                          const active = findActiveItem(order, line);
+                          if (active) {
+                            const loc = active.allocated_to || "Unknown";
+                            const alreadyThere = String(loc).toUpperCase() === targetName;
+                            return (
+                              <>
+                                <div className="text-xs text-indigo-600 font-medium">📍 {loc}</div>
+                                {alreadyThere ? (
+                                  <div className="text-[11px] text-slate-400">
+                                    Already in {targetLabel}
+                                  </div>
+                                ) : (
+                                  <button
+                                    className="rounded-xl px-3 py-1.5 text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700"
+                                    onClick={async () => {
+                                      const ok = await api.confirm(
+                                        `Move to ${targetLabel}?`,
+                                        `This moves ${active.itemcode || "this item"} from ${loc} to ${targetName}.`
+                                      );
+                                      if (ok) onMoveItemToBubble?.(active.uid, targetName);
+                                    }}
+                                  >
+                                    Move to {targetLabel}
+                                  </button>
+                                )}
+                              </>
+                            );
                           }
                           return (
                             <>
-                              <div className="text-xs text-slate-400">Not in active stock</div>
+                              {(() => {
+                                const removal = {
+                                  archived: { text: "📦 Archived (sold)", cls: "text-amber-600" },
+                                  credit_received: { text: "💳 Credit received", cls: "text-emerald-600" },
+                                  deleted: { text: "🗑️ Deleted", cls: "text-red-600" },
+                                }[lastEvt?.event];
+                                return removal ? (
+                                  <div className="text-right leading-tight">
+                                    <div className={`text-xs font-semibold ${removal.cls}`}>
+                                      {removal.text}
+                                      {lastEvt.at ? ` ${formatDate(lastEvt.at)}` : ""}
+                                    </div>
+                                    {lastEvt.allocated_to && (
+                                      <div className="text-[11px] text-slate-500">
+                                        from {lastEvt.allocated_to}
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <div className="text-xs text-slate-400">Not in active stock</div>
+                                );
+                              })()}
                               <button
                                 className="rounded-xl px-3 py-1.5 text-xs font-semibold bg-amber-100 text-amber-700 border border-amber-200 hover:bg-amber-200 disabled:opacity-50"
                                 disabled={status === "adding"}
                                 onClick={async () => {
                                   const ok = await api.confirm(
-                                    "Re-add to CashPad?",
-                                    "Check stock in Sage before re-adding. This item was previously added to CashPad."
+                                    `Re-add to ${targetLabel}?`,
+                                    "Check stock in Sage before re-adding. This item was previously added to active stock."
                                   );
                                   if (ok) handleAddLine(order, line, key);
                                 }}
                               >
-                                Re-add to CashPad
+                                Re-add to {targetLabel}
                               </button>
                             </>
                           );
@@ -238,10 +391,41 @@ function PurchasesSearch({
                           ? "Adding..."
                           : status?.startsWith("error:")
                           ? "Retry"
-                          : "Add to CashPad"}
+                          : `Add to ${targetLabel}`}
                       </button>
                     )}
                   </div>
+
+                  {trail.length > 0 && (
+                    <div className="w-full border-t border-slate-100 pt-2">
+                      <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                        {trail.map((h, hi) => {
+                          const meta = HISTORY_EVENTS[h.event] || {
+                            label: h.event || "Event",
+                            dot: "bg-slate-400",
+                          };
+                          const detail = historyDetail(h);
+                          return (
+                            <React.Fragment key={`${key}-hist-${hi}`}>
+                              {hi > 0 && <span className="shrink-0 text-slate-300">→</span>}
+                              <div className="flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 py-1">
+                                <span className={`h-2 w-2 shrink-0 rounded-full ${meta.dot}`} />
+                                <div className="leading-tight">
+                                  <div className="whitespace-nowrap text-xs font-semibold text-slate-700">
+                                    {meta.label}
+                                    {detail ? ` ${detail}` : ""}
+                                  </div>
+                                  <div className="whitespace-nowrap text-[10px] text-slate-400">
+                                    {formatWhen(h.at)}
+                                  </div>
+                                </div>
+                              </div>
+                            </React.Fragment>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -270,7 +454,9 @@ export default function ArchiveSearchView({
   purchasesError,
   onPurgeOldOrders,
   onAddLineToCashSales,
+  onMoveItemToBubble,
   items = [],
+  itemHistory = [],
 }) {
   const [tab, setTab] = useState("purchases");
 
@@ -410,7 +596,9 @@ export default function ArchiveSearchView({
           error={purchasesError}
           onPurge={onPurgeOldOrders}
           onAddLineToCashSales={onAddLineToCashSales}
+          onMoveItemToBubble={onMoveItemToBubble}
           items={items}
+          itemHistory={itemHistory}
         />
       )}
     </div>

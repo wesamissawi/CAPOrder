@@ -2,6 +2,7 @@ const registerItemsIpc = (ipcMain, deps) => {
   const {
     readItems,
     writeItems,
+    readHistory,
     getDataFile,
     dialog,
     fs,
@@ -23,14 +24,16 @@ const registerItemsIpc = (ipcMain, deps) => {
   // deletions happen only for the uids the renderer explicitly lists in
   // `deletedUids`. This stops a stale/partial renderer state from erasing
   // items it never saw.
-  ipcMain.handle('items:write', (_evt, items, deletedUids) => {
+  ipcMain.handle('items:write', (_evt, items, deletedUids, options) => {
     try {
       const deletions = Array.isArray(deletedUids) ? deletedUids.filter(Boolean) : [];
+      const allowedReasons = ['archived', 'credit_received'];
+      const deleteReason = allowedReasons.includes(options?.deleteReason) ? options.deleteReason : 'deleted';
       const current = readItems();              // throws if any queue file is unreadable
       const a = JSON.stringify(current);
       const b = JSON.stringify(items ?? []);
       if (a !== b || deletions.length > 0) {
-        writeItems(items, { replaceAll: false, deletedUids: deletions });
+        writeItems(items, { replaceAll: false, deletedUids: deletions, deleteReason });
       }
       return { ok: true };
     } catch (e) {
@@ -47,6 +50,16 @@ const registerItemsIpc = (ipcMain, deps) => {
     if (canceled || !filePath) return { ok: false, canceled: true };
     fs.writeFileSync(filePath, JSON.stringify(items ?? [], null, 2), 'utf-8');
     return { ok: true, filePath };
+  });
+  // Read the append-only item lifecycle log (deletions). Never throws to the
+  // renderer — a missing/unreadable log just reads as an empty history.
+  ipcMain.handle('items:read-history', () => {
+    try {
+      return { ok: true, history: typeof readHistory === 'function' ? readHistory() : [] };
+    } catch (e) {
+      console.error('[items:read-history] failed', e?.message || e);
+      return { ok: false, error: e?.message || 'Failed to read history.', history: [] };
+    }
   });
   ipcMain.handle('items:get-path', () => ({ path: getDataFile() }));
   ipcMain.handle('items:reveal', () => { const f = getDataFile(); if (fs.existsSync(f)) shell.showItemInFolder(f); return { ok: true }; });

@@ -20,6 +20,7 @@ const fallbackApi = {
   debugLog: (...args) => console.log("[renderer]", ...args),
   readItems: async () => [],
   writeItems: warnAsync("writeItems"),
+  readItemHistory: warnAsync("readItemHistory", async () => ({ ok: false, history: [] })),
   exportItems: warnAsync("exportItems"),
   onItemsUpdated: warnEvent("onItemsUpdated"),
   getDataPath: warnAsync("getDataPath", async () => ({ path: "(not in Electron)" })),

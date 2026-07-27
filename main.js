@@ -598,7 +598,7 @@ const itemsService = createItemsService({
   fs,
   path,
 });
-const { readAllQueueItems, writeItems } = itemsService;
+const { readAllQueueItems, writeItems, readHistory } = itemsService;
 
 function getOrdersFile() {
   const resolved = resolveBusinessPaths();
@@ -1873,6 +1873,7 @@ function registerAllIpc() {
     VENDOR_PATHS,
     readItems,
     writeItems,
+    readHistory,
     getDataFile,
     readConfig,
     writeConfig,

@@ -192,7 +192,8 @@ export default function App() {
   const [bubbles, setBubbles] = useState(DEFAULT_BUBBLES);
   const [items, setItems] = useState([]);
   const [expanded, setExpanded] = useState({});
-  const [newBubbleName, setNewBubbleName] = useState("");
+  // newBubbleName now lives inside StockFlowView's CreateBubbleCard so typing
+  // the new-bubble name doesn't re-render App (and the whole bubble workspace).
   const [bubblePositions, setBubblePositions] = useState({});
   const [bubbleSizes, setBubbleSizes] = useState({});
   const [bubbleZOrder, setBubbleZOrder] = useState([]);
@@ -309,6 +310,11 @@ export default function App() {
   const [purchasesResults, setPurchasesResults] = useState([]);
   const [purchasesSearching, setPurchasesSearching] = useState(false);
   const [purchasesError, setPurchasesError] = useState("");
+  const [itemHistory, setItemHistory] = useState([]);
+  // Return requisition slips. The item↔slip link lives on items (synced); this
+  // list carries slip metadata (warehouse + date), notably for slips that are
+  // still empty. Persisted in per-machine UI state.
+  const [returnSlips, setReturnSlips] = useState([]);
   const ordersLastSavedRef = useRef("");
 
   const [editingItemUid, setEditingItemUid] = useState(null);
@@ -748,8 +754,8 @@ export default function App() {
   }
 
 
-  async function addBubble(position) {
-    const baseRaw = newBubbleName.trim() || "New Bubble";
+  async function addBubble(position, nameInput = "") {
+    const baseRaw = (nameInput || "").trim() || "New Bubble";
     const base = baseRaw.toUpperCase();
     const names = new Set(bubbles.map((b) => (b.name || "").toUpperCase()));
     const finalName = uniqueName(base, names);
@@ -767,7 +773,6 @@ export default function App() {
       ...prev,
       [id]: { ...(prev[id] || {}), accountingPath: visibleAccountingPath || ACCOUNTING_PATHS.OUTSTANDING },
     }));
-    setNewBubbleName("");
     if (api?.writeSharedBubbleData) {
       api
         .writeSharedBubbleData({
@@ -786,10 +791,14 @@ export default function App() {
     );
   }
 
-  function handleBubbleNotesBlur(id) {
-    const bubble = bubbles.find((b) => b.id === id);
-    if (!bubble) return;
-    persistSharedBubbleSnapshot(id, { notes: bubble.notes || "" });
+  function handleBubbleNotesBlur(id, notesValue) {
+    // Prefer the value the field just committed — setBubbles is async, so a
+    // bubbles.find() here can still read the pre-edit notes on the same tick.
+    const notes =
+      notesValue !== undefined
+        ? notesValue
+        : bubbles.find((b) => b.id === id)?.notes || "";
+    persistSharedBubbleSnapshot(id, { notes });
   }
 
   const filteredItems = useMemo(() => {
@@ -875,18 +884,77 @@ export default function App() {
     () => groupItemsByBubble(filteredItemsForView, bubblesForView),
     [filteredItemsForView, bubblesForView]
   );
-  const returnsByWarehouse = useMemo(() => {
-    const groups = new Map();
+  const UNSPECIFIED_WAREHOUSE = "Unspecified Warehouse";
+  const returnsView = useMemo(() => {
+    const unassigned = new Map(); // warehouse -> items[]
+    const slipItems = new Map(); // slipId -> items[]
     filteredItems.forEach((it) => {
       if ((it.allocated_to || "").toLowerCase() !== "returns") return;
-      const warehouse = (it.warehouse || "").trim() || "Unspecified Warehouse";
-      if (!groups.has(warehouse)) groups.set(warehouse, []);
-      groups.get(warehouse).push(it);
+      const slipId = it.return_slip_id || "";
+      if (slipId) {
+        if (!slipItems.has(slipId)) slipItems.set(slipId, []);
+        slipItems.get(slipId).push(it);
+      } else {
+        const warehouse = (it.warehouse || "").trim() || UNSPECIFIED_WAREHOUSE;
+        if (!unassigned.has(warehouse)) unassigned.set(warehouse, []);
+        unassigned.get(warehouse).push(it);
+      }
     });
-    return Array.from(groups.entries())
+
+    const unassignedGroups = Array.from(unassigned.entries())
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([warehouse, groupedItems]) => ({ warehouse, items: groupedItems }));
-  }, [filteredItems]);
+
+    // Slips = the tracked metadata list, unioned with any slip ids found on
+    // items (so a slip still shows even if the empty-slip metadata was lost).
+    const byId = new Map();
+    returnSlips.forEach((s) => {
+      if (s && s.id) {
+        byId.set(s.id, {
+          id: s.id,
+          warehouse: s.warehouse || "",
+          date: s.date || "",
+          po: s.po || "",
+          status: s.status || "open",
+        });
+      }
+    });
+    slipItems.forEach((its, id) => {
+      if (!byId.has(id)) {
+        const sample = its[0] || {};
+        byId.set(id, {
+          id,
+          warehouse: (sample.warehouse || "").trim() || UNSPECIFIED_WAREHOUSE,
+          date: sample.return_slip_date || "",
+          po: sample.return_slip_po || "",
+          status: sample.return_slip_status || "open",
+        });
+      }
+    });
+    const slips = Array.from(byId.values())
+      .map((s) => {
+        const its = slipItems.get(s.id) || [];
+        // Items are the synced source of truth once a slip has parts (metadata
+        // is per-machine and may not exist on another machine).
+        const sample = its[0];
+        return {
+          ...s,
+          items: its,
+          po: sample ? sample.return_slip_po || "" : s.po || "",
+          status: (sample ? sample.return_slip_status : s.status) || "open",
+        };
+      })
+      .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+
+    // Warehouses a new slip can be created for: any warehouse that currently has
+    // returns (assigned or not), so you can only make a slip where stock exists.
+    const warehouseSet = new Set();
+    unassignedGroups.forEach((g) => warehouseSet.add(g.warehouse));
+    slips.forEach((s) => s.warehouse && warehouseSet.add(s.warehouse));
+    const warehouses = Array.from(warehouseSet).sort((a, b) => a.localeCompare(b));
+
+    return { unassignedGroups, slips, warehouses };
+  }, [filteredItems, returnSlips]);
   useEffect(() => {
     let cancelled = false;
     async function loadUIState() {
@@ -938,6 +1006,9 @@ export default function App() {
         }
         if (state.bubbleMeta && typeof state.bubbleMeta === "object") {
           setBubbleMeta((prev) => ({ ...(state.bubbleMeta || {}), ...prev }));
+        }
+        if (Array.isArray(state.returnSlips)) {
+          setReturnSlips(state.returnSlips);
         }
       } catch (e) {
         console.warn("[ui-state] read failed", e);
@@ -1049,6 +1120,7 @@ export default function App() {
           printExtraLinesByBubble,
           ordersTodayOnly,
           bubbleMeta,
+          returnSlips,
         })
       .catch((e) => console.warn("[ui-state] write failed", e));
   }, [
@@ -1061,6 +1133,7 @@ export default function App() {
       printExtraLinesByBubble,
       ordersTodayOnly,
       bubbleMeta,
+      returnSlips,
       uiStateReady,
     ]);
 
@@ -1077,6 +1150,7 @@ export default function App() {
           printExtraLinesByBubble,
           ordersTodayOnly,
           bubbleMeta: nextBubbleMeta || bubbleMeta,
+          returnSlips,
         })
       .catch((e) => console.warn("[ui-state] write failed", e));
   }
@@ -1407,6 +1481,9 @@ export default function App() {
               ...it,
               allocated_to: "NEW STOCK",
               accountingPath: ACCOUNTING_PATHS.OUTSTANDING,
+              // Leaving returns → drop any requisition-slip association.
+              return_slip_id: "",
+              return_slip_date: "",
               last_moved_at: new Date().toISOString(),
               rev: nextRev(it),
             }
@@ -1415,6 +1492,192 @@ export default function App() {
       ensureBubblesForItems(next, setBubbles);
       return next;
     });
+  }
+
+  // Create an empty return requisition slip for a warehouse. Tracked in UI
+  // state until parts are assigned (at which point items carry the link).
+  function handleCreateReturnSlip(warehouse) {
+    const wh = (warehouse || "").trim();
+    if (!wh) return;
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const slip = { id: makeUid(), warehouse: wh, date: today, po: "", status: "open" };
+    setReturnSlips((prev) => [...prev, slip]);
+  }
+
+  // Set a slip's (editable) requisition date. Stored on its items (synced) and
+  // mirrored on local metadata, same as PO/status.
+  function handleSetSlipDate(slipId, date) {
+    if (!slipId) return;
+    const value = String(date ?? "");
+    setReturnSlips((prev) =>
+      prev.some((s) => s.id === slipId)
+        ? prev.map((s) => (s.id === slipId ? { ...s, date: value } : s))
+        : prev
+    );
+    setItems((prev) =>
+      prev.map((it) =>
+        it.return_slip_id === slipId
+          ? { ...it, return_slip_date: value, rev: nextRev(it) }
+          : it
+      )
+    );
+  }
+
+  // Assign a returns item to a slip. Guarded to the slip's own warehouse — a
+  // part can only join a slip from the same warehouse it belongs to.
+  function handleAssignItemToSlip(uid, slip) {
+    if (!uid || !slip?.id) return;
+    const item = items.find((it) => it.uid === uid);
+    if (!item) return;
+    const itemWh = (item.warehouse || "").trim() || UNSPECIFIED_WAREHOUSE;
+    const slipWh = (slip.warehouse || "").trim() || UNSPECIFIED_WAREHOUSE;
+    if (itemWh !== slipWh) {
+      alert(`This part is from "${itemWh}" and can only go on a "${itemWh}" return slip.`);
+      return;
+    }
+    updateItemByKey(uid, {
+      return_slip_id: slip.id,
+      return_slip_date: slip.date || "",
+      return_slip_po: slip.po || "",
+      return_slip_status: slip.status || "open",
+    });
+  }
+
+  // Set a slip's status: "waiting" (set aside, awaiting return) or "open".
+  // Stored on the slip's items (synced) and mirrored on local metadata.
+  function handleSetSlipStatus(slipId, status) {
+    if (!slipId) return;
+    const value = status === "waiting" ? "waiting" : "open";
+    setReturnSlips((prev) =>
+      prev.some((s) => s.id === slipId)
+        ? prev.map((s) => (s.id === slipId ? { ...s, status: value } : s))
+        : prev
+    );
+    setItems((prev) =>
+      prev.map((it) =>
+        it.return_slip_id === slipId
+          ? { ...it, return_slip_status: value, rev: nextRev(it) }
+          : it
+      )
+    );
+  }
+
+  // Set/clear a slip's PO number. Stored on the slip's items (synced) and, when
+  // the slip is tracked locally (e.g. still empty), on its UI-state metadata.
+  function handleSetSlipPO(slipId, po) {
+    if (!slipId) return;
+    const value = String(po ?? "");
+    setReturnSlips((prev) =>
+      prev.some((s) => s.id === slipId)
+        ? prev.map((s) => (s.id === slipId ? { ...s, po: value } : s))
+        : prev
+    );
+    setItems((prev) =>
+      prev.map((it) =>
+        it.return_slip_id === slipId
+          ? { ...it, return_slip_po: value, rev: nextRev(it) }
+          : it
+      )
+    );
+  }
+
+  // Pull a part out of its slip and back to Unassigned Returns (stays in
+  // RETURNS — not New Stock, not CashPad). Just clears the slip association.
+  function handleRemoveItemFromSlip(uid) {
+    if (!uid) return;
+    updateItemByKey(uid, {
+      return_slip_id: "",
+      return_slip_date: "",
+      return_slip_po: "",
+      return_slip_status: "",
+    });
+  }
+
+  // Credit came back for a waiting slip: remove its parts from active stock and
+  // record it in the lifecycle history (traced as "credit_received"), then drop
+  // the slip metadata.
+  function handleCreditReceived(slipId) {
+    if (!slipId) return;
+    const slipItems = items.filter(
+      (it) =>
+        it.return_slip_id === slipId &&
+        (it.allocated_to || "").toLowerCase() === "returns"
+    );
+    const confirmed =
+      typeof window === "undefined"
+        ? true
+        : window.confirm(
+            `Credit received for this slip? ${slipItems.length} item(s) will be removed from Returns and recorded in history.`
+          );
+    if (!confirmed) return;
+    const removedUids = slipItems.map((it) => it.uid);
+    const removedSet = new Set(removedUids);
+    const remainingItems = items.filter((it) => !removedSet.has(it.uid));
+    markItemsDeleted(removedUids);
+    setItems(remainingItems);
+    lastSavedRef.current = JSON.stringify(remainingItems);
+    setReturnSlips((prev) => prev.filter((s) => s.id !== slipId));
+    api
+      .writeItems(remainingItems, removedUids, { deleteReason: "credit_received" })
+      .then((res) => {
+        if (res?.ok === false) {
+          lastSavedRef.current = "";
+          console.error("[credit-received] write rejected", res.error);
+        } else {
+          confirmItemsDeleted(removedUids);
+        }
+      })
+      .catch((e) => {
+        lastSavedRef.current = "";
+        console.error("[credit-received] writeItems failed", e);
+      });
+  }
+
+  // Remove a slip. Only allowed while empty (one-way: assigned parts stay put).
+  function handleDeleteReturnSlip(slipId) {
+    if (!slipId) return;
+    const hasItems = items.some(
+      (it) =>
+        it.return_slip_id === slipId &&
+        (it.allocated_to || "").toLowerCase() === "returns"
+    );
+    if (hasItems) {
+      alert("This slip still has parts. Return those parts to New Stock first.");
+      return;
+    }
+    setReturnSlips((prev) => prev.filter((s) => s.id !== slipId));
+  }
+
+  // Move an already-active item (matched from an archived purchase line) into a
+  // target bubble — used by the Archive → Search Purchases view. The view picks
+  // the destination (RETURNS or CASHPAD); CASHPAD also flips to the CASH_SALE
+  // accounting path, mirroring addArchiveLineToCashSales.
+  function handleMoveArchiveItemToBubble(uid, bubbleName) {
+    if (!uid || !bubbleName) return;
+    const targetName = String(bubbleName).trim().toUpperCase();
+    const nowIso = new Date().toISOString();
+    const accountingPath =
+      targetName === "CASHPAD"
+        ? ACCOUNTING_PATHS.CASH_SALE
+        : ACCOUNTING_PATHS.OUTSTANDING;
+    const updatedItems = items.map((it) =>
+      it.uid === uid
+        ? {
+            ...it,
+            allocated_to: targetName,
+            accountingPath,
+            last_moved_at: nowIso,
+            rev: nextRev(it),
+          }
+        : it
+    );
+    setItems(updatedItems);
+    ensureBubblesForItems(updatedItems, setBubbles);
+    lastSavedRef.current = JSON.stringify(updatedItems);
+    api
+      .writeItems(updatedItems)
+      .catch((e) => console.error("[archive-move] writeItems failed", e));
   }
 
   function handleActivateBubble(bubbleKey) {
@@ -1699,7 +1962,11 @@ export default function App() {
       markItemsDeleted(removedUids);
       setItems(remainingItems);
       lastSavedRef.current = JSON.stringify(remainingItems);
-      const writeRes = await api.writeItems(remainingItems, removedUids);
+      // These items are being archived (sold), not deleted — tag the removal so
+      // the lifecycle trace records "Archived (sold)".
+      const writeRes = await api.writeItems(remainingItems, removedUids, {
+        deleteReason: "archived",
+      });
       if (writeRes?.ok === false) {
         throw new Error(writeRes.error || "Failed to remove archived items from active files.");
       }
@@ -3994,6 +4261,23 @@ export default function App() {
     }
   }
 
+  // Load the item lifecycle log (deletions) whenever the archive search view is
+  // opened, so a looked-up part that's no longer in active stock can show what
+  // happened to it. Refreshed on each open to catch recent deletions.
+  useEffect(() => {
+    if (currentView !== "archive-search" || !api?.readItemHistory) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.readItemHistory();
+        if (!cancelled && res?.ok) setItemHistory(res.history || []);
+      } catch (e) {
+        console.error("[item-history] load failed", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [currentView]);
+
   async function handlePurchasesSearch() {
     const q = purchasesSearchTerm.trim();
     if (!q) {
@@ -4466,8 +4750,6 @@ export default function App() {
               </div>
             )}
           <StockFlowView
-            newBubbleName={newBubbleName}
-            setNewBubbleName={setNewBubbleName}
             handleFieldFocus={handleFieldFocus}
             handleFieldBlur={handleFieldBlur}
             addBubble={addBubble}
@@ -4541,7 +4823,17 @@ export default function App() {
           />
         ) : currentView === "returns-management" ? (
           <ReturnsManagementView
-            groups={returnsByWarehouse}
+            unassignedGroups={returnsView.unassignedGroups}
+            slips={returnsView.slips}
+            warehouses={returnsView.warehouses}
+            onCreateSlip={handleCreateReturnSlip}
+            onAssignItemToSlip={handleAssignItemToSlip}
+            onSetSlipPO={handleSetSlipPO}
+            onSetSlipDate={handleSetSlipDate}
+            onSetSlipStatus={handleSetSlipStatus}
+            onRemoveItemFromSlip={handleRemoveItemFromSlip}
+            onCreditReceived={handleCreditReceived}
+            onDeleteSlip={handleDeleteReturnSlip}
             onReturnToNewStock={handleReturnItemToNewStock}
           />
         ) : currentView === "order-management" ? (
@@ -4679,9 +4971,11 @@ export default function App() {
             purchasesResults={purchasesResults}
             purchasesError={purchasesError}
             items={items}
+            itemHistory={itemHistory}
+            onMoveItemToBubble={handleMoveArchiveItemToBubble}
             onPurgeOldOrders={() => api.purgeOldOrdersArchive()}
-            onAddLineToCashSales={async (order, line) => {
-              const res = await api.addArchiveLineToCashSales(order, line);
+            onAddLineToCashSales={async (order, line, target) => {
+              const res = await api.addArchiveLineToCashSales(order, line, target);
               if (res?.ok) {
                 try {
                   const latest = await api.readItems();

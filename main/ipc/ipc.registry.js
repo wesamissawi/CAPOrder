@@ -12,6 +12,7 @@ function registerAllIpc(ipcMain, deps) {
   registerItemsIpc(ipcMain, {
     readItems: deps.readItems,
     writeItems: deps.writeItems,
+    readHistory: deps.readHistory,
     getDataFile: deps.getDataFile,
     dialog: deps.dialog,
     fs: deps.fs,

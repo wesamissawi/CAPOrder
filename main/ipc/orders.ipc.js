@@ -244,7 +244,7 @@ const registerOrdersIpc = (ipcMain, deps) => {
     }
   });
 
-  ipcMain.handle('orders-archive:add-to-cash-sales', (_evt, order, line) => {
+  ipcMain.handle('orders-archive:add-to-cash-sales', (_evt, order, line, target) => {
     try {
       const items = readItems();
       const syntheticOrder = {
@@ -255,10 +255,14 @@ const registerOrdersIpc = (ipcMain, deps) => {
         warehouse: order?.warehouse || '',
         seller: order?.warehouse || '',
       };
+      // Where the part lands. Defaults to CashPad (the original behaviour) so
+      // older callers keep working; the archive search now passes RETURNS too.
+      const allocated_to = (target?.allocated_to || 'CASHPAD').toString().toUpperCase();
+      const accountingPath = target?.accountingPath || (allocated_to === 'CASHPAD' ? 'CASH_SALE' : 'OUTSTANDING');
       const newItem = {
         ...makeOutstandingFromLine(syntheticOrder, line),
-        allocated_to: 'CASHPAD',
-        accountingPath: 'CASH_SALE',
+        allocated_to,
+        accountingPath,
       };
       writeItems(items.concat(newItem));
 
