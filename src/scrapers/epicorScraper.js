@@ -48,18 +48,31 @@ async function openEpicorSite(options = {}) {
         : "Logged in with credentials."
     );
 
-    if (options.fromSageDate && options.toSageDate) {
+    // Two ways in: a date range (the invoice scan) or a credit memo number (the
+    // credit lookup — Epicor has no date criterion for credits, the number alone
+    // identifies one).
+    const creditNumber = String(options.creditNumber || "").trim();
+    if ((options.fromSageDate && options.toSageDate) || creditNumber) {
       const refLabel = options.reference ? ` for order ${options.reference}` : "";
+      // A credit lookup is the invoice search with the "Credit" document type
+      // ticked — everything downstream (OCR, image saving, cache, totals) is
+      // deliberately identical.
+      const isCredit = Boolean(options.docTypeCredit);
+      const docLabel = isCredit ? "credits" : "invoices";
       try {
         const { epicorFromDate, epicorToDate, results } = await searchInvoicesForDate(
           page,
           options.fromSageDate,
           options.toSageDate,
-          options.reference
+          options.reference,
+          { docTypeCredit: isCredit, creditNumber }
         );
         const rangeLabel =
           epicorFromDate === epicorToDate ? epicorFromDate : `${epicorFromDate} to ${epicorToDate}`;
-        statusLog.push(`Searched invoices dated ${rangeLabel}${refLabel}. Found ${results.length} result(s).`);
+        const criteria = creditNumber
+          ? `credit # ${creditNumber}`
+          : `dated ${rangeLabel}`;
+        statusLog.push(`Searched ${docLabel} ${criteria}${refLabel}. Found ${results.length} result(s).`);
 
         let matchedRow = null;
         let ocrText = "";
@@ -73,7 +86,7 @@ async function openEpicorSite(options = {}) {
           statusLog.push(
             options.reference
               ? `Opening each result's scanned document and running OCR to find a match…`
-              : `Opening each result's scanned document and running OCR to read every invoice…`
+              : `Opening each result's scanned document and running OCR to read every ${isCredit ? "credit" : "invoice"}…`
           );
           const debugDir = dataDir;
           const cachePath = path.join(debugDir, "epicor_invoice_cache.json");
@@ -87,6 +100,7 @@ async function openEpicorSite(options = {}) {
           const ocrResult = await findInvoiceByOcr(context, page, results, options.reference || "", debugDir, cachePath, {
             force: Boolean(options.force),
             onlyInvoiceKeys,
+            isCredit,
           });
           matchedRow = ocrResult.matchedRow;
           ocrText = ocrResult.ocrText;
@@ -104,9 +118,9 @@ async function openEpicorSite(options = {}) {
               );
             }
           } else {
-            statusLog.push(`OCR read ${allInvoices.length} invoice(s) in this range.`);
+            statusLog.push(`OCR read ${allInvoices.length} ${isCredit ? "credit" : "invoice"}(s).`);
           }
-          statusLog.push(`Discovered references for ${discoveries.length} of ${results.length} document(s) in this range.`);
+          statusLog.push(`Discovered references for ${discoveries.length} of ${results.length} document(s).`);
         }
         // The per-order flow leaves the browser open so the user can keep
         // navigating/verifying; a bulk range scan has nothing more to do there,

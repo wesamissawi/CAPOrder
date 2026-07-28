@@ -1,4 +1,5 @@
 const { createSageActions } = require('./sage.actions');
+const { extractSagePosted } = require('../domain/sage.domain');
 
 const createSageService = (deps) => {
   const {
@@ -8,6 +9,8 @@ const createSageService = (deps) => {
     applyInvoiceResult,
     getSagePoActive,
     getSageInvoiceActive,
+    setSageOrderLock,
+    clearSageOrderLock,
   } = deps;
 
   let sageProcessing = false;
@@ -55,20 +58,54 @@ const createSageService = (deps) => {
 
       for (const { refKey, order } of targets) {
         console.log("[sage] starting AHK for", refKey);
+        // Mark the order as actively running on this machine. Everyone else sees
+        // a live lock and stops writing to it until we report back.
+        setSageOrderLock?.(refKey, "running");
         const res = await runSagePurchase(order);
-        if (!res?.ok) {
+        // The journal entry on stdout — not the exit code — is what says the
+        // order reached Sage. A run that posted and then exited badly (or was
+        // killed by our timeout while a dialog hung around) must still be
+        // recorded and released, never retried, or Sage gets it twice.
+        const posted = extractSagePosted(res?.stdout);
+        if (!res?.ok && !posted.posted) {
           console.error("[sage] AHK run failed for", refKey, res?.error || res?.stderr || res?.code, {
             stdout: (res?.stdout || "").toString().trim(),
             stderr: (res?.stderr || "").toString().trim(),
           });
+          // Back to "queued": sage_trigger is still set, so this order is retried
+          // on the next pass, and the card stays blurred with the failure shown.
+          setSageOrderLock?.(refKey, "queued", {
+            lastError: (res?.error || res?.stderr || `exit ${res?.code}`).toString().slice(0, 300),
+          });
         } else {
-          console.log(
-            "[sage] AHK success for",
+          const dirtyExit = !res?.ok;
+          if (dirtyExit) {
+            console.warn(
+              "[sage] AHK exited non-zero AFTER posting",
+              refKey,
+              posted.journalEntry,
+              "- recording it as entered instead of retrying"
+            );
+          } else {
+            console.log(
+              "[sage] AHK success for",
+              refKey,
+              "stdout:",
+              (res.stdout || "").toString().trim()
+            );
+          }
+          applySageResult(
             refKey,
-            "stdout:",
-            (res.stdout || "").toString().trim()
+            posted.posted ? { ...res, journalEntry: posted.journalEntry } : res,
+            order,
+            {
+              runWarning: dirtyExit
+                ? `Posted to Sage as ${posted.journalEntry}, but the script exited abnormally (${
+                    res?.error || res?.code
+                  }). Check Sage for a leftover window or a partial entry.`
+                : "",
+            }
           );
-          applySageResult(refKey, res, order);
         }
         sageProcessingRefs.delete(refKey);
       }
@@ -104,10 +141,25 @@ const createSageService = (deps) => {
         targets.push({ refKey, order });
       });
       for (const { refKey, order } of targets) {
+        setSageOrderLock?.(refKey, "running");
         const res = await runUpdateInvoice(order);
-        if (!res?.ok) {
+        // Same rule as the purchase queue: update_invoice.ahk only prints the
+        // journal entry once Sage has committed the update.
+        const posted = extractSagePosted(res?.stdout);
+        if (!res?.ok && !posted.posted) {
           console.error("[sage-invoice] AHK run failed for", refKey, res?.error || res?.stderr || res?.code);
+          setSageOrderLock?.(refKey, "queued", {
+            lastError: (res?.error || res?.stderr || `exit ${res?.code}`).toString().slice(0, 300),
+          });
         } else {
+          if (!res?.ok) {
+            console.warn(
+              "[sage-invoice] AHK exited non-zero AFTER posting",
+              refKey,
+              posted.journalEntry,
+              "- recording it instead of retrying"
+            );
+          }
           applyInvoiceResult(refKey, res, order);
         }
         invoiceProcessingRefs.delete(refKey);

@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import Card from "../components/Card";
+import { isOrderSageLocked, sageLockLabel } from "../utils/sageLock";
 
 function DismissibleMessage({ tone, onDismiss, children }) {
   const boxStyles =
@@ -79,6 +80,7 @@ export default function OrderManagementView({
   handleOrderCheckboxChange,
   handleOrderFieldChange,
   onMarkForSage,
+  onReleaseSageLock,
   onBubblifyOrder,
   onMarkComplete,
   onReconcileTotals,
@@ -297,6 +299,43 @@ export default function OrderManagementView({
   .value-check-alert {
     animation: valueCheckPulse 1.2s ease-in-out infinite;
     border-width: 2px !important;
+  }
+  /* An order that has been handed to Sage is frozen until the run reports back:
+     everything on the card is blurred and inert, so nothing can be typed into
+     it and no stale copy of it can be saved back over the Sage result. */
+  .sage-locked-card {
+    position: relative;
+    border-color: rgba(99,102,241,0.7) !important;
+    border-width: 2px !important;
+  }
+  .sage-locked-card > *:not(.sage-lock-overlay) {
+    filter: blur(2.5px);
+    opacity: 0.5;
+    pointer-events: none;
+    user-select: none;
+  }
+  .sage-lock-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    text-align: center;
+    padding: 1rem;
+    border-radius: 1rem;
+    background: rgba(238,242,255,0.55);
+  }
+  @keyframes sageLockSpin { to { transform: rotate(360deg); } }
+  .sage-lock-spinner {
+    width: 1.25rem;
+    height: 1.25rem;
+    border-radius: 9999px;
+    border: 2px solid rgba(99,102,241,0.25);
+    border-top-color: rgba(79,70,229,0.95);
+    animation: sageLockSpin 0.8s linear infinite;
   }
   `;
 
@@ -572,6 +611,7 @@ export default function OrderManagementView({
               const key = `${order.source || "unknown"}-${order.reference || order.__row || "order"}-${order.warehouse || "warehouse"}-${idx}`;
               const refKey = order.reference || order.__row || key;
               const isSageTriggered = Boolean(order.sage_trigger);
+              const sageLocked = isOrderSageLocked(order);
               const invoiceEntry = getInvoiceEntry(refKey, order.source_invoice || "");
               const needsSync = Boolean(order.invoiceNeedsSync);
               const reasons = dirtyReasons[refKey] || [];
@@ -602,8 +642,35 @@ export default function OrderManagementView({
               return (
                 <Card
                   key={key}
-                  className={`${cardTone}`}
+                  className={`${cardTone} ${sageLocked ? "sage-locked-card" : ""}`}
                 >
+                  {sageLocked && (
+                    <div className="sage-lock-overlay">
+                      <div className="sage-lock-spinner" />
+                      <div className="text-sm font-semibold text-indigo-800">
+                        {order.reference || "Order"} - locked by Sage
+                      </div>
+                      <div className="text-xs text-indigo-700">{sageLockLabel(order)}</div>
+                      <div className="text-[11px] text-slate-500 max-w-[16rem]">
+                        No changes can be made until the Sage run reports back.
+                      </div>
+                      {order.sage_lock?.lastError && (
+                        <div className="text-[11px] text-red-600 max-w-[16rem] break-words">
+                          {order.sage_lock.lastError}
+                        </div>
+                      )}
+                      {onReleaseSageLock && (
+                        <button
+                          type="button"
+                          onClick={() => onReleaseSageLock(order)}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+                          title="Only if Sage is not actually processing this order"
+                        >
+                          Release
+                        </button>
+                      )}
+                    </div>
+                  )}
                   <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                     <div>
                       <div className="text-lg font-semibold text-slate-800">
@@ -1248,6 +1315,22 @@ export default function OrderManagementView({
                           onClick={() => onUpdateInvoiceTrigger?.(refKey)}
                         >
                           Update Invoice
+                        </button>
+                      </div>
+                    )}
+                    {Boolean(order.sage_run_warning) && (
+                      <div className="mt-3 text-xs font-semibold text-amber-700 flex items-center gap-2 flex-wrap">
+                        <span className="inline-block h-2 w-2 rounded-full bg-amber-600"></span>
+                        <span className="flex-1 min-w-[12rem]">{order.sage_run_warning}</span>
+                        <button
+                          type="button"
+                          className="px-2 py-1 text-xs rounded-lg border border-amber-500 text-amber-700 bg-white hover:bg-amber-50"
+                          onClick={() => {
+                            markDirty(refKey, "Sage run warning checked");
+                            handleOrderFieldChange(refKey, "sage_run_warning", "");
+                          }}
+                        >
+                          Checked
                         </button>
                       </div>
                     )}

@@ -38,6 +38,8 @@ const fallbackApi = {
 
   readOrders: async () => [],
   writeOrders: warnAsync("writeOrders"),
+  triggerOrderSage: warnAsync("triggerOrderSage"),
+  releaseOrderSageLock: warnAsync("releaseOrderSageLock"),
   setSagePoActive: warnAsync("setSagePoActive"),
   setSageInvoiceActive: warnAsync("setSageInvoiceActive"),
   onOrdersUpdated: warnEvent("onOrdersUpdated"),
@@ -51,7 +53,9 @@ const fallbackApi = {
   fetchBestBuyOrders: warnAsync("fetchBestBuyOrders"),
   openEpicor: warnAsync("openEpicor"),
   scanEpicorRange: warnAsync("scanEpicorRange"),
+  scanEpicorCredits: warnAsync("scanEpicorCredits"),
   getEpicorScanned: warnAsync("getEpicorScanned"),
+  getEpicorScannedCredits: warnAsync("getEpicorScannedCredits"),
   rescanEpicorInvoice: warnAsync("rescanEpicorInvoice"),
   openEpicorInvoiceImage: warnAsync("openEpicorInvoiceImage"),
   readEpicorInvoiceImage: warnAsync("readEpicorInvoiceImage"),

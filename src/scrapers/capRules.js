@@ -169,10 +169,22 @@ function renderTokens(tokens, ctx) {
   return tokens.map((t) => renderToken(t, ctx)).join('');
 }
 
+// Match an order's warehouse to a ruleset. The rules are keyed by a short
+// vendor name ("World"), but orders store whatever the vendor's site actually
+// calls the warehouse — World scrapes store "World Automotive Warehouse", which
+// matched nothing and silently fell through to defaultCode, so the World rules
+// (NGK -> NTK, TRK dash-strip) never fired. warehouseAliases maps the real
+// stored strings onto a key: { "World": ["World Automotive Warehouse", ...] }.
+// Exact key match still wins, so an alias can never shadow a real ruleset.
 function findWarehouseRules(rules, warehouse) {
   const table = rules && rules.warehouses ? rules.warehouses : {};
   for (const name of Object.keys(table)) {
     if (ci(name, warehouse)) return table[name] || [];
+  }
+  const aliases = rules && rules.warehouseAliases ? rules.warehouseAliases : {};
+  for (const name of Object.keys(aliases)) {
+    const list = Array.isArray(aliases[name]) ? aliases[name] : [];
+    if (list.some((alias) => ci(alias, warehouse))) return table[name] || [];
   }
   return [];
 }
@@ -332,11 +344,23 @@ function resolveCapCode(warehouse, linecode, partnumber, description) {
   try {
     const rules = loadRules();
     const out = resolveWithRules(rules, warehouse, linecode, partnumber, description);
-    if (out && typeof out.code === 'string') return out;
+    if (out && typeof out.code === 'string') return tidyResolved(out);
   } catch (e) {
     // fall through to legacy
   }
-  return resolveCapCodeLegacy(warehouse, linecode, partnumber, description);
+  return tidyResolved(resolveCapCodeLegacy(warehouse, linecode, partnumber, description));
+}
+
+// Every code template is "<something> <partnumber>", so an empty piece leaves a
+// stray edge space — most often a LEADING one from defaultCode when the line
+// code is blank (" FOU 20915"). items.domain.js already trimmed before storing a
+// bubble itemcode, but sageStandardize did not, so the untrimmed value could
+// reach Sage as a distinct item. Trim once here, at the single exit point, so no
+// caller can produce a spaced code regardless of how empty its inputs are.
+function tidyResolved(out) {
+  if (!out || typeof out.code !== 'string') return out;
+  const code = out.code.trim();
+  return code === out.code ? out : { ...out, code };
 }
 
 // =============================================================================
@@ -464,6 +488,14 @@ const rid = (name) => `${name}-${++_uid}`;
 const DEFAULT_RULES = {
   version: 1,
   defaultCode: LINE_PART,
+  // Real warehouse strings that should resolve to a ruleset key above. See
+  // findWarehouseRules — orders store the vendor's own wording, not the key.
+  warehouseAliases: {
+    World: [
+      'World Automotive Warehouse',
+      'World Automotive Warehouse / Regional Automotive Warehouse',
+    ],
+  },
   warehouses: {
     World: [
       { id: rid('world-fra'), enabled: true, label: 'FRA DL* → DEF <part>',

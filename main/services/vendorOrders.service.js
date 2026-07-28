@@ -1,19 +1,34 @@
 const fs = require('fs');
 const path = require('path');
-const { ocrInvoiceImageFile, getInvoiceImageFileName } = require('../../src/scrapers/epicor.actions');
+const {
+  ocrInvoiceImageFile,
+  getInvoiceImageFileName,
+  invoiceCacheKey,
+  cacheKeyToNumber,
+} = require('../../src/scrapers/epicor.actions');
 
-// Turn a raw epicor_invoice_cache.json entry (keyed by invoice #) into the same
-// invoice shape scanEpicorRange returns, so the view renders them identically.
+// Turn a raw epicor_invoice_cache.json entry (keyed by invoice #, or by a
+// CREDIT: prefix for credit memos) into the same invoice shape scanEpicorRange
+// returns, so the view renders invoices and credits identically.
 function cacheEntryToInvoice(invoiceNumber, v, known) {
   const key = String(invoiceNumber || '').trim().toUpperCase();
   return {
     invoiceNumber,
+    isCredit: Boolean(v.isCredit),
+    creditNumber: v.creditNumber || '',
     reference: v.reference || '',
     balanceDue: v.balanceDue || '',
     imageFileName: v.imageFileName || '',
+    pageImageFileNames:
+      Array.isArray(v.pageImageFileNames) && v.pageImageFileNames.length
+        ? v.pageImageFileNames
+        : v.imageFileName
+        ? [v.imageFileName]
+        : [],
     hasEnvironmentalFee: Boolean(v.hasEnvironmentalFee),
     environmentalFeeAmount: v.environmentalFeeAmount || '',
     lineItems: Array.isArray(v.lineItems) ? v.lineItems : [],
+    continuesOnNextPage: Boolean(v.continuesOnNextPage),
     date: v.date || '',
     accountName: v.accountName || '',
     poNumber: v.poNumber || '',
@@ -65,7 +80,21 @@ const createVendorOrdersService = (deps) => {
     saveConfig,
     shell,
     collectKnownInvoiceNumbers,
+    mergeOrdersForWrite,
   } = deps;
+
+  // A crawl takes minutes and builds its result from a snapshot of orders.json
+  // taken before it started. Reconcile against disk on the way out so a Sage run
+  // that finished meanwhile is not reverted, and an order currently locked by
+  // Sage is left exactly as it is. See mergeOrdersForWrite.
+  function writeOrdersMerged(list) {
+    const { orders, blocked } = mergeOrdersForWrite(readOrders(), list);
+    if (blocked.length) {
+      console.warn('[vendor] left Sage-locked order(s) untouched:', blocked.join(', '));
+    }
+    writeOrders(orders);
+    return orders;
+  }
 
   async function fetchWorldOrders() {
     try {
@@ -88,7 +117,7 @@ const createVendorOrdersService = (deps) => {
         credentials: { user: worldUser, pass: worldPass },
       });
       if (res?.ok && Array.isArray(res.orders)) {
-        writeOrders(res.orders);
+        writeOrdersMerged(res.orders);
       }
       return { ok: true, ...(res || {}), path: targetOrdersPath };
     } catch (e) {
@@ -137,7 +166,7 @@ const createVendorOrdersService = (deps) => {
           }
         }
         merged = Array.from(byRef.values());
-        writeOrders(merged);
+        merged = writeOrdersMerged(merged);
       }
       return {
         ok: true,
@@ -174,7 +203,7 @@ const createVendorOrdersService = (deps) => {
         credentials: { store, customer, pass },
       });
       if (res?.ok && Array.isArray(res.orders)) {
-        writeOrders(res.orders);
+        writeOrdersMerged(res.orders);
       }
       return { ok: true, ...(res || {}), path: targetOrdersPath };
     } catch (e) {
@@ -204,7 +233,7 @@ const createVendorOrdersService = (deps) => {
         credentials: { user: cbkUser, pass: cbkPass },
       });
       if (res?.ok && Array.isArray(res.orders)) {
-        writeOrders(res.orders);
+        writeOrdersMerged(res.orders);
       }
       return { ok: true, ...(res || {}), path: targetOrdersPath };
     } catch (e) {
@@ -234,7 +263,7 @@ const createVendorOrdersService = (deps) => {
         credentials: { user: tigerUser, pass: tigerPass },
       });
       if (res?.ok && Array.isArray(res.orders)) {
-        writeOrders(res.orders);
+        writeOrdersMerged(res.orders);
       }
       return { ok: true, ...(res || {}), path: targetOrdersPath };
     } catch (e) {
@@ -264,7 +293,7 @@ const createVendorOrdersService = (deps) => {
         credentials: { user: bestUser, pass: bestPass },
       });
       if (res?.ok && Array.isArray(res.orders)) {
-        writeOrders(res.orders);
+        writeOrdersMerged(res.orders);
       }
       return { ok: true, ...(res || {}), path: targetOrdersPath };
     } catch (e) {
@@ -356,41 +385,111 @@ const createVendorOrdersService = (deps) => {
     }
   }
 
-  // Re-OCR a single invoice from its already-saved image (no browser, no Epicor,
+  // Look up ONE Epicor credit memo by its number. Epicor's credit search has no
+  // date criterion — the credit number alone identifies the document — so unlike
+  // scanEpicorRange this takes no dates and the number is required. Everything
+  // after the search is identical to an invoice: the credit is OCR'd, imaged and
+  // cached in the same place, with its total stored the same way.
+  async function scanEpicorCredits(payload = {}) {
+    try {
+      const config = loadConfig();
+      const epicorUser = typeof config.EPICOR_USER === 'string' ? config.EPICOR_USER : '';
+      const epicorPass = typeof config.EPICOR_PASS === 'string' ? config.EPICOR_PASS : '';
+      if (!epicorUser || !epicorPass) {
+        return { ok: false, error: 'Missing EPICOR credentials. Set them in Settings.' };
+      }
+      const creditNumber = String(payload?.creditNumber || '').trim();
+      if (!creditNumber) {
+        return { ok: false, error: 'Enter a credit memo number to look up.' };
+      }
+      const epicorDataDir = getEpicorAssetsDir();
+      ensureDir(epicorDataDir);
+      const res = await openEpicorSite({
+        storageDir: epicorDataDir,
+        storageStatePath: VENDOR_PATHS.epicor.storageState,
+        credentials: { user: epicorUser, pass: epicorPass },
+        reference: '',
+        docTypeCredit: true,
+        creditNumber,
+        closeWhenDone: true,
+        force: Boolean(payload?.force),
+      });
+      if (!res?.ok) return res;
+
+      const known = collectKnownInvoiceNumbers ? collectKnownInvoiceNumbers() : new Set();
+      const all = Array.isArray(res.allInvoices) ? res.allInvoices : [];
+      const credits = all.map((c) => {
+        const key = String(c.invoiceNumber || '').trim().toUpperCase();
+        return { ...c, isCredit: true, known: Boolean(key) && known.has(key) };
+      });
+      return {
+        ok: true,
+        statusLog: res.statusLog || [],
+        credits,
+        scannedCount: credits.length,
+        unknownCount: credits.filter((c) => !c.known).length,
+      };
+    } catch (e) {
+      console.error('[vendor:scan-epicor-credits]', e);
+      return { ok: false, error: e?.message || 'Failed to scan Epicor credits.' };
+    }
+  }
+
+  function readEpicorCache() {
+    const cachePath = path.join(getEpicorAssetsDir(), 'epicor_invoice_cache.json');
+    let cache = {};
+    if (fs.existsSync(cachePath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) cache = parsed;
+      } catch (e) {
+        console.error('[epicor] cache read failed', e);
+      }
+    }
+    return { cachePath, cache };
+  }
+
+  // Re-OCR a single document from its already-saved image (no browser, no Epicor,
   // no date). Refreshes the total, reference, EHC and parsed parts in the cache
-  // and returns the updated invoice. Powers the per-invoice "Rescan this one".
+  // and returns the updated document. Powers the per-row "Rescan this one" on
+  // both the invoice and the credit list (payload.isCredit picks which).
   async function rescanEpicorInvoice(payload = {}) {
     try {
       const invoiceNumber = String(payload?.invoiceNumber || '').trim();
-      if (!invoiceNumber) return { ok: false, error: 'Missing invoice number.' };
+      const isCredit = Boolean(payload?.isCredit);
+      const label = isCredit ? 'credit' : 'invoice';
+      if (!invoiceNumber) return { ok: false, error: `Missing ${label} number.` };
       const dir = getEpicorAssetsDir();
-      const cachePath = path.join(dir, 'epicor_invoice_cache.json');
-      let cache = {};
-      if (fs.existsSync(cachePath)) {
-        try {
-          const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
-          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) cache = parsed;
-        } catch (e) {
-          console.error('[rescan] cache read failed', e);
-        }
-      }
-      const key = invoiceNumber.toUpperCase();
+      const { cachePath, cache } = readEpicorCache();
+      const key = invoiceCacheKey(invoiceNumber, isCredit);
       const entry = cache[key] || {};
-      const imageFileName = entry.imageFileName || getInvoiceImageFileName(invoiceNumber);
+      const imageFileName = entry.imageFileName || getInvoiceImageFileName(invoiceNumber, isCredit);
       const imagePath = path.join(dir, imageFileName);
       if (!fs.existsSync(imagePath)) {
-        return { ok: false, error: `No saved invoice image to rescan (${imageFileName}).` };
+        return { ok: false, error: `No saved ${label} image to rescan (${imageFileName}).` };
       }
+      // A multi-page credit's parts continue onto page 2+, so rescan every page
+      // that was saved. Entries cached before multi-page support (and every
+      // invoice) list page 1 only, which is exactly the old behaviour.
+      const pageImageFileNames = (
+        Array.isArray(entry.pageImageFileNames) && entry.pageImageFileNames.length
+          ? entry.pageImageFileNames
+          : [imageFileName]
+      ).filter((name) => fs.existsSync(path.join(dir, name)));
+      const pagePaths = pageImageFileNames.map((name) => path.join(dir, name));
 
-      const fields = await ocrInvoiceImageFile(imagePath, entry.reference || '');
+      const fields = await ocrInvoiceImageFile(pagePaths, entry.reference || '', { isCredit });
       const updated = {
         ...entry,
         imageFileName,
+        pageImageFileNames,
+        isCredit,
         reference: fields.foundReference || entry.reference || '',
         balanceDue: fields.balanceDue || entry.balanceDue || '',
         hasEnvironmentalFee: fields.hasEnvironmentalFee,
         environmentalFeeAmount: fields.environmentalFeeAmount || '',
         lineItems: Array.isArray(fields.lineItems) ? fields.lineItems : [],
+        continuesOnNextPage: Boolean(fields.continuesOnNextPage),
         lineItemsVersion: fields.lineItemsVersion,
         checkedAt: new Date().toISOString(),
       };
@@ -406,26 +505,28 @@ const createVendorOrdersService = (deps) => {
       return { ok: true, invoice: cacheEntryToInvoice(invoiceNumber, updated, known) };
     } catch (e) {
       console.error('[vendor:rescan-epicor-invoice]', e);
-      return { ok: false, error: e?.message || 'Failed to rescan invoice.' };
+      return { ok: false, error: e?.message || 'Failed to rescan.' };
     }
   }
 
-  // List every invoice already OCR'd into epicor_invoice_cache.json, WITHOUT
-  // launching a browser. Lets the Epicor view show prior scan results straight
-  // after an app restart (React state is gone, but the cache on disk isn't).
+  // Read every already-OCR'd document out of epicor_invoice_cache.json, WITHOUT
+  // launching a browser, keeping only invoices or only credits. Lets the Epicor
+  // view show prior scan results straight after an app restart (React state is
+  // gone, but the cache on disk isn't). Entries cached before credits existed
+  // have no isCredit flag, so they correctly read as invoices.
+  function listScannedFromCache(wantCredits) {
+    const { cache } = readEpicorCache();
+    const known = collectKnownInvoiceNumbers ? collectKnownInvoiceNumbers() : new Set();
+    return Object.entries(cache)
+      .filter(([, v]) => Boolean(v?.isCredit) === wantCredits)
+      .map(([cacheKey, v]) => cacheEntryToInvoice(cacheKeyToNumber(cacheKey), v || {}, known))
+      // Newest scan first; fall back to document-number order when unstamped.
+      .sort((a, b) => String(b.checkedAt).localeCompare(String(a.checkedAt)));
+  }
+
   async function getEpicorScannedInvoices() {
     try {
-      const cachePath = path.join(getEpicorAssetsDir(), 'epicor_invoice_cache.json');
-      let cache = {};
-      if (fs.existsSync(cachePath)) {
-        const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) cache = parsed;
-      }
-      const known = collectKnownInvoiceNumbers ? collectKnownInvoiceNumbers() : new Set();
-      const invoices = Object.entries(cache)
-        .map(([num, v]) => cacheEntryToInvoice(num, v || {}, known))
-        // Newest scan first; fall back to invoice-number order when unstamped.
-        .sort((a, b) => String(b.checkedAt).localeCompare(String(a.checkedAt)));
+      const invoices = listScannedFromCache(false);
       return {
         ok: true,
         invoices,
@@ -435,6 +536,21 @@ const createVendorOrdersService = (deps) => {
     } catch (e) {
       console.error('[vendor:get-epicor-scanned]', e);
       return { ok: false, error: e?.message || 'Failed to read scanned invoices.' };
+    }
+  }
+
+  async function getEpicorScannedCredits() {
+    try {
+      const credits = listScannedFromCache(true);
+      return {
+        ok: true,
+        credits,
+        scannedCount: credits.length,
+        unknownCount: credits.filter((c) => !c.known).length,
+      };
+    } catch (e) {
+      console.error('[vendor:get-epicor-scanned-credits]', e);
+      return { ok: false, error: e?.message || 'Failed to read scanned credits.' };
     }
   }
 
@@ -743,8 +859,10 @@ const createVendorOrdersService = (deps) => {
     fetchBestBuyOrders,
     openEpicor,
     scanEpicorRange,
+    scanEpicorCredits,
     rescanEpicorInvoice,
     getEpicorScannedInvoices,
+    getEpicorScannedCredits,
     connectGmail,
     getGmailStatus,
     fetchTransbecInvoices,

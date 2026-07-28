@@ -243,12 +243,15 @@ export default function RulesView({ currentViewMeta }) {
           </div>
 
           {rules.warehouses[activeWh] && (
-            <WarehouseRules
-              warehouse={activeWh}
-              rules={rules.warehouses[activeWh]}
-              interchangeFiles={meta.interchangeFiles}
-              mutate={mutate}
-            />
+            <>
+              <WarehouseAliases warehouse={activeWh} rules={rules} mutate={mutate} />
+              <WarehouseRules
+                warehouse={activeWh}
+                rules={rules.warehouses[activeWh]}
+                interchangeFiles={meta.interchangeFiles}
+                mutate={mutate}
+              />
+            </>
           )}
 
           <Card>
@@ -345,6 +348,55 @@ function Tester({ interchangeFiles, dirty }) {
 }
 
 // ---- one warehouse's rule list ----------------------------------------------
+// Orders don't store the short key these rules are filed under — they store
+// whatever the vendor's site calls the warehouse (World scrapes save "World
+// Automotive Warehouse"). Without a matching alias the lookup finds nothing and
+// every rule below is silently skipped, so this is worth surfacing next to them.
+function WarehouseAliases({ warehouse, rules, mutate }) {
+  const aliases = (rules.warehouseAliases && rules.warehouseAliases[warehouse]) || [];
+  const [draft, setDraft] = useState(aliases.join("\n"));
+  useEffect(() => {
+    setDraft(aliases.join("\n"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [warehouse, aliases.join("\n")]);
+
+  function commit() {
+    const next = draft
+      .split("\n")
+      .map((v) => v.trim())
+      .filter(Boolean);
+    if (next.join("\n") === aliases.join("\n")) return;
+    mutate((d) => {
+      if (!d.warehouseAliases) d.warehouseAliases = {};
+      if (next.length) d.warehouseAliases[warehouse] = next;
+      else delete d.warehouseAliases[warehouse];
+    });
+  }
+
+  return (
+    <Card>
+      <div className="text-sm font-semibold text-slate-700">
+        Warehouse names that use these “{warehouse}” rules
+      </div>
+      <p className="text-xs text-slate-500 mt-1 mb-2">
+        An order matches these rules when its warehouse is exactly{" "}
+        <span className="font-mono">{warehouse}</span>, or any name listed below. One per line.
+        Orders store the vendor’s own wording — e.g. World orders save{" "}
+        <span className="font-mono">World Automotive Warehouse</span> — and a name that isn’t
+        listed here quietly falls through to the default code instead.
+      </p>
+      <textarea
+        className="w-full border rounded-xl px-3 py-2 text-sm font-mono"
+        rows={Math.max(2, aliases.length + 1)}
+        value={draft}
+        placeholder="(no extra names)"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+      />
+    </Card>
+  );
+}
+
 function WarehouseRules({ warehouse, rules, interchangeFiles, mutate }) {
   const updateRule = (idx, next) =>
     mutate((d) => {

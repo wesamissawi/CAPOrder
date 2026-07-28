@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld('api', {
   migrateBusinessFilesToShared: (payload) => ipcRenderer.invoke('app-config:migrate-business', payload),
   readOrders: () => ipcRenderer.invoke('orders:read'),
   writeOrders: (orders) => ipcRenderer.invoke('orders:write', orders),
+  triggerOrderSage: (refKey, kind) => ipcRenderer.invoke('sage:trigger-order', refKey, kind),
+  releaseOrderSageLock: (refKey) => ipcRenderer.invoke('sage:release-order-lock', refKey),
   setSagePoActive: (enable) => ipcRenderer.invoke('sage:set-po-active', enable),
   setSageInvoiceActive: (enable) => ipcRenderer.invoke('sage:set-invoice-active', enable),
   onOrdersUpdated: (cb) => {
@@ -73,8 +75,11 @@ contextBridge.exposeInMainWorld('api', {
   fetchBestBuyOrders: () => ipcRenderer.invoke('orders:fetch-bestbuy'),
   openEpicor: (payload) => ipcRenderer.invoke('vendor:open-epicor', payload),
   scanEpicorRange: (payload) => ipcRenderer.invoke('vendor:scan-epicor-range', payload),
+  scanEpicorCredits: (payload) => ipcRenderer.invoke('vendor:scan-epicor-credits', payload),
   getEpicorScanned: () => ipcRenderer.invoke('vendor:get-epicor-scanned'),
-  rescanEpicorInvoice: (invoiceNumber) => ipcRenderer.invoke('vendor:rescan-epicor-invoice', { invoiceNumber }),
+  getEpicorScannedCredits: () => ipcRenderer.invoke('vendor:get-epicor-scanned-credits'),
+  rescanEpicorInvoice: (invoiceNumber, isCredit = false) =>
+    ipcRenderer.invoke('vendor:rescan-epicor-invoice', { invoiceNumber, isCredit }),
   openEpicorInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:open-epicor-invoice-image', fileName),
   readEpicorInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:read-epicor-invoice-image', fileName),
   fetchTransbecInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-transbec-invoices', payload),

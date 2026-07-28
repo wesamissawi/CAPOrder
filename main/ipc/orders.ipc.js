@@ -24,6 +24,7 @@ const registerOrdersIpc = (ipcMain, deps) => {
     orderMatchesKey,
     runSageReconcile,
     applyReconcileResult,
+    alignSageTotalSign,
     archiveCompletedOrders,
     archiveOrderByKey,
     deleteOrderByKey,
@@ -38,15 +39,21 @@ const registerOrdersIpc = (ipcMain, deps) => {
     startSageHeartbeat,
     stopSageHeartbeat,
     getMachineId,
+    mergeOrdersForWrite,
+    sageOrderLockIsLive,
+    isOrderSageLocked,
+    setSageOrderLock,
+    clearSageOrderLock,
+    patchOrderOnDisk,
   } = deps;
 
-  // Keep the orders.json watcher running while either Sage flow is active.
+  // orders.json is watched unconditionally, on every machine. It used to be
+  // watched only while a Sage flow was active locally, which meant the machine
+  // that merely *triggers* Sage never saw the results the processing machine
+  // wrote — it kept an ever-staler copy of the array, un-blurred a locked card,
+  // and offered "Send to Sage" again on an order that was already in Sage.
   function refreshOrdersWatch() {
-    if (getSagePoActive?.() || getSageInvoiceActive?.()) {
-      startOrdersWatching(deps.getWin());
-    } else {
-      stopOrdersWatching();
-    }
+    startOrdersWatching(deps.getWin());
   }
 
   ipcMain.handle('sage:get-lock', () => {
@@ -117,19 +124,80 @@ const registerOrdersIpc = (ipcMain, deps) => {
       return { ok: false, error: e?.message || 'Failed to enable Sage invoices.' };
     }
   });
+  // A renderer save is a FULL array built from whatever that window last read,
+  // which over a shared file is routinely minutes old. Never take it verbatim:
+  // reconcile it against disk first (see mergeOrdersForWrite) so orders locked
+  // by a Sage run are untouchable and the Sage-owned fields always come from
+  // disk. `blocked` lets the caller know which orders it was not allowed to
+  // change, so the UI can refresh them instead of silently keeping its version.
   ipcMain.handle('orders:write', (_evt, orders) => {
     const current = readOrders();                  // existing array
+    const { orders: merged, blocked, restored } = mergeOrdersForWrite(current, orders ?? []);
+    if (blocked.length) {
+      console.warn('[orders:write] ignored stale copy of Sage-locked order(s):', blocked.join(', '));
+    }
+    if (restored) {
+      console.warn('[orders:write] kept', restored, 'order(s) missing from the incoming save');
+    }
     const a = JSON.stringify(current);
-    const b = JSON.stringify(orders ?? []);
-    if (a !== b) writeOrders(orders);              // only write if actually different
+    const b = JSON.stringify(merged);
+    if (a !== b) writeOrders(merged);              // only write if actually different
     try {
-      syncOutstandingInvoices(orders ?? []);
+      syncOutstandingInvoices(merged);
     } catch (e) {
       console.error('[orders:write] sync outstanding failed', e);
     }
     if (getSagePoActive?.() || getSageInvoiceActive?.())
       scheduleSageProcessing();
-    return { ok: true };
+    return { ok: true, blocked, orders: merged };
+  });
+
+  // Claim an order for Sage. Done here rather than as a field in the renderer's
+  // bulk save so the trigger cannot arrive carrying a stale snapshot of every
+  // other order — that is precisely how an already-entered order used to get
+  // its sage_trigger resurrected and be entered into Sage twice.
+  ipcMain.handle('sage:trigger-order', (_evt, refKey, kind = 'purchase') => {
+    try {
+      const key = (refKey || '').toString().trim().toUpperCase();
+      if (!key) return { ok: false, error: 'Missing order reference.' };
+      const list = readOrders() || [];
+      const target = list.find((o) => orderMatchesKey(o, key));
+      if (!target) return { ok: false, error: 'Order not found on disk. Reload orders and try again.' };
+      if (isOrderSageLocked?.(target)) {
+        return { ok: false, error: 'This order is already being sent to Sage.', order: target };
+      }
+      if (kind === 'purchase' && target.enteredInSage === true) {
+        // Someone else already finished it; refuse rather than double-enter.
+        return { ok: false, error: 'This order is already entered in Sage.', order: target };
+      }
+      const now = Date.now();
+      const updated = patchOrderOnDisk(key, {
+        ...(kind === 'invoice' ? { sage_invoice_trigger: true } : { sage_trigger: true }),
+        sage_lock: { machineId: getMachineId?.() || null, stage: 'queued', kind, startedAt: now, heartbeatAt: now },
+      });
+      if (!updated) return { ok: false, error: 'Failed to lock the order.' };
+      scheduleSageProcessing();
+      return { ok: true, order: updated };
+    } catch (e) {
+      console.error('[sage:trigger-order]', e);
+      return { ok: false, error: e?.message || 'Failed to send the order to Sage.' };
+    }
+  });
+
+  // Manual escape hatch: the Sage machine died mid-run, or the user changed
+  // their mind before it was picked up. Drops the lock AND the pending trigger
+  // so the order does not quietly get entered later.
+  ipcMain.handle('sage:release-order-lock', (_evt, refKey) => {
+    try {
+      const key = (refKey || '').toString().trim().toUpperCase();
+      if (!key) return { ok: false, error: 'Missing order reference.' };
+      const updated = clearSageOrderLock(key, { sage_trigger: false, sage_invoice_trigger: false });
+      if (!updated) return { ok: false, error: 'Order not found.' };
+      return { ok: true, order: updated };
+    } catch (e) {
+      console.error('[sage:release-order-lock]', e);
+      return { ok: false, error: e?.message || 'Failed to release the order.' };
+    }
   });
   ipcMain.handle('orders:add-to-outstanding', () => {
     try {
@@ -329,24 +397,49 @@ const registerOrdersIpc = (ipcMain, deps) => {
         mergedTarget.sage_total_synced ??
         mergedTarget.sageTotalSynced;
       const billedNum = billedRaw === undefined || billedRaw === null ? NaN : Number(billedRaw);
-      const sageNum = sageRaw === undefined || sageRaw === null ? NaN : Number(sageRaw);
-      if (!Number.isFinite(billedNum) || !Number.isFinite(sageNum)) {
+      const rawSageNum = sageRaw === undefined || sageRaw === null ? NaN : Number(sageRaw);
+      if (!Number.isFinite(billedNum) || !Number.isFinite(rawSageNum)) {
         return { ok: false, error: 'Missing billed_total or sage_total_synced.' };
       }
+      // Sage reports a credit's total as a positive magnitude, while our
+      // billed_total for a World credit is negative — compare like with like, so
+      // the match test is really "do the absolute values agree" and the delta
+      // handed to the GST adjustment carries the right sign (subtracting the
+      // penny on a credit where an invoice would add it). See alignSageTotalSign.
+      const sageNum = alignSageTotalSign(rawSageNum, billedNum, mergedTarget.isCredit === true);
       const delta = Number((billedNum - sageNum).toFixed(2));
       if (Math.abs(delta) < 0.001) {
         return { ok: false, error: 'Totals already match.' };
       }
 
-      const res = await runSageReconcile(mergedTarget, delta);
-      if (!res?.ok) {
-        return { ok: false, error: res?.error || 'Reconcile failed', stderr: res?.stderr, stdout: res?.stdout };
+      if (isOrderSageLocked?.(target)) {
+        return { ok: false, error: 'This order is busy with Sage right now.' };
       }
+      // Reconciling drives Sage for this order just like a purchase run does —
+      // hold the same lock so no machine can save over it mid-adjustment.
+      setSageOrderLock?.(key, 'reconcile');
+      let res;
+      try {
+        res = await runSageReconcile(mergedTarget, delta);
+      } finally {
+        // applyReconcileResult clears the lock on the applied path; anything
+        // else has to release it here or the card stays blurred.
+        if (!res?.applied?.applied) clearSageOrderLock?.(key);
+      }
+      // DELTA_APPLIED on stdout means Sage took the adjustment. Like the purchase
+      // queue, trust that over the exit code — recording it is what keeps our
+      // totals matching Sage's.
       if (!res?.applied?.applied) {
+        if (!res?.ok) {
+          return { ok: false, error: res?.error || 'Reconcile failed', stderr: res?.stderr, stdout: res?.stdout };
+        }
         return { ok: false, error: 'Reconcile did not complete in AHK.', stdout: res?.stdout, stderr: res?.stderr };
       }
+      if (!res?.ok) {
+        console.warn('[sage-reconcile] AHK exited non-zero AFTER applying the delta', key, res?.code);
+      }
       applyReconcileResult(key, billedNum, delta, mergedTarget, res.sageTotal, res.journalEntry);
-      return { ok: true, delta, sageTotal: res.sageTotal, journalEntry: res.journalEntry };
+      return { ok: true, delta, sageTotal: res.sageTotal, journalEntry: res.journalEntry, dirtyExit: !res.ok };
     } catch (e) {
       console.error('[orders:reconcile-totals]', e);
       return { ok: false, error: e?.message || 'Failed to reconcile totals.' };

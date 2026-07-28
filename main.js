@@ -6,7 +6,14 @@ const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { spawn } = require('child_process');
 const { createItemsDomain } = require('./main/domain/items.domain');
-const { normalizeOrderRef, orderMatchesKey, getVendorName } = require('./main/domain/orders.domain');
+const {
+  normalizeOrderRef,
+  orderMatchesKey,
+  getVendorName,
+  sageOrderLockIsLive,
+  isOrderSageLocked,
+  mergeOrdersForWrite,
+} = require('./main/domain/orders.domain');
 const { extractJournalLine, extractSageTotal, extractReconcileApplied, createSageDomain } = require('./main/domain/sage.domain');
 const { searchArchiveEntries } = require('./main/domain/archive.domain');
 const { normalizeSharedBubblePayload } = require('./main/domain/sharedBubble.domain');
@@ -638,6 +645,50 @@ function writeOrders(orders) {
   refreshOrdersIndex(orders);
   return res;
 }
+// Read-modify-write a SINGLE order on disk. Every Sage lock transition and both
+// Sage triggers go through here rather than riding along on the renderer's bulk
+// save, so a minutes-old in-memory array can never travel with them.
+function patchOrderOnDisk(refKey, patch) {
+  const key = (refKey || '').toString().trim().toUpperCase();
+  if (!key) return null;
+  const list = readOrders() || [];
+  let updated = null;
+  const next = list.map((o) => {
+    if (!o || updated || !orderMatchesKey(o, key)) return o;
+    const patchVal = typeof patch === 'function' ? patch(o) : patch || {};
+    if (!patchVal) return o;
+    updated = { ...o, ...patchVal, lastUpdatedAt: new Date().toISOString() };
+    return updated;
+  });
+  if (!updated) return null;
+  writeOrders(next);
+  return updated;
+}
+
+// stage: 'queued' (waiting for the Sage machine to pick it up), 'running' (AHK
+// is driving Sage right now) or 'reconcile'. startedAt is kept from the first
+// transition so the staleness window covers the whole round trip.
+function setSageOrderLock(refKey, stage, extra = {}) {
+  return patchOrderOnDisk(refKey, (order) => {
+    const prev = order?.sage_lock && typeof order.sage_lock === 'object' ? order.sage_lock : null;
+    const now = Date.now();
+    return {
+      sage_lock: {
+        ...(prev || {}),
+        machineId: getMachineId(),
+        stage,
+        startedAt: prev?.startedAt || now,
+        heartbeatAt: now,
+        ...extra,
+      },
+    };
+  });
+}
+
+function clearSageOrderLock(refKey, patch = {}) {
+  return patchOrderOnDisk(refKey, { sage_lock: null, ...patch });
+}
+
 function writeOrdersArchive(orders) {
   const file = getOrdersArchiveFile();
   backupFile(file);
@@ -1393,13 +1444,14 @@ function deleteOrderByKey(refKeyRaw, source) {
 }
 
 const sageDomain = createSageDomain({ readOrders, writeOrders, orderMatchesKey });
-const { applySageResult, applyReconcileResult, applyInvoiceResult } = sageDomain;
+const { applySageResult, applyReconcileResult, applyInvoiceResult, alignSageTotalSign } = sageDomain;
 
 const vendorOrdersService = createVendorOrdersService({
   ensureDir,
   VENDOR_PATHS,
   readOrders,
   writeOrders,
+  mergeOrdersForWrite,
   getArchivedOrderRefs,
   getOrdersFile,
   loadConfig,
@@ -1437,8 +1489,10 @@ const {
   fetchBestBuyOrders,
   openEpicor,
   scanEpicorRange,
+  scanEpicorCredits,
   rescanEpicorInvoice,
   getEpicorScannedInvoices,
+  getEpicorScannedCredits,
   fetchTransbecInvoices: fetchTransbecInvoicesService,
   fetchBestbuyInvoices: fetchBestbuyInvoicesService,
   fetchBestbuyCreditInvoices: fetchBestbuyCreditInvoicesService,
@@ -1615,6 +1669,8 @@ const sageService = createSageService({
   applyReconcileResult,
   getSagePoActive,
   getSageInvoiceActive,
+  setSageOrderLock,
+  clearSageOrderLock,
 });
 const {
   runSagePurchase,
@@ -1755,6 +1811,10 @@ async function createWindow() {
   console.log('[main] data file =', getDataFile());
   startWatching(win);
   startBubbleSharedWatching(win);
+  // Always watch orders.json, not just while this machine drives Sage: the
+  // machine that triggers an order has to see the result the processing machine
+  // writes back, otherwise its copy goes stale and a later save reverts it.
+  startOrdersWatching(win);
   registerAllIpc();
 
   const scheduleSaveBounds = () => {
@@ -1912,8 +1972,10 @@ function registerAllIpc() {
     fetchBestBuyOrders,
     openEpicor,
     scanEpicorRange,
+    scanEpicorCredits,
     rescanEpicorInvoice,
     getEpicorScannedInvoices,
+    getEpicorScannedCredits,
     // Passed as functions, not static strings: the shared folder is a runtime
     // Settings value, so this must resolve fresh on every image request rather
     // than bake in whatever it was when the app started.
@@ -1929,9 +1991,16 @@ function registerAllIpc() {
     getGmailStatus,
     getGmailAssetsDir,
     orderMatchesKey,
+    mergeOrdersForWrite,
+    sageOrderLockIsLive,
+    isOrderSageLocked,
+    setSageOrderLock,
+    clearSageOrderLock,
+    patchOrderOnDisk,
     runSageReconcile,
     runSageSalesInvoice,
     applyReconcileResult,
+    alignSageTotalSign,
     readSharedBubbleData,
     getSharedBubbleDataPath,
     writeSharedBubbleData,

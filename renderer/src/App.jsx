@@ -22,6 +22,7 @@ import {
   makeUid,
   nextRev,
 } from "./utils/inventory";
+import { isOrderSageLocked, orderKeyMatches } from "./utils/sageLock";
 
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
 
@@ -110,6 +111,97 @@ function matchesOrdersPickupFilter(order, value) {
 // created from an Epicor invoice lands in the right world_YYYYMM folder when
 // archived. Returns "" for anything we can't confidently parse, in which case
 // archiving falls back to the archive timestamp's month.
+// Build the return-requisition slips out of a list of items plus the tracked
+// slip metadata. Slips = the metadata list unioned with any slip ids found on
+// items, so a slip still shows even if the (per-machine) empty-slip metadata was
+// lost. Once a slip has parts the ITEMS are the source of truth for its PO and
+// status, since those sync between machines and the metadata does not.
+// Callers choose which item list to pass: the Returns view passes the
+// age-filtered list, the credit matcher passes every item (see its call site).
+function deriveReturnSlips(itemList, slipMeta, unspecifiedWarehouse) {
+  const slipItems = new Map(); // slipId -> items[]
+  (itemList || []).forEach((it) => {
+    if ((it.allocated_to || "").toLowerCase() !== "returns") return;
+    const slipId = it.return_slip_id || "";
+    if (!slipId) return;
+    if (!slipItems.has(slipId)) slipItems.set(slipId, []);
+    slipItems.get(slipId).push(it);
+  });
+
+  const byId = new Map();
+  (slipMeta || []).forEach((s) => {
+    if (s && s.id) {
+      byId.set(s.id, {
+        id: s.id,
+        warehouse: s.warehouse || "",
+        date: s.date || "",
+        po: s.po || "",
+        status: s.status || "open",
+      });
+    }
+  });
+  slipItems.forEach((its, id) => {
+    if (!byId.has(id)) {
+      const sample = its[0] || {};
+      byId.set(id, {
+        id,
+        warehouse: (sample.warehouse || "").trim() || unspecifiedWarehouse,
+        date: sample.return_slip_date || "",
+        po: sample.return_slip_po || "",
+        status: sample.return_slip_status || "open",
+      });
+    }
+  });
+
+  return Array.from(byId.values())
+    .map((s) => {
+      const its = slipItems.get(s.id) || [];
+      const sample = its[0];
+      return {
+        ...s,
+        items: its,
+        po: sample ? sample.return_slip_po || "" : s.po || "",
+        status: (sample ? sample.return_slip_status : s.status) || "open",
+      };
+    })
+    .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+}
+
+// Split a "CODE NUMBER" string (how both invoice-review modals edit a part) back
+// into the separate partLineCode / partNumber the rest of the pipeline needs.
+//
+// This split MATTERS and must not be collapsed: capRules.resolveCapCode()
+// branches on the LINE CODE to build the Sage code (World + "NGK" + an oxygen
+// sensor -> "NTK 21514"; World + "TRK" -> the dash is stripped). With an empty
+// line code every one of those rules misses and it falls through to the default
+// `linecode + " " + partnumber` template — the wrong code, and formerly a
+// leading space too.
+//
+// Splits on the LAST space, not the first: measured over all 1978 stored line
+// items, a real partNumber NEVER contains a space, while line codes are 3 chars
+// (1953), occasionally 2 ("BS"), and core-charge lines carry a two-word code
+// ("CORE PKT 20-66989"). Last-space therefore handles core lines with no special
+// case. A string with no space at all (or an implausible left side) is left
+// whole rather than guessed at.
+function splitPartCode(part) {
+  const raw = String(part || "").trim().replace(/\s+/g, " ");
+  const at = raw.lastIndexOf(" ");
+  if (at <= 0) return { partLineCode: "", partNumber: raw };
+  const code = raw.slice(0, at);
+  const number = raw.slice(at + 1);
+  if (!/^[A-Za-z][A-Za-z ]{0,11}$/.test(code)) return { partLineCode: "", partNumber: raw };
+  return { partLineCode: code.toUpperCase(), partNumber: number };
+}
+
+// Epicor invoices/credits ARE World documents, so orders built from them must
+// carry the same warehouse string the World scrape stores. It drives two things:
+// capRules.resolveCapCode (via the "World" alias) and the item's `warehouse`,
+// which Returns Management groups and locks requisition slips by — with the
+// Epicor account name here instead, Epicor stock could never share a slip with
+// scraped World stock. NOTE: this must keep matching what worldScraper reads off
+// the site; capRules.json's warehouseAliases.World lists the same strings.
+const WORLD_WAREHOUSE = "World Automotive Warehouse";
+
 function epicorDateToSageDate(raw) {
   const s = String(raw || "").trim();
   if (!s) return "";
@@ -274,6 +366,24 @@ export default function App() {
   const [epicorScanLog, setEpicorScanLog] = useState([]);
   const [epicorScanInvoices, setEpicorScanInvoices] = useState([]);
   const [epicorScanCounts, setEpicorScanCounts] = useState({ scanned: 0, unknown: 0 });
+  // Epicor view: the same scan run against CREDIT documents (the "Credit"
+  // doctype checkbox, optionally pinned to one credit memo #). Kept in its own
+  // state so credits list separately from invoices, even though both are OCR'd,
+  // imaged and cached identically on the backend.
+  const [epicorCreditScanning, setEpicorCreditScanning] = useState(false);
+  const [epicorCreditScanError, setEpicorCreditScanError] = useState("");
+  const [epicorCreditScanLog, setEpicorCreditScanLog] = useState([]);
+  const [epicorCredits, setEpicorCredits] = useState([]);
+  // "Match to requisition" modal: pair a scanned credit with a waiting-on-credit
+  // return requisition, edit the parts, then create the credit order.
+  const [creditMatch, setCreditMatch] = useState(null); // the credit being matched
+  const [creditMatchSlipId, setCreditMatchSlipId] = useState("");
+  const [creditMatchLines, setCreditMatchLines] = useState([]);
+  const [creditMatchPages, setCreditMatchPages] = useState([]); // [{fileName, dataUrl}]
+  const [creditMatchPageIdx, setCreditMatchPageIdx] = useState(0);
+  const [creditMatchLoading, setCreditMatchLoading] = useState(false);
+  const [creditMatchSaving, setCreditMatchSaving] = useState(false);
+  const [creditMatchError, setCreditMatchError] = useState("");
   const [epicorReviewLoading, setEpicorReviewLoading] = useState(false);
   const [epicorReviewSaving, setEpicorReviewSaving] = useState(false);
   const [epicorReviewError, setEpicorReviewError] = useState("");
@@ -887,64 +997,19 @@ export default function App() {
   const UNSPECIFIED_WAREHOUSE = "Unspecified Warehouse";
   const returnsView = useMemo(() => {
     const unassigned = new Map(); // warehouse -> items[]
-    const slipItems = new Map(); // slipId -> items[]
     filteredItems.forEach((it) => {
       if ((it.allocated_to || "").toLowerCase() !== "returns") return;
-      const slipId = it.return_slip_id || "";
-      if (slipId) {
-        if (!slipItems.has(slipId)) slipItems.set(slipId, []);
-        slipItems.get(slipId).push(it);
-      } else {
-        const warehouse = (it.warehouse || "").trim() || UNSPECIFIED_WAREHOUSE;
-        if (!unassigned.has(warehouse)) unassigned.set(warehouse, []);
-        unassigned.get(warehouse).push(it);
-      }
+      if (it.return_slip_id) return;
+      const warehouse = (it.warehouse || "").trim() || UNSPECIFIED_WAREHOUSE;
+      if (!unassigned.has(warehouse)) unassigned.set(warehouse, []);
+      unassigned.get(warehouse).push(it);
     });
 
     const unassignedGroups = Array.from(unassigned.entries())
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([warehouse, groupedItems]) => ({ warehouse, items: groupedItems }));
 
-    // Slips = the tracked metadata list, unioned with any slip ids found on
-    // items (so a slip still shows even if the empty-slip metadata was lost).
-    const byId = new Map();
-    returnSlips.forEach((s) => {
-      if (s && s.id) {
-        byId.set(s.id, {
-          id: s.id,
-          warehouse: s.warehouse || "",
-          date: s.date || "",
-          po: s.po || "",
-          status: s.status || "open",
-        });
-      }
-    });
-    slipItems.forEach((its, id) => {
-      if (!byId.has(id)) {
-        const sample = its[0] || {};
-        byId.set(id, {
-          id,
-          warehouse: (sample.warehouse || "").trim() || UNSPECIFIED_WAREHOUSE,
-          date: sample.return_slip_date || "",
-          po: sample.return_slip_po || "",
-          status: sample.return_slip_status || "open",
-        });
-      }
-    });
-    const slips = Array.from(byId.values())
-      .map((s) => {
-        const its = slipItems.get(s.id) || [];
-        // Items are the synced source of truth once a slip has parts (metadata
-        // is per-machine and may not exist on another machine).
-        const sample = its[0];
-        return {
-          ...s,
-          items: its,
-          po: sample ? sample.return_slip_po || "" : s.po || "",
-          status: (sample ? sample.return_slip_status : s.status) || "open",
-        };
-      })
-      .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+    const slips = deriveReturnSlips(filteredItems, returnSlips, UNSPECIFIED_WAREHOUSE);
 
     // Warehouses a new slip can be created for: any warehouse that currently has
     // returns (assigned or not), so you can only make a slip where stock exists.
@@ -1597,20 +1662,17 @@ export default function App() {
   // Credit came back for a waiting slip: remove its parts from active stock and
   // record it in the lifecycle history (traced as "credit_received"), then drop
   // the slip metadata.
-  function handleCreditReceived(slipId) {
-    if (!slipId) return;
+  // Close out a return requisition because its credit came back: drop its parts
+  // from active stock (traced as "credit_received" in the lifecycle log) and
+  // forget the slip. No confirmation of its own — callers decide whether to ask.
+  // Awaitable so a caller can report a failed write instead of assuming success.
+  async function settleSlipAsCreditReceived(slipId) {
+    if (!slipId) return { ok: true, removedCount: 0 };
     const slipItems = items.filter(
       (it) =>
         it.return_slip_id === slipId &&
         (it.allocated_to || "").toLowerCase() === "returns"
     );
-    const confirmed =
-      typeof window === "undefined"
-        ? true
-        : window.confirm(
-            `Credit received for this slip? ${slipItems.length} item(s) will be removed from Returns and recorded in history.`
-          );
-    if (!confirmed) return;
     const removedUids = slipItems.map((it) => it.uid);
     const removedSet = new Set(removedUids);
     const remainingItems = items.filter((it) => !removedSet.has(it.uid));
@@ -1618,20 +1680,40 @@ export default function App() {
     setItems(remainingItems);
     lastSavedRef.current = JSON.stringify(remainingItems);
     setReturnSlips((prev) => prev.filter((s) => s.id !== slipId));
-    api
-      .writeItems(remainingItems, removedUids, { deleteReason: "credit_received" })
-      .then((res) => {
-        if (res?.ok === false) {
-          lastSavedRef.current = "";
-          console.error("[credit-received] write rejected", res.error);
-        } else {
-          confirmItemsDeleted(removedUids);
-        }
-      })
-      .catch((e) => {
-        lastSavedRef.current = "";
-        console.error("[credit-received] writeItems failed", e);
+    try {
+      const res = await api.writeItems(remainingItems, removedUids, {
+        deleteReason: "credit_received",
       });
+      if (res?.ok === false) {
+        lastSavedRef.current = "";
+        console.error("[credit-received] write rejected", res.error);
+        return { ok: false, error: res.error || "Failed to save.", removedCount: removedUids.length };
+      }
+      confirmItemsDeleted(removedUids);
+      return { ok: true, removedCount: removedUids.length };
+    } catch (e) {
+      lastSavedRef.current = "";
+      console.error("[credit-received] writeItems failed", e);
+      return { ok: false, error: e?.message || "Failed to save.", removedCount: removedUids.length };
+    }
+  }
+
+  // The Returns Management "Credit received" button — confirms, then settles.
+  function handleCreditReceived(slipId) {
+    if (!slipId) return;
+    const count = items.filter(
+      (it) =>
+        it.return_slip_id === slipId &&
+        (it.allocated_to || "").toLowerCase() === "returns"
+    ).length;
+    const confirmed =
+      typeof window === "undefined"
+        ? true
+        : window.confirm(
+            `Credit received for this slip? ${count} item(s) will be removed from Returns and recorded in history.`
+          );
+    if (!confirmed) return;
+    settleSlipAsCreditReceived(slipId);
   }
 
   // Remove a slip. Only allowed while empty (one-way: assigned parts stay put).
@@ -2308,6 +2390,14 @@ export default function App() {
 
   function updateOrderByKey(key, patch) {
     if (!key) return null;
+    if (isOrderSageLocked(orders.find((o) => orderKeyMatches(o, key)))) {
+      // The order is in the hands of the Sage pipeline. Anything typed here now
+      // would be written back on the next save and could revert the result the
+      // processing machine is about to report — the card is blurred for exactly
+      // this reason, so just drop the edit.
+      console.warn("[orders] edit ignored — order is locked by Sage", key);
+      return null;
+    }
     let result = null;
     setOrders((prev) => {
       let changed = false;
@@ -2369,8 +2459,53 @@ export default function App() {
     }
     return patchedOrders;
   }
+  // Sending to Sage is a hand-off, not a field edit: flush whatever is unsaved
+  // (the invoice number typed on the card has to be on disk before the AHK run
+  // reads it), then let main set the trigger and the lock in one atomic
+  // read-modify-write of orders.json. From here until the run reports back the
+  // order belongs to Sage — the card blurs and refuses edits.
+  async function sendOrderToSage(referenceKey, kind) {
+    if (!referenceKey) return;
+    setOrdersError(null);
+    if (!(await flushPendingOrderEdits())) {
+      setOrdersError(FLUSH_FAILED_MSG);
+      return;
+    }
+    try {
+      const res = await api?.triggerOrderSage?.(referenceKey, kind);
+      if (!res?.ok) {
+        setOrdersError(res?.error || "Failed to send the order to Sage.");
+      }
+    } catch (e) {
+      setOrdersError(e?.message || "Failed to send the order to Sage.");
+    }
+    await loadOrders();
+  }
+
   function handleUpdateInvoiceTrigger(referenceKey) {
-    updateOrderByKeyAndSave(referenceKey, { sage_invoice_trigger: true });
+    sendOrderToSage(referenceKey, "invoice");
+  }
+
+  // Escape hatch for a lock that will never resolve (the Sage machine was shut
+  // down mid-run). Clears the trigger too, so releasing cannot leave the order
+  // silently queued to be entered later.
+  async function handleReleaseSageLock(order) {
+    const refKey = order?.reference || order?.__row;
+    if (!refKey) return;
+    const proceed = api?.confirm
+      ? await api.confirm(
+          `Release ${order.reference || refKey} from Sage?`,
+          "Only do this if Sage is NOT currently processing this order — check Sage first. The order will go back to unsent; if it was already entered, mark it entered by hand instead of sending it again."
+        )
+      : true;
+    if (!proceed) return;
+    try {
+      const res = await api?.releaseOrderSageLock?.(refKey);
+      if (!res?.ok) setOrdersError(res?.error || "Failed to release the order.");
+    } catch (e) {
+      setOrdersError(e?.message || "Failed to release the order.");
+    }
+    await loadOrders();
   }
   function handleOrderCheckboxChange(referenceKey, field, checked) {
     if (field === "inStore") {
@@ -2397,7 +2532,7 @@ export default function App() {
     });
   }
   function handleOrderSageTrigger(referenceKey) {
-    updateOrderByKey(referenceKey, { sage_trigger: true });
+    sendOrderToSage(referenceKey, "purchase");
   }
 
   function handleRenameBubble(bubbleId, newName) {
@@ -2518,7 +2653,31 @@ export default function App() {
       normalized.filter((o) => o && o.sage_invoice_trigger)
     );
     if (ordersDirty) {
-      console.log("[orders] external update skipped (local edits present)");
+      // Do NOT skip the whole push just because something on the page is
+      // unsaved — that is how this window used to end up holding a copy of an
+      // order that was already entered in Sage, and offering to send it again.
+      // Merge per order instead: locally edited orders keep the user's version,
+      // every other order takes the incoming one.
+      console.log("[orders] external update merged (local edits present)");
+      setOrders((prev) => {
+        const localDirty = new Map();
+        (prev || []).forEach((o) => {
+          if (!o?._localDirty) return;
+          const key = (o.reference || o.__row || "").toString().trim().toUpperCase();
+          if (key) localDirty.set(key, o);
+        });
+        if (!localDirty.size) return normalized;
+        return normalized.map((o) => {
+          const key = (o?.reference || o?.__row || "").toString().trim().toUpperCase();
+          const mine = key ? localDirty.get(key) : null;
+          // An order the Sage pipeline has claimed always comes from disk, even
+          // if this window has unsaved changes to it — main would refuse them
+          // anyway, so showing them would be a lie.
+          if (!mine || isOrderSageLocked(o)) return o;
+          return mine;
+        });
+      });
+      setOrdersInitialized(true);
       return;
     }
     setOrders(normalized);
@@ -2537,9 +2696,19 @@ export default function App() {
       if (!res?.ok) {
         throw new Error("Failed to save orders.");
       }
-      setOrders(normalized);
-      ordersLastSavedRef.current = JSON.stringify(normalized);
+      // Main reconciles the save against disk and hands back what it actually
+      // wrote, so adopt that rather than our own array: any order it refused to
+      // change (locked by Sage, or where our Sage fields were stale) is already
+      // corrected in there.
+      const saved = Array.isArray(res.orders) ? res.orders : normalized;
+      setOrders(saved);
+      ordersLastSavedRef.current = JSON.stringify(saved);
       setOrdersDirty(false);
+      if (res.blocked?.length) {
+        setOrdersError(
+          `Skipped ${res.blocked.length} order(s) currently being processed in Sage: ${res.blocked.join(", ")}.`
+        );
+      }
     } catch (e) {
       console.error("[orders] save error", e);
       setOrdersError(e?.message || "Failed to save orders.");
@@ -2634,8 +2803,9 @@ export default function App() {
       const normalized = normalizeOrdersForSave(orders);
       const res = await api.writeOrders(normalized);
       if (!res?.ok) return false;
-      setOrders(normalized);
-      ordersLastSavedRef.current = JSON.stringify(normalized);
+      const saved = Array.isArray(res.orders) ? res.orders : normalized;
+      setOrders(saved);
+      ordersLastSavedRef.current = JSON.stringify(saved);
       setOrdersDirty(false);
       return true;
     } catch (e) {
@@ -3134,7 +3304,10 @@ export default function App() {
           epicorOnly: true,
           reference: refValue,
           __row: refValue,
-          warehouse: inv.accountName || "Epicor invoice",
+          warehouse: WORLD_WAREHOUSE,
+          // The Epicor account holder (i.e. us) — kept for reference, but it is
+          // NOT the warehouse; that's the vendor. See WORLD_WAREHOUSE.
+          ...(inv.accountName ? { epicorAccountName: inv.accountName } : {}),
           sage_source: "WOR505",
           source_invoice: invNum,
           sage_reference: invNum,
@@ -3336,18 +3509,438 @@ export default function App() {
   async function handleDeleteEpicorOrder(order) {
     const invNum = String(order?.source_invoice || order?.invoiceNum || "").trim();
     const label = order?.reference || invNum || "this order";
+    const isCredit = order?.isCredit === true;
+    const docLabel = isCredit ? "credit" : "invoice";
     const proceed = api?.confirm
       ? await api.confirm(
-          `Delete Epicor order ${label}?`,
-          "This permanently removes it from Order Management. The invoice will show as not-in-records again in the Epicor view."
+          `Delete Epicor ${isCredit ? "credit " : ""}order ${label}?`,
+          `This permanently removes it from Order Management. The ${docLabel} will show as not-in-records again in the Epicor view.`
         )
       : true;
     if (!proceed) return;
     const src = order?.source || "world";
+    // Route by document type so the right list in the Epicor view flips back to
+    // "not in records" (credits and invoices are listed separately there).
     const res = invNum
-      ? await handleRemoveEpicorOrder({ invoiceNumber: invNum }, src)
+      ? isCredit
+        ? await handleRemoveEpicorCreditOrder({ invoiceNumber: invNum })
+        : await handleRemoveEpicorOrder({ invoiceNumber: invNum }, src)
       : await handleDeleteOrder(order?.reference || order?.__row, src);
     if (!res?.ok) setOrdersError(res?.error || "Failed to delete order.");
+  }
+
+  // ---- Epicor CREDIT memos -------------------------------------------------
+  // Same portal, same search, same OCR/caching as the invoice scan above — the
+  // only difference is the "Credit" document-type checkbox (and an optional
+  // credit memo # to pin one document). Kept as its own set of handlers so the
+  // credit list, its counts and its errors stay separate from the invoice list.
+
+  // List credits already OCR'd into the shared Epicor cache (no browser), so a
+  // restart still shows them. Mirrors handleLoadEpicorScanned.
+  async function handleLoadEpicorScannedCredits() {
+    if (!api?.getEpicorScannedCredits) return;
+    try {
+      setEpicorCreditScanError("");
+      const res = await api.getEpicorScannedCredits();
+      if (!res?.ok) throw new Error(res?.error || "Failed to load scanned credits.");
+      setEpicorCredits(Array.isArray(res.credits) ? res.credits : []);
+    } catch (e) {
+      console.error("[vendor] load scanned epicor credits failed", e);
+      setEpicorCreditScanError(e?.message || "Failed to load scanned credits.");
+    }
+  }
+
+  // Look up one credit memo by number (Epicor's credit search takes no dates).
+  async function handleScanEpicorCredits(creditNumber) {
+    if (!api?.scanEpicorCredits) return;
+    const number = String(creditNumber || "").trim();
+    if (!number) {
+      setEpicorCreditScanError("Enter a credit memo number to look up.");
+      return;
+    }
+    try {
+      setEpicorCreditScanning(true);
+      setEpicorCreditScanError("");
+      const res = await api.scanEpicorCredits({ creditNumber: number });
+      setEpicorCreditScanLog(Array.isArray(res?.statusLog) ? res.statusLog : []);
+      if (!res?.ok) throw new Error(res?.error || "Failed to look up the credit.");
+      const scanned = Array.isArray(res.credits) ? res.credits : [];
+      if (scanned.length === 0) {
+        setEpicorCreditScanError(`No credit found on Epicor for credit # ${number}.`);
+      }
+      // Merge into whatever was already listed — a lookup returns just the one
+      // document and must not wipe the credits already on screen.
+      const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+      setEpicorCredits((prev) => {
+        const byNumber = new Map(prev.map((c) => [norm(c.invoiceNumber), c]));
+        scanned.forEach((c) => {
+          const key = norm(c.invoiceNumber);
+          byNumber.set(key, { ...(byNumber.get(key) || {}), ...c });
+        });
+        return Array.from(byNumber.values());
+      });
+    } catch (e) {
+      console.error("[vendor] epicor credit lookup error", e);
+      setEpicorCreditScanError(e?.message || "Failed to look up the credit.");
+    } finally {
+      setEpicorCreditScanning(false);
+    }
+  }
+
+  // Re-OCR one credit from its saved image — the credit twin of
+  // handleRescanEpicorInvoice (same IPC, isCredit flag picks the cache entry,
+  // image file and the credit-specific total labels).
+  async function handleRescanEpicorCredit(credit) {
+    if (!api?.rescanEpicorInvoice) return { ok: false, error: "Rescan is not available." };
+    const num = String(credit?.invoiceNumber || "").trim();
+    if (!num) return { ok: false, error: "This credit has no number." };
+    try {
+      const res = await api.rescanEpicorInvoice(num, true);
+      if (!res?.ok) throw new Error(res?.error || "Rescan failed.");
+      const refreshed = res.invoice;
+      if (!refreshed) throw new Error("Rescan returned no data.");
+      const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+      setEpicorCredits((prev) =>
+        prev.map((c) =>
+          norm(c.invoiceNumber) === norm(num) ? { ...c, ...refreshed, created: c.created } : c
+        )
+      );
+      return { ok: true };
+    } catch (e) {
+      console.error("[vendor] rescan credit failed", e);
+      return { ok: false, error: e?.message || "Rescan failed." };
+    }
+  }
+
+  // Sage takes a purchase credit as NEGATIVE quantities at the normal positive
+  // unit cost — that is what produces a negative line extension and a negative
+  // invoice total. Everything upstream of this point deliberately works in
+  // POSITIVE magnitudes (the OCR, the requisition, the match modal), because
+  // that is what you compare against the paper credit; the sign is applied here,
+  // once, at the moment the order is created, so the purchase-entry AHK sends
+  // Sage negatives without having to flip anything itself.
+  //
+  // costPrice stays POSITIVE on purpose: enterSagePurchases.ahk derives the
+  // SELLING price from costPrice via its price ladder (cost * 3, * 2.8, …), so a
+  // negative cost there would write negative selling/preferred prices onto the
+  // Sage item record. Quantity is the only field that carries the sign.
+  function toSageCreditLineItems(lineItems) {
+    return (Array.isArray(lineItems) ? lineItems : []).map((li) => {
+      const qtyNum = parseFloat(String(li?.quantity ?? "").trim());
+      const qty = Number.isFinite(qtyNum) && qtyNum !== 0 ? -Math.abs(qtyNum) : -1;
+      const costNum = parseFloat(String(li?.costPrice ?? "").trim());
+      const cost = Number.isFinite(costNum) ? Math.abs(costNum) : null;
+      const extended = cost === null ? null : Number((cost * qty).toFixed(2));
+      return {
+        ...li,
+        quantity: String(qty),
+        ...(cost === null
+          ? {}
+          : {
+              costPrice: cost.toFixed(2),
+              costPriceValue: cost,
+              extended: extended.toFixed(2),
+              extendedValue: extended,
+            }),
+      };
+    });
+  }
+
+  // Turn a scanned Epicor credit into a CREDIT order — an order carrying
+  // isCredit: true, which is the one flag the "Credit" filter in Order
+  // Management keys off (see every other vendor's credit pipeline), so the
+  // credit shows up there ready to be matched against a return requisition.
+  // Otherwise built exactly like handleCreateOrderFromEpicorInvoice's order.
+  // opts.lineItems replaces the OCR'd parts (the match modal's edited list);
+  // opts.returnSlip records which waiting-on-credit requisition this settles.
+  async function handleCreateOrderFromEpicorCredit(credit, opts = {}) {
+    if (!credit || !api?.writeOrders) return { ok: false, error: "Saving orders is not available." };
+    const creditNum = String(credit.invoiceNumber || "").trim();
+    if (!creditNum) return { ok: false, error: "This credit has no number to key an order by." };
+    try {
+      const ordersRes = await api?.readOrders?.();
+      const currentList = ordersRes?.state || ordersRes || [];
+      const base = Array.isArray(currentList) ? currentList : [];
+
+      const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+      const creditKey = norm(creditNum);
+      const already = base.some(
+        (o) => o && (norm(o.source_invoice) === creditKey || norm(o.invoiceNum) === creditKey)
+      );
+
+      if (!already) {
+        // Negative, to match the negative line extensions and the negative total
+        // Sage will show once the credit is entered — the AHK compares
+        // billed_total against Sage's own total, so the signs have to agree.
+        const rawTotal = Number(credit.balanceDue);
+        const totalNum = Number.isFinite(rawTotal) ? -Math.abs(rawTotal) : NaN;
+        // Unlike an invoice — where the OCR'd reference identifies the order the
+        // invoice belongs to — a credit memo's reference points at the ORIGINAL
+        // order, so using it here would collide with that order's own bubble
+        // (same source + same reference). The credit is its own document, so it
+        // is always keyed by its own number; any reference OCR found is kept
+        // alongside for context.
+        const newOrder = {
+          source: "world",
+          epicorOnly: true,
+          isCredit: true,
+          reference: creditNum,
+          __row: creditNum,
+          warehouse: WORLD_WAREHOUSE,
+          ...(credit.accountName ? { epicorAccountName: credit.accountName } : {}),
+          sage_source: "WOR505",
+          source_invoice: creditNum,
+          sage_reference: creditNum,
+          hasInvoiceNum: true,
+          // No separate detail-fetch step — the OCR'd credit IS the detail,
+          // same as Epicor invoices and the other vendors' credit orders.
+          detailStored: true,
+          ...(Number.isFinite(totalNum) ? { billed_total: totalNum } : {}),
+          ...(credit.imageFileName ? { epicorInvoiceImage: credit.imageFileName } : {}),
+          ...(credit.reference ? { epicorCreditSourceReference: credit.reference } : {}),
+          environmentalFeeAlert: Boolean(credit.hasEnvironmentalFee),
+          ...(credit.environmentalFeeAmount
+            ? { environmentalFeeAmount: credit.environmentalFeeAmount }
+            : {}),
+          epicorInvoiceDate: credit.date || "",
+          orderDateRaw: credit.date || "",
+          sageDate: epicorDateToSageDate(credit.date),
+          // Stored with NEGATIVE quantities so Sage receives a credit (see
+          // toSageCreditLineItems). Archiving still rakes these parts back out of
+          // the RETURNS bubble rather than adding new stock —
+          // reconcileCreditReturnAgainstStock takes Math.abs of the quantity, so
+          // the sign doesn't affect it.
+          lineItems: toSageCreditLineItems(
+            Array.isArray(opts.lineItems)
+              ? opts.lineItems
+              : Array.isArray(credit.lineItems)
+              ? credit.lineItems
+              : []
+          ),
+          // Which waiting-on-credit return requisition this credit pays back.
+          // Recorded for traceability only — the stock in RETURNS is still raked
+          // out by the archive path, so matching here never removes anything.
+          ...(opts.returnSlip?.id
+            ? {
+                returnSlipId: opts.returnSlip.id,
+                returnSlipWarehouse: opts.returnSlip.warehouse || "",
+                ...(opts.returnSlip.po ? { returnSlipPo: opts.returnSlip.po } : {}),
+                ...(opts.returnSlip.date ? { returnSlipDate: opts.returnSlip.date } : {}),
+              }
+            : {}),
+          lastUpdatedAt: new Date().toISOString(),
+        };
+        const nextList = normalizeOrdersForSave(base.concat(newOrder));
+        const saveRes = await api.writeOrders(nextList);
+        if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the new credit order.");
+        if (ordersInitialized) {
+          setOrders(nextList);
+          ordersLastSavedRef.current = JSON.stringify(nextList);
+          setOrdersDirty(false);
+        }
+      }
+
+      setEpicorCredits((prev) =>
+        prev.map((c) => (norm(c.invoiceNumber) === creditKey ? { ...c, known: true, created: true } : c))
+      );
+      return { ok: true, duplicate: already };
+    } catch (e) {
+      console.error("[vendor] create order from epicor credit failed", e);
+      return { ok: false, error: e?.message || "Failed to create credit order." };
+    }
+  }
+
+  // ---- "Match to requisition" modal ---------------------------------------
+  // Pairs a scanned credit with one of the waiting-on-credit return
+  // requisitions, lets the parts be corrected/added, then creates the credit
+  // order through the same handler the plain "Create credit order" button uses.
+
+  // A credit line as the modal edits it: "part" is line code + number in one
+  // field (same convention as the Verify Invoice modal), __orig preserves the
+  // fields the OCR captured that aren't editable here (e.g. originalInvoice).
+  // "origin" is display-only — it's what lets the modal show at a glance whether
+  // a line was read off the scan, copied from the requisition, or typed by hand.
+  function creditLineDraft(li = {}, origin = "scan") {
+    return {
+      part: `${li.partLineCode || ""} ${li.partNumber || ""}`.trim(),
+      partDescription: li.partDescription || "",
+      quantity: li.quantity ?? "",
+      costPrice: li.costPrice ?? "",
+      origin,
+      __orig: li,
+    };
+  }
+  const CREDIT_LINE_ORIGINS = {
+    scan: { label: "Scanned", className: "bg-indigo-50 text-indigo-700 border-indigo-200" },
+    manual: { label: "Manual", className: "bg-slate-100 text-slate-600 border-slate-200" },
+  };
+  // Compare a credit line's part against a requisition part. Same normalization
+  // the stock reconciliation uses (uppercase, single-spaced) so "matched" here
+  // means the same thing it will mean when the credit is archived.
+  const normalizePartKey = (v) => String(v || "").trim().toUpperCase().replace(/\s+/g, " ");
+
+  // Requisitions that are waiting on a credit — the only ones a credit can be
+  // matched to, per the Returns Management model.
+  // Built from the UNFILTERED items on purpose: returnsView uses the age-filtered
+  // list, and a requisition that has been waiting weeks for its credit is exactly
+  // what those filters hide — matching must never be shown a short list.
+  const waitingCreditSlips = useMemo(
+    () =>
+      deriveReturnSlips(items, returnSlips, UNSPECIFIED_WAREHOUSE).filter(
+        (s) => s.status === "waiting"
+      ),
+    [items, returnSlips, UNSPECIFIED_WAREHOUSE]
+  );
+
+  async function handleOpenCreditMatch(credit) {
+    if (!credit) return;
+    setCreditMatch(credit);
+    setCreditMatchSlipId("");
+    setCreditMatchLines(
+      (Array.isArray(credit.lineItems) ? credit.lineItems : []).map((li) => creditLineDraft(li, "scan"))
+    );
+    setCreditMatchPages([]);
+    setCreditMatchPageIdx(0);
+    setCreditMatchError("");
+
+    const pageNames =
+      Array.isArray(credit.pageImageFileNames) && credit.pageImageFileNames.length
+        ? credit.pageImageFileNames
+        : credit.imageFileName
+        ? [credit.imageFileName]
+        : [];
+    if (!pageNames.length || !api?.readEpicorInvoiceImage) return;
+    setCreditMatchLoading(true);
+    try {
+      const loaded = await Promise.all(
+        pageNames.map(async (fileName) => {
+          try {
+            const res = await api.readEpicorInvoiceImage(fileName);
+            return { fileName, dataUrl: res?.ok ? res.dataUrl || "" : "" };
+          } catch {
+            return { fileName, dataUrl: "" };
+          }
+        })
+      );
+      setCreditMatchPages(loaded);
+      if (!loaded.some((p) => p.dataUrl)) {
+        setCreditMatchError("Could not load the scanned credit image.");
+      }
+    } finally {
+      setCreditMatchLoading(false);
+    }
+  }
+
+  function handleCloseCreditMatch() {
+    setCreditMatch(null);
+    setCreditMatchSlipId("");
+    setCreditMatchLines([]);
+    setCreditMatchPages([]);
+    setCreditMatchPageIdx(0);
+    setCreditMatchError("");
+  }
+
+  function updateCreditMatchLine(idx, field, value) {
+    setCreditMatchLines((prev) => prev.map((l, i) => (i === idx ? { ...l, [field]: value } : l)));
+  }
+  function removeCreditMatchLine(idx) {
+    setCreditMatchLines((prev) => prev.filter((_, i) => i !== idx));
+  }
+  function addCreditMatchLine() {
+    setCreditMatchLines((prev) => prev.concat(creditLineDraft({}, "manual")));
+  }
+
+  // Turn the edited drafts back into the stored lineItem shape.
+  // costPrice/costPriceValue are kept in step so an edited price can't be
+  // overridden by a stale __orig.
+  function creditMatchLineItems() {
+    return creditMatchLines
+      .map((l) => {
+        const part = String(l.part || "").trim();
+        const { partLineCode, partNumber } = splitPartCode(part);
+        const priceStr = l.costPrice === undefined || l.costPrice === null ? "" : String(l.costPrice).trim();
+        const priceNum = parseFloat(priceStr);
+        const qtyNum = parseFloat(String(l.quantity ?? "").trim());
+        const qty = Number.isFinite(qtyNum) && qtyNum !== 0 ? Math.abs(qtyNum) : 1;
+        const extended = Number.isFinite(priceNum) ? priceNum * qty : null;
+        return {
+          ...(l.__orig || { addedToOutstanding: false, source: "epicor-credit-ocr" }),
+          partLineCode,
+          partNumber,
+          partDescription: String(l.partDescription || "").trim(),
+          quantity: String(qty),
+          ...(priceStr !== ""
+            ? {
+                costPrice: priceStr,
+                costPriceValue: Number.isFinite(priceNum) ? priceNum : null,
+                ...(extended !== null
+                  ? { extended: extended.toFixed(2), extendedValue: Number(extended.toFixed(2)) }
+                  : {}),
+              }
+            : {}),
+        };
+      })
+      .filter((li) => String(li.partNumber || "").trim() || String(li.partDescription || "").trim());
+  }
+
+  async function handleConfirmCreditMatch() {
+    if (!creditMatch) return;
+    setCreditMatchSaving(true);
+    setCreditMatchError("");
+    try {
+      const slip = waitingCreditSlips.find((s) => s.id === creditMatchSlipId) || null;
+      const res = await handleCreateOrderFromEpicorCredit(creditMatch, {
+        lineItems: creditMatchLineItems(),
+        returnSlip: slip,
+      });
+      if (!res?.ok) throw new Error(res?.error || "Failed to add the credit to orders.");
+      if (res.duplicate) {
+        // An order already exists for this credit number, so nothing was
+        // written — say so instead of closing as if the edits had been saved.
+        // The requisition is deliberately left alone in this case.
+        setCreditMatchError(
+          `An order for credit ${creditMatch.invoiceNumber} already exists, so nothing was changed. Remove that order first if you want to redo it.`
+        );
+        return;
+      }
+
+      // Adding the credit to orders IS the credit coming back, so the matched
+      // requisition is done: its parts leave Returns exactly as the slip's own
+      // "Credit received" button would remove them. Archiving the credit order
+      // later is then a no-op for stock — reconcileCreditReturnAgainstStock
+      // leaves everything untouched when it finds no matching RETURNS item, so
+      // the two paths can't double-remove.
+      if (slip?.id) {
+        const settled = await settleSlipAsCreditReceived(slip.id);
+        if (!settled.ok) {
+          setCreditMatchError(
+            `The credit order was created, but this requisition's parts could not be removed from Returns (${settled.error}). Close this and use "Credit received" on the requisition in Returns Management.`
+          );
+          return;
+        }
+      }
+      handleCloseCreditMatch();
+    } catch (e) {
+      console.error("[vendor] credit match failed", e);
+      setCreditMatchError(e?.message || "Failed to add the credit to orders.");
+    } finally {
+      setCreditMatchSaving(false);
+    }
+  }
+
+  // Undo the above: delete the credit order and flip the row back to "not in
+  // records". Mirrors handleRemoveEpicorOrder.
+  async function handleRemoveEpicorCreditOrder(credit) {
+    const creditNum = String(credit?.invoiceNumber || "").trim();
+    if (!creditNum) return { ok: false, error: "This credit has no number." };
+    const res = await handleDeleteOrder(creditNum, "world");
+    if (!res.ok) return res;
+    const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+    const creditKey = norm(creditNum);
+    setEpicorCredits((prev) =>
+      prev.map((c) => (norm(c.invoiceNumber) === creditKey ? { ...c, known: false, created: false } : c))
+    );
+    return { ok: true };
   }
 
   // Load whatever Transbec credit memos are already cached (no Gmail call) —
@@ -3644,6 +4237,10 @@ export default function App() {
         ? epicorReviewLinesDraft
             .map((l) => {
               const part = String(l.part || "").trim();
+              // Split "CODE NUMBER" back apart — storing it whole with an empty
+              // line code is what made resolveCapCode miss every line-code rule
+              // (and emit a leading space). See splitPartCode.
+              const { partLineCode, partNumber } = splitPartCode(part);
               // Keep costPrice (raw) and costPriceValue (parsed number) in step:
               // downstream cost math prefers costPriceValue, so writing only the
               // string would let a stale __orig number override an edited price.
@@ -3651,8 +4248,8 @@ export default function App() {
               const priceNum = parseFloat(priceStr);
               return {
                 ...(l.__orig || { addedToOutstanding: false, source: "epicor-ocr" }),
-                partLineCode: "",
-                partNumber: part,
+                partLineCode,
+                partNumber,
                 quantity: l.quantity,
                 partDescription: String(l.partDescription || "").trim(),
                 ...(priceStr !== ""
@@ -4325,22 +4922,23 @@ export default function App() {
     }
   }
 
-  // Whenever either Sage flow is on, subscribe to orders.json updates pushed
-  // from main (the main process owns the file watcher itself) and do one read.
-  const sageAnyEnabled = sagePoEnabled || sageInvoiceEnabled;
+  // Subscribe to orders.json updates pushed from main (the main process owns
+  // the file watcher itself) and do one read. This runs on EVERY machine, not
+  // only the one with a Sage flow enabled: the machine that sends an order to
+  // Sage has to see the result the processing machine writes back, or its copy
+  // goes stale and the next save reverts the order to "not entered yet".
   useEffect(() => {
     if (!api?.onOrdersUpdated) return;
-    if (!sageAnyEnabled) {
-      setSageReadyOrders([]);
-      setSageInvoiceReadyOrders([]);
-      return;
-    }
     let cancelled = false;
     const offOrdersUpdated = api.onOrdersUpdated((arr) => handleOrdersUpdatedExternally(arr));
     (async () => {
       try {
-        const latest = await api.readOrders?.();
-        if (!cancelled) handleOrdersUpdatedExternally(latest);
+        const [latest, pathRes] = await Promise.all([api.readOrders?.(), api.getOrdersPath?.()]);
+        if (cancelled) return;
+        // This push now marks orders as initialized before the view is ever
+        // opened, which would skip loadOrders() and leave the path blank.
+        if (pathRes?.path) setOrdersSourcePath(pathRes.path);
+        handleOrdersUpdatedExternally(latest);
       } catch (e) {
         console.error("[orders] read error", e);
       }
@@ -4349,7 +4947,7 @@ export default function App() {
       cancelled = true;
       offOrdersUpdated?.();
     };
-  }, [sageAnyEnabled, ordersDirty]);
+  }, [ordersDirty]);
 
   // Purchase-order processing: claim/release the cross-machine lock.
   useEffect(() => {
@@ -4666,6 +5264,12 @@ export default function App() {
     () => epicorScanInvoices.filter((i) => !i.known && !i.created && !i.assignedTo).length,
     [epicorScanInvoices]
   );
+  // Derived, not tracked: the credit list is the single source of truth for how
+  // many credits are scanned / still missing an order, so the two can't drift.
+  const epicorCreditUnknownCount = useMemo(
+    () => epicorCredits.filter((c) => !c.known && !c.created).length,
+    [epicorCredits]
+  );
   const viewBadges = { epicor: epicorNeedsAssignmentCount };
 
   const currentViewMeta = VIEWS.find((v) => v.id === currentView);
@@ -4856,6 +5460,7 @@ export default function App() {
             handleOrderCheckboxChange={handleOrderCheckboxChange}
             handleOrderFieldChange={handleOrderFieldChange}
             onMarkForSage={handleOrderSageTrigger}
+            onReleaseSageLock={handleReleaseSageLock}
             onBubblifyOrder={handleBubblifyOrder}
             onMarkComplete={handleMarkComplete}
             onReconcileTotals={handleReconcileTotals}
@@ -4942,6 +5547,19 @@ export default function App() {
             onLoadScanned={handleLoadEpicorScanned}
             assignableOrders={assignableEpicorOrders}
             onAssignOrder={handleAssignEpicorInvoiceToOrder}
+            onScanCredits={handleScanEpicorCredits}
+            epicorCreditScanning={epicorCreditScanning}
+            epicorCredits={epicorCredits}
+            epicorCreditError={epicorCreditScanError}
+            epicorCreditStatusLog={epicorCreditScanLog}
+            epicorCreditScannedCount={epicorCredits.length}
+            epicorCreditUnknownCount={epicorCreditUnknownCount}
+            onLoadScannedCredits={handleLoadEpicorScannedCredits}
+            onRescanCredit={handleRescanEpicorCredit}
+            onCreateCreditOrder={handleCreateOrderFromEpicorCredit}
+            onRemoveCreditOrder={handleRemoveEpicorCreditOrder}
+            onMatchCreditToRequisition={handleOpenCreditMatch}
+            waitingRequisitionCount={waitingCreditSlips.length}
             transbecCredits={transbecCredits}
             transbecCreditScanning={transbecCreditScanning}
             transbecCreditError={transbecCreditError}
@@ -5217,6 +5835,412 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {creditMatch && (() => {
+        const selectedSlip = waitingCreditSlips.find((s) => s.id === creditMatchSlipId) || null;
+        const slipItems = selectedSlip?.items || [];
+        const money = (n) =>
+          `$${(Number.isFinite(Number(n)) ? Number(n) : 0).toFixed(2)}`;
+        const slipExpected = slipItems.reduce((sum, it) => {
+          const q = Number(it?.quantity);
+          return sum + (Number(it?.cost) || 0) * (Number.isFinite(q) && q > 0 ? q : 1);
+        }, 0);
+        const linesTotal = creditMatchLines.reduce((sum, l) => {
+          const price = parseFloat(String(l.costPrice ?? "").trim());
+          const q = parseFloat(String(l.quantity ?? "").trim());
+          return sum + (Number.isFinite(price) ? price : 0) * (Number.isFinite(q) && q !== 0 ? Math.abs(q) : 1);
+        }, 0);
+        const creditTotal = Number(creditMatch.balanceDue);
+        const activePage = creditMatchPages[creditMatchPageIdx];
+        // Part numbers on each side, so both lists can show whether they line up.
+        // This is what catches an OCR'd part number that reads slightly
+        // differently from the one on the stock item.
+        const creditLineKeys = new Set(
+          creditMatchLines.map((l) => normalizePartKey(l.part)).filter(Boolean)
+        );
+        const slipKeys = new Set(
+          slipItems.map((it) => normalizePartKey(it.itemcode)).filter(Boolean)
+        );
+        const unmatchedSlipCount = slipItems.filter(
+          (it) => !creditLineKeys.has(normalizePartKey(it.itemcode))
+        ).length;
+        return (
+          <div className="fixed inset-0 z-[5000] bg-slate-900/60 flex items-center justify-center px-4">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-[95vw] p-6 flex flex-col gap-4 max-h-[95vh]">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-semibold text-slate-800">
+                  Match Credit {creditMatch.invoiceNumber} to a Return Requisition
+                </h2>
+                <button className="text-slate-500 hover:text-slate-700" onClick={handleCloseCreditMatch}>
+                  x
+                </button>
+              </div>
+              {creditMatchError && (
+                <div className="text-sm text-red-600 whitespace-pre-line">{creditMatchError}</div>
+              )}
+              <p className="text-sm text-slate-500">
+                The scan on the left is read-only. Step 2 picks the requisition this credit pays
+                back; step 3 is the only thing written to the order — start from what was scanned,
+                correct it against the requisition, then add it. Adding closes the matched
+                requisition out of Returns Management.
+              </p>
+              <div className="grid gap-4 lg:grid-cols-2 overflow-auto">
+                {/* Left: the scanned credit, page by page. */}
+                <div className="flex flex-col gap-2 min-w-0">
+                  <div className="text-sm font-semibold text-slate-700">
+                    1 · Scanned credit <span className="font-normal text-slate-400">(read-only)</span>
+                  </div>
+                  {creditMatchPages.length > 1 && (
+                    <div className="flex flex-wrap gap-1">
+                      {creditMatchPages.map((p, i) => (
+                        <button
+                          key={p.fileName}
+                          className={`px-3 py-1 rounded-full text-xs font-semibold border ${
+                            i === creditMatchPageIdx
+                              ? "bg-indigo-600 text-white border-indigo-600"
+                              : "bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50"
+                          }`}
+                          onClick={() => setCreditMatchPageIdx(i)}
+                        >
+                          Page {i + 1}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div className="border rounded-2xl bg-slate-50 flex items-start justify-center overflow-auto max-h-[70vh]">
+                    {creditMatchLoading ? (
+                      <div className="text-sm text-slate-500 p-6">Loading credit image…</div>
+                    ) : activePage?.dataUrl ? (
+                      <img
+                        src={activePage.dataUrl}
+                        alt={`Scanned credit page ${creditMatchPageIdx + 1}`}
+                        className="max-w-full h-auto"
+                      />
+                    ) : (
+                      <div className="text-sm text-slate-500 p-6">No image available.</div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Right: pick a requisition, then fix up the parts. */}
+                <div className="flex flex-col gap-4 min-w-0">
+                  <div className="flex flex-wrap gap-4 text-sm rounded-2xl border border-indigo-100 bg-indigo-50/40 px-3 py-2">
+                    <div>
+                      <div className="text-xs uppercase tracking-wide text-slate-400">
+                        Credit # (scanned)
+                      </div>
+                      <div className="font-bold text-amber-700">{creditMatch.invoiceNumber || "—"}</div>
+                    </div>
+                    {creditMatch.date && (
+                      <div>
+                        <div className="text-xs uppercase tracking-wide text-slate-400">
+                          Date (scanned)
+                        </div>
+                        <div className="font-semibold text-slate-800">{creditMatch.date}</div>
+                      </div>
+                    )}
+                    {Number.isFinite(creditTotal) && (
+                      <div>
+                        <div className="text-xs uppercase tracking-wide text-slate-400">
+                          Credit total (scanned, incl. tax)
+                        </div>
+                        <div className="font-semibold text-slate-800">{money(creditTotal)}</div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">
+                      2 · Match to a return requisition{" "}
+                      <span className="font-normal text-slate-400">(waiting on credit)</span>
+                    </label>
+                    {waitingCreditSlips.length === 0 ? (
+                      <p className="text-sm text-slate-500 border rounded-xl px-3 py-2 bg-slate-50">
+                        No requisitions are waiting on a credit. You can still add this credit to
+                        orders without matching it.
+                      </p>
+                    ) : (
+                      <select
+                        className="w-full border rounded-xl px-3 py-2 text-sm"
+                        value={creditMatchSlipId}
+                        onChange={(e) => setCreditMatchSlipId(e.target.value)}
+                      >
+                        <option value="">No requisition — just add the credit</option>
+                        {waitingCreditSlips.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {[
+                              s.warehouse || "Unspecified",
+                              s.date || "no date",
+                              s.po ? `PO ${s.po}` : "no PO",
+                              `${s.items.length} part(s)`,
+                            ].join(" · ")}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+
+                  {selectedSlip && (
+                    <div className="border rounded-2xl p-3 bg-slate-50/60">
+                      <div className="flex items-center justify-between mb-1">
+                        <div className="text-sm font-semibold text-slate-700">
+                          Parts on this requisition
+                        </div>
+                        <div className="text-xs text-slate-500">
+                          Expected credit {money(slipExpected)}
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-400 mb-2">
+                        Read-only reference — this is what you sent back. Correct the scanned lines
+                        in step 3 until they match.
+                      </p>
+                      {slipItems.length > 0 && (
+                        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 mb-2">
+                          Adding this credit marks the requisition as credited:{" "}
+                          <span className="font-semibold">{slipItems.length} part(s)</span> will be
+                          removed from Returns Management, the same as its “Credit received” button.
+                        </p>
+                      )}
+                      {slipItems.length === 0 && (
+                        <p className="text-xs text-slate-500">This requisition has no parts.</p>
+                      )}
+                      <div className="space-y-1 max-h-40 overflow-auto">
+                        {slipItems.map((it) => {
+                          const onCredit = creditLineKeys.has(normalizePartKey(it.itemcode));
+                          return (
+                            <div
+                              key={it.uid}
+                              className={`flex items-center justify-between gap-2 text-xs bg-white border rounded-lg px-2 py-1 ${
+                                onCredit ? "border-slate-100" : "border-amber-300 bg-amber-50/50"
+                              }`}
+                            >
+                              <span className="font-semibold text-slate-800">{it.itemcode || "—"}</span>
+                              <span className="text-slate-500 whitespace-nowrap">
+                                {Math.max(1, Number(it.quantity) || 1)} × {money(it.cost)}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded-full border font-semibold whitespace-nowrap ${
+                                  onCredit
+                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                    : "bg-amber-100 text-amber-800 border-amber-300"
+                                }`}
+                                title={
+                                  onCredit
+                                    ? "A step 3 line has this exact part number"
+                                    : "No step 3 line has this part number — either the credit doesn't cover it, or the scanned part number needs correcting"
+                                }
+                              >
+                                {onCredit ? "on credit" : "not on credit"}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="rounded-2xl border-2 border-emerald-200 p-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="text-sm font-semibold text-slate-700">
+                        3 · Lines to create on the order ({creditMatchLines.length})
+                      </div>
+                      <button
+                        className="px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50"
+                        onClick={addCreditMatchLine}
+                      >
+                        + Add line
+                      </button>
+                    </div>
+                    <p className="text-xs text-slate-400 mb-2">
+                      The scanned credit&apos;s lines, editable — fix any part number, qty or cost
+                      the OCR read wrong so they match the requisition above. This is the{" "}
+                      <strong>only</strong> thing saved to the order. Enter quantities and costs as
+                      positive numbers; they are flipped to negative when the order is created, so
+                      Sage receives a credit.
+                    </p>
+                    {selectedSlip && unmatchedSlipCount > 0 && (
+                      <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 mb-2">
+                        <span className="font-semibold">{unmatchedSlipCount}</span> part(s) on the
+                        requisition have no matching line here. Check the part numbers read off the
+                        scan — they must match exactly for the credit to clear that stock.
+                      </p>
+                    )}
+                    {creditMatchLines.length === 0 && (
+                      <p className="text-xs text-slate-500 mb-2">
+                        The scan produced no lines — add them by hand below.
+                      </p>
+                    )}
+                    {creditMatchLines.length > 0 && (
+                      <div className="flex items-center gap-1 px-1 pb-1 text-[10px] uppercase tracking-wide text-slate-400">
+                        <span className="w-20">From</span>
+                        <span className="w-36">Part</span>
+                        <span className="flex-1 min-w-[8rem]">Description</span>
+                        <span className="w-16">Qty</span>
+                        <span className="w-24">Unit cost</span>
+                        {selectedSlip && <span className="w-14">Match</span>}
+                        <span className="w-6" />
+                      </div>
+                    )}
+                    <div className="space-y-1 max-h-56 overflow-auto">
+                      {creditMatchLines.map((l, idx) => {
+                        const origin = CREDIT_LINE_ORIGINS[l.origin] || CREDIT_LINE_ORIGINS.manual;
+                        return (
+                          <div key={idx} className="flex flex-wrap items-center gap-1">
+                            <span
+                              className={`w-20 text-center px-1 py-1 rounded-full text-[10px] font-semibold border ${origin.className}`}
+                              title={
+                                l.origin === "scan"
+                                  ? "Read off the scanned credit by OCR — edit it if it was read wrong"
+                                  : "Added by hand"
+                              }
+                            >
+                              {origin.label}
+                            </span>
+                            {/* Red when there's no line code: capRules needs it
+                                to pick the right Sage code, and a blank one
+                                silently falls back to the default template. */}
+                            <input
+                              className={`border rounded-lg px-2 py-1 text-xs w-36 ${
+                                l.part.trim() && !splitPartCode(l.part).partLineCode
+                                  ? "border-red-400 bg-red-50 text-red-700"
+                                  : ""
+                              }`}
+                              placeholder="Part"
+                              title={
+                                l.part.trim() && !splitPartCode(l.part).partLineCode
+                                  ? "No line code — type it in front of the part number (e.g. \"DOR 626-304\") so the right Sage code is used"
+                                  : undefined
+                              }
+                              value={l.part}
+                              onChange={(e) => updateCreditMatchLine(idx, "part", e.target.value)}
+                            />
+                            <input
+                              className="border rounded-lg px-2 py-1 text-xs flex-1 min-w-[8rem]"
+                              placeholder="Description"
+                              value={l.partDescription}
+                              onChange={(e) => updateCreditMatchLine(idx, "partDescription", e.target.value)}
+                            />
+                            <input
+                              className="border rounded-lg px-2 py-1 text-xs w-16"
+                              placeholder="Qty"
+                              value={l.quantity}
+                              onChange={(e) => updateCreditMatchLine(idx, "quantity", e.target.value)}
+                            />
+                            <input
+                              className="border rounded-lg px-2 py-1 text-xs w-24"
+                              placeholder="Cost"
+                              value={l.costPrice}
+                              onChange={(e) => updateCreditMatchLine(idx, "costPrice", e.target.value)}
+                            />
+                            {selectedSlip && (() => {
+                              const onSlip = slipKeys.has(normalizePartKey(l.part));
+                              return (
+                                <span
+                                  className={`w-14 text-center px-1 py-1 rounded-full text-[10px] font-semibold border ${
+                                    onSlip
+                                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                      : "bg-amber-100 text-amber-800 border-amber-300"
+                                  }`}
+                                  title={
+                                    onSlip
+                                      ? "This part number is on the matched requisition"
+                                      : "This part number is NOT on the matched requisition — check what the OCR read"
+                                  }
+                                >
+                                  {onSlip ? "✓" : "no"}
+                                </span>
+                              );
+                            })()}
+                            <button
+                              className="w-6 py-1 rounded-lg text-xs border border-red-200 text-red-600 bg-white hover:bg-red-50"
+                              title="Remove this line"
+                              onClick={() => removeCreditMatchLine(idx)}
+                            >
+                              x
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {/* Second entry point, below the list: you notice a part the
+                        OCR missed while reading down the rows, not while looking
+                        at the header. Sits outside the scroll box so it's always
+                        reachable. */}
+                    <button
+                      className="mt-1 w-full rounded-lg border border-dashed border-indigo-200 px-2 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-50"
+                      onClick={addCreditMatchLine}
+                      title="Add a part the scan missed"
+                    >
+                      + Add a line the scan missed
+                    </button>
+                    <div className="mt-3 border-t pt-2 space-y-1 text-xs">
+                      <div className="flex flex-wrap gap-4 text-slate-600">
+                        <span>
+                          Lines subtotal <span className="font-semibold">{money(linesTotal)}</span>
+                        </span>
+                        {selectedSlip && (
+                          <span>
+                            Requisition expects{" "}
+                            <span className="font-semibold">{money(slipExpected)}</span>
+                          </span>
+                        )}
+                        {Number.isFinite(creditTotal) && (
+                          <span className="text-slate-400">
+                            Scanned credit {money(creditTotal)} (incl. tax)
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-slate-500">
+                        Saved to the order as{" "}
+                        <span className="font-semibold text-red-600">
+                          -{money(linesTotal).slice(1)}
+                        </span>{" "}
+                        in lines
+                        {Number.isFinite(creditTotal) && (
+                          <>
+                            {" "}
+                            and a billed total of{" "}
+                            <span className="font-semibold text-red-600">
+                              -{money(creditTotal).slice(1)}
+                            </span>
+                          </>
+                        )}
+                        . Unit costs stay positive; the quantities carry the minus.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-3 border-t pt-4">
+                <button
+                  className="px-4 py-2 rounded-xl border text-sm"
+                  onClick={handleCloseCreditMatch}
+                  disabled={creditMatchSaving}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold disabled:opacity-60"
+                  onClick={handleConfirmCreditMatch}
+                  disabled={creditMatchSaving}
+                  title={
+                    selectedSlip
+                      ? "Create the credit order (negative quantities for Sage) and close this requisition out of Returns Management"
+                      : "Create the credit order in Order Management (Credit filter) from the step 3 lines, with negative quantities for Sage"
+                  }
+                >
+                  {creditMatchSaving
+                    ? "Adding…"
+                    : selectedSlip
+                    ? "Add to Orders & close requisition"
+                    : "Add to Orders"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {epicorReviewOrder && (
         <div className="fixed inset-0 z-[5000] bg-slate-900/60 flex items-center justify-center px-4">

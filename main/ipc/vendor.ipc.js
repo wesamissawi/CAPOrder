@@ -60,8 +60,10 @@ const registerVendorIpc = (ipcMain, deps) => {
   const {
     openEpicor,
     scanEpicorRange,
+    scanEpicorCredits,
     rescanEpicorInvoice,
     getEpicorScannedInvoices,
+    getEpicorScannedCredits,
     shell,
     getEpicorAssetsDir,
     fetchTransbecInvoices,
@@ -86,8 +88,16 @@ const registerVendorIpc = (ipcMain, deps) => {
     return scanEpicorRange(payload);
   });
 
+  ipcMain.handle('vendor:scan-epicor-credits', async (_evt, payload) => {
+    return scanEpicorCredits(payload);
+  });
+
   ipcMain.handle('vendor:get-epicor-scanned', async () => {
     return getEpicorScannedInvoices();
+  });
+
+  ipcMain.handle('vendor:get-epicor-scanned-credits', async () => {
+    return getEpicorScannedCredits();
   });
 
   ipcMain.handle('vendor:rescan-epicor-invoice', async (_evt, payload) => {

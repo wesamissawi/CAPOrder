@@ -16,6 +16,43 @@ function daysAgoIso(days) {
   ).padStart(2, "0")}`;
 }
 
+// A part with no line code can't be resolved to the right Sage code: capRules
+// branches on the line code (NGK + an oxygen sensor -> NTK, TRK -> dash
+// stripped), so a blank one silently falls through to the default template.
+// Flag it loudly on the scan rather than letting it reach Sage as the wrong part.
+function missingLineCode(li) {
+  return !String(li?.partLineCode || "").trim();
+}
+
+function PartRow({ li, rowKey }) {
+  const noCode = missingLineCode(li);
+  return (
+    <div
+      key={rowKey}
+      className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border px-2 py-1 ${
+        noCode ? "border-red-300 bg-red-50" : "border-slate-100 bg-white/70"
+      }`}
+    >
+      <span className={`font-semibold ${noCode ? "text-red-700" : "text-slate-800"}`}>
+        {`${li.partLineCode || ""} ${li.partNumber || ""}`.trim() || "—"}
+      </span>
+      {noCode && (
+        <span
+          className="px-2 py-0.5 rounded-full text-[10px] font-semibold border bg-red-100 text-red-700 border-red-300 whitespace-nowrap"
+          title="OCR did not read a line code for this part. Without it the Sage code falls back to the default template and may be wrong — fix it before creating the order."
+        >
+          no line code
+        </span>
+      )}
+      {li.partDescription && (
+        <span className="text-slate-500 flex-1 min-w-0 truncate">{li.partDescription}</span>
+      )}
+      {li.quantity && <span className="text-slate-500">Qty {li.quantity}</span>}
+      {li.costPrice && <span className="font-medium text-slate-700">${li.costPrice}</span>}
+    </div>
+  );
+}
+
 // Default trailing window for the Transbec Credits Gmail search — a plain
 // "check for credits" click looks back 5 days rather than scanning every
 // credit memo Transbec has ever sent.
@@ -40,6 +77,19 @@ export default function EpicorView({
   onLoadScanned,
   assignableOrders,
   onAssignOrder,
+  onScanCredits,
+  epicorCreditScanning,
+  epicorCredits,
+  epicorCreditError,
+  epicorCreditStatusLog,
+  epicorCreditScannedCount,
+  epicorCreditUnknownCount,
+  onLoadScannedCredits,
+  onRescanCredit,
+  onCreateCreditOrder,
+  onRemoveCreditOrder,
+  onMatchCreditToRequisition,
+  waitingRequisitionCount,
   transbecCredits,
   transbecCreditScanning,
   transbecCreditError,
@@ -60,6 +110,13 @@ export default function EpicorView({
   const [assignSelection, setAssignSelection] = useState({}); // { [invoiceNumber]: orderReference }
   const [assignStatus, setAssignStatus] = useState({}); // { [invoiceNumber]: "assigning" | "assigned" | "error:msg" }
   const [creditCreateStatus, setCreditCreateStatus] = useState({}); // { [creditMemoNumber]: "adding" | "created" | "removing" | "error:msg" }
+  // Epicor credit scan (same portal/date range as the invoice scan above, with
+  // the "Credit" document type ticked). Pinning a credit memo # returns just
+  // that one document.
+  const [creditMemoNumber, setCreditMemoNumber] = useState("");
+  const [onlyNewEpicorCredits, setOnlyNewEpicorCredits] = useState(true);
+  const [epicorCreditStatus, setEpicorCreditStatus] = useState({}); // { [creditNumber]: "adding" | "created" | "removing" | "error:msg" }
+  const [epicorCreditRescanStatus, setEpicorCreditRescanStatus] = useState({});
   const [creditFromDate, setCreditFromDate] = useState(daysAgoIso(TRANSBEC_CREDIT_DEFAULT_LOOKBACK_DAYS));
   const [creditToDate, setCreditToDate] = useState(todayIso());
   const [onlyNewCredits, setOnlyNewCredits] = useState(true);
@@ -68,9 +125,65 @@ export default function EpicorView({
   // (no browser) so the page isn't empty after a restart.
   useEffect(() => {
     if (onLoadScanned) onLoadScanned();
+    if (onLoadScannedCredits) onLoadScannedCredits();
     if (onLoadTransbecCredits) onLoadTransbecCredits();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const epicorCreditList = Array.isArray(epicorCredits) ? epicorCredits : [];
+  const visibleEpicorCredits = useMemo(
+    // Keep just-created credits visible (with a badge) even though they now
+    // count as "on file" — same rule the invoice list uses.
+    () =>
+      onlyNewEpicorCredits
+        ? epicorCreditList.filter((c) => !c.known || c.created)
+        : epicorCreditList,
+    [epicorCreditList, onlyNewEpicorCredits]
+  );
+
+  async function handleCreateEpicorCreditOrder(credit) {
+    const key = credit.invoiceNumber || "";
+    setEpicorCreditStatus((p) => ({ ...p, [key]: "adding" }));
+    try {
+      const res = await onCreateCreditOrder(credit);
+      if (!res?.ok) throw new Error(res?.error || "Failed to create credit order.");
+      setEpicorCreditStatus((p) => ({ ...p, [key]: "created" }));
+    } catch (e) {
+      setEpicorCreditStatus((p) => ({ ...p, [key]: "error:" + (e?.message || "Failed") }));
+    }
+  }
+
+  async function handleRemoveEpicorCreditOrder(credit) {
+    const key = credit.invoiceNumber || "";
+    setEpicorCreditStatus((p) => ({ ...p, [key]: "removing" }));
+    try {
+      const res = await onRemoveCreditOrder(credit);
+      if (!res?.ok) throw new Error(res?.error || "Failed to remove credit order.");
+      setEpicorCreditStatus((p) => {
+        const next = { ...p };
+        delete next[key];
+        return next;
+      });
+    } catch (e) {
+      setEpicorCreditStatus((p) => ({ ...p, [key]: "error:" + (e?.message || "Failed") }));
+    }
+  }
+
+  async function handleRescanEpicorCredit(credit) {
+    const key = credit.invoiceNumber || "";
+    setEpicorCreditRescanStatus((p) => ({ ...p, [key]: "rescanning" }));
+    try {
+      const res = await onRescanCredit(credit);
+      if (!res?.ok) throw new Error(res?.error || "Rescan failed.");
+      setEpicorCreditRescanStatus((p) => {
+        const next = { ...p };
+        delete next[key];
+        return next;
+      });
+    } catch (e) {
+      setEpicorCreditRescanStatus((p) => ({ ...p, [key]: "error:" + (e?.message || "Failed") }));
+    }
+  }
 
   const credits = Array.isArray(transbecCredits) ? transbecCredits : [];
   const creditUnknownCount = useMemo(
@@ -248,10 +361,43 @@ export default function EpicorView({
               )}
             </div>
           </div>
+          {onScanCredits && (
+            <div className="border-t border-slate-100 pt-3 grid gap-3 md:grid-cols-[1fr,auto] items-end">
+              <div className="flex flex-col gap-1">
+                <label className="text-xs uppercase tracking-wide text-slate-500">
+                  Credit memo #
+                </label>
+                <input
+                  type="text"
+                  className="rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                  placeholder="Credit memo number to look up"
+                  value={creditMemoNumber}
+                  maxLength={25}
+                  onChange={(e) => setCreditMemoNumber(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && creditMemoNumber.trim() && !epicorCreditScanning) {
+                      onScanCredits(creditMemoNumber.trim());
+                    }
+                  }}
+                />
+              </div>
+              <button
+                className="rounded-xl bg-amber-600 text-white px-4 py-2 font-semibold shadow hover:bg-amber-700 disabled:opacity-60 whitespace-nowrap"
+                onClick={() => onScanCredits(creditMemoNumber.trim())}
+                disabled={!creditMemoNumber.trim() || epicorCreditScanning}
+                title="Look this credit memo up on Epicor by number — it gets OCR'd, saved and totalled exactly like an invoice"
+              >
+                {epicorCreditScanning ? "Looking up…" : "Scan for Credits"}
+              </button>
+            </div>
+          )}
           <p className="text-xs text-slate-400">
             The list below shows every invoice scanned so far (loaded from cache, no browser). Run a
             scan to add invoices for a new date range — a browser window opens and each invoice is
             read with OCR; ones scanned before are reused from cache.
+            {onScanCredits
+              ? " Credits are looked up by credit memo number instead (Epicor has no date search for them) — the dates above don’t apply."
+              : ""}
           </p>
           {error && <div className="text-sm text-red-600 whitespace-pre-line">{error}</div>}
           {Array.isArray(statusLog) && statusLog.length > 0 && (
@@ -262,6 +408,303 @@ export default function EpicorView({
           )}
         </div>
       </Card>
+
+      {onScanCredits && (
+        <Card>
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-xl font-semibold text-slate-800">Epicor Credits</h2>
+                <p className="text-sm text-slate-500">
+                  Credit memos looked up on the Epicor portal by credit memo number. Each one is
+                  OCR'd, imaged and totalled the same way an invoice is.{" "}
+                  <strong>Create credit order</strong> puts it in the <strong>Credit</strong> filter
+                  in Order Management, where it can be matched to the return requisition it pays
+                  back.
+                </p>
+              </div>
+              {epicorCreditScannedCount > 0 && (
+                <label className="flex items-center gap-2 text-sm text-slate-600 whitespace-nowrap">
+                  <input
+                    type="checkbox"
+                    checked={onlyNewEpicorCredits}
+                    onChange={(e) => setOnlyNewEpicorCredits(e.target.checked)}
+                  />
+                  Show only credits I don&apos;t have
+                </label>
+              )}
+            </div>
+            {epicorCreditScannedCount > 0 && (
+              <div className="flex flex-wrap items-center gap-4 text-sm">
+                <span className="text-slate-600">
+                  Found{" "}
+                  <span className="font-semibold text-slate-800">{epicorCreditScannedCount}</span>{" "}
+                  credit(s)
+                </span>
+                <span
+                  className={`px-2 py-1 rounded-full border font-semibold ${
+                    epicorCreditUnknownCount > 0
+                      ? "bg-amber-100 text-amber-800 border-amber-300"
+                      : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                  }`}
+                >
+                  {epicorCreditUnknownCount} not in records
+                </span>
+              </div>
+            )}
+            {epicorCreditError && (
+              <div className="text-sm text-red-600 whitespace-pre-line">{epicorCreditError}</div>
+            )}
+            {Array.isArray(epicorCreditStatusLog) && epicorCreditStatusLog.length > 0 && (
+              <details className="text-xs text-slate-500">
+                <summary className="cursor-pointer select-none">Credit scan log</summary>
+                <pre className="mt-2 whitespace-pre-wrap text-slate-500">
+                  {epicorCreditStatusLog.join("\n")}
+                </pre>
+              </details>
+            )}
+            {epicorCreditList.length === 0 && !epicorCreditScanning && (
+              <p className="text-sm text-slate-500">
+                No credits looked up yet. Enter a credit memo # above and click{" "}
+                <strong>Scan for Credits</strong>.
+              </p>
+            )}
+            {epicorCreditList.length > 0 && visibleEpicorCredits.length === 0 && (
+              <p className="text-sm text-slate-500">
+                Every credit found is already in your records. 🎉 Untick “only new” to see them all.
+              </p>
+            )}
+            {visibleEpicorCredits.map((credit, idx) => {
+              const key = credit.invoiceNumber || "";
+              const total = Number(credit.balanceDue);
+              const status = epicorCreditStatus[key];
+              const isError = status?.startsWith("error:");
+              const rescan = epicorCreditRescanStatus[key];
+              const rescanError = rescan?.startsWith("error:");
+              const created = credit.known || credit.created || status === "created";
+              const creditNoCodeCount = (credit.lineItems || []).filter(missingLineCode).length;
+              // Every saved page of the credit memo, so a 2-page one can be
+              // opened page by page. Older entries only ever have page 1.
+              const pages =
+                Array.isArray(credit.pageImageFileNames) && credit.pageImageFileNames.length
+                  ? credit.pageImageFileNames
+                  : credit.imageFileName
+                  ? [credit.imageFileName]
+                  : [];
+              return (
+                <div
+                  key={`${key || "credit"}-${idx}`}
+                  className={`rounded-xl border px-3 py-2 ${
+                    created ? "border-slate-100" : "border-amber-300 bg-amber-50/40"
+                  }`}
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-4">
+                      <div>
+                        <div className="text-xs uppercase tracking-wide text-slate-400 leading-none mb-0.5">
+                          Credit #
+                        </div>
+                        <div className="text-xl font-bold text-amber-700">{key || "—"}</div>
+                      </div>
+                      {credit.date && (
+                        <div>
+                          <div className="text-xs uppercase tracking-wide text-slate-400 leading-none mb-0.5">
+                            Date
+                          </div>
+                          <div className="text-base font-semibold text-slate-800">{credit.date}</div>
+                        </div>
+                      )}
+                      {Number.isFinite(total) && (
+                        <div>
+                          <div className="text-xs uppercase tracking-wide text-slate-400 leading-none mb-0.5">
+                            Credit Total
+                          </div>
+                          <div className="text-base font-semibold text-slate-800">
+                            ${total.toFixed(2)}
+                          </div>
+                        </div>
+                      )}
+                      {credit.reference && (
+                        <div>
+                          <div className="text-xs uppercase tracking-wide text-slate-400 leading-none mb-0.5">
+                            Order ref (OCR)
+                          </div>
+                          <div className="text-base font-semibold text-slate-800">
+                            {credit.reference}
+                          </div>
+                        </div>
+                      )}
+                      {credit.accountName && (
+                        <div>
+                          <div className="text-xs uppercase tracking-wide text-slate-400 leading-none mb-0.5">
+                            Account
+                          </div>
+                          <div className="text-sm font-medium text-slate-700">
+                            {credit.accountName}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex flex-col items-end gap-2">
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <span
+                          className={`px-2 py-1 rounded-full text-xs border ${
+                            created
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : "bg-amber-100 text-amber-800 border-amber-300 font-semibold"
+                          }`}
+                        >
+                          {created ? "On file" : "Not in records"}
+                        </span>
+                        {pages.length > 1 && (
+                          <span
+                            className="px-2 py-1 rounded-full text-xs border bg-slate-50 text-slate-600 border-slate-200"
+                            title="Every page of this credit memo was read — parts continuing onto later pages are included below."
+                          >
+                            {pages.length} pages read
+                          </span>
+                        )}
+                        {/* Set only when the document says it continues but we
+                            did not read past page 1 (i.e. it was scanned before
+                            multi-page support). Only page 1 was ever downloaded,
+                            so "Rescan this one" can't recover page 2 — the credit
+                            has to be looked up again. */}
+                        {credit.continuesOnNextPage && (
+                          <span
+                            className="px-2 py-1 rounded-full text-xs border bg-orange-50 text-orange-700 border-orange-200"
+                            title="This credit memo continues on another page that was never downloaded, so parts printed there are missing. Look the credit up again above to re-read every page."
+                          >
+                            Page 1 only — look up again
+                          </span>
+                        )}
+                      </div>
+                      {pages.length > 0 && onViewInvoiceImage && (
+                        <div className="flex flex-wrap justify-end gap-1">
+                          {pages.map((fileName, pageIdx) => (
+                            <button
+                              key={fileName}
+                              className="px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50"
+                              onClick={() => onViewInvoiceImage(fileName)}
+                            >
+                              {pages.length > 1
+                                ? `View page ${pageIdx + 1}`
+                                : "View credit image"}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {onRescanCredit && (
+                        <button
+                          className={`px-3 py-1 rounded-full text-xs font-semibold border disabled:opacity-60 ${
+                            rescanError
+                              ? "bg-red-50 text-red-600 border-red-200"
+                              : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                          }`}
+                          disabled={rescan === "rescanning"}
+                          title={
+                            rescanError
+                              ? rescan.slice(6)
+                              : "Re-OCR this credit's saved image (refreshes its total and parts) — no Epicor login needed"
+                          }
+                          onClick={() => handleRescanEpicorCredit(credit)}
+                        >
+                          {rescan === "rescanning"
+                            ? "Rescanning…"
+                            : rescanError
+                            ? "Retry rescan"
+                            : "Rescan this one"}
+                        </button>
+                      )}
+                      {!created && onMatchCreditToRequisition && (
+                        <button
+                          className="px-3 py-1 rounded-full text-xs font-semibold border bg-white text-amber-700 border-amber-300 hover:bg-amber-50"
+                          title={
+                            waitingRequisitionCount
+                              ? `Match this credit to one of the ${waitingRequisitionCount} requisition(s) waiting on a credit, check the parts, then add it to orders`
+                              : "Review the parts on this credit and add it to orders (no requisitions are waiting on a credit right now)"
+                          }
+                          onClick={() => onMatchCreditToRequisition(credit)}
+                        >
+                          Match to requisition…
+                        </button>
+                      )}
+                      {created
+                        ? onRemoveCreditOrder && (
+                            <button
+                              className="px-3 py-1 rounded-full text-xs font-semibold border bg-white text-red-600 border-red-200 hover:bg-red-50 disabled:opacity-60"
+                              disabled={status === "removing"}
+                              title={
+                                isError
+                                  ? status.slice(6)
+                                  : "Remove this credit order from Order Management"
+                              }
+                              onClick={() => handleRemoveEpicorCreditOrder(credit)}
+                            >
+                              {status === "removing"
+                                ? "Removing…"
+                                : isError
+                                ? "Retry remove"
+                                : "Remove"}
+                            </button>
+                          )
+                        : onCreateCreditOrder && (
+                            <button
+                              className={`px-3 py-1 rounded-full text-xs font-semibold border disabled:opacity-60 ${
+                                isError
+                                  ? "bg-red-50 text-red-600 border-red-200"
+                                  : "bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50"
+                              }`}
+                              disabled={status === "adding" || !key}
+                              title={
+                                isError
+                                  ? status.slice(6)
+                                  : "Add this credit to Order Management under the Credit filter"
+                              }
+                              onClick={() => handleCreateEpicorCreditOrder(credit)}
+                            >
+                              {status === "adding"
+                                ? "Creating…"
+                                : isError
+                                ? "Retry create"
+                                : "Create credit order"}
+                            </button>
+                          )}
+                    </div>
+                  </div>
+                  {(credit.poNumber || credit.releaseNumber) && (
+                    <div className="mt-2 text-xs text-slate-500">
+                      {credit.poNumber ? `PO: ${credit.poNumber}` : ""}
+                      {credit.poNumber && credit.releaseNumber ? " · " : ""}
+                      {credit.releaseNumber ? `Release: ${credit.releaseNumber}` : ""}
+                    </div>
+                  )}
+                  {Array.isArray(credit.lineItems) && credit.lineItems.length > 0 && (
+                    <details className="mt-2 text-xs text-slate-600" open={creditNoCodeCount > 0}>
+                      <summary className="cursor-pointer select-none text-slate-500">
+                        {credit.lineItems.length} returned part(s) read from credit (OCR — verify)
+                        {creditNoCodeCount > 0 && (
+                          <span className="ml-2 px-2 py-0.5 rounded-full text-[10px] font-semibold border bg-red-100 text-red-700 border-red-300">
+                            {creditNoCodeCount} with no line code
+                          </span>
+                        )}
+                      </summary>
+                      <div className="mt-2 space-y-1">
+                        {credit.lineItems.map((li, li2) => (
+                          <PartRow
+                            key={`${key || "credit"}-${idx}-part-${li2}`}
+                            rowKey={`${key || "credit"}-${idx}-part-${li2}`}
+                            li={li}
+                          />
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
 
       {onFetchTransbecCredits && (
         <Card>
@@ -760,30 +1203,30 @@ export default function EpicorView({
                 {inv.releaseNumber ? `Release: ${inv.releaseNumber}` : ""}
               </div>
             )}
-            {Array.isArray(inv.lineItems) && inv.lineItems.length > 0 && (
-              <details className="mt-2 text-xs text-slate-600">
-                <summary className="cursor-pointer select-none text-slate-500">
-                  {inv.lineItems.length} part(s) read from invoice (OCR — verify)
-                </summary>
-                <div className="mt-2 space-y-1">
-                  {inv.lineItems.map((li, li2) => (
-                    <div
-                      key={`${inv.invoiceNumber || "inv"}-${idx}-part-${li2}`}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-100 bg-white/70 px-2 py-1"
-                    >
-                      <span className="font-semibold text-slate-800">
-                        {`${li.partLineCode || ""} ${li.partNumber || ""}`.trim() || "—"}
+            {Array.isArray(inv.lineItems) && inv.lineItems.length > 0 && (() => {
+              const noCodeCount = inv.lineItems.filter(missingLineCode).length;
+              return (
+                <details className="mt-2 text-xs text-slate-600" open={noCodeCount > 0}>
+                  <summary className="cursor-pointer select-none text-slate-500">
+                    {inv.lineItems.length} part(s) read from invoice (OCR — verify)
+                    {noCodeCount > 0 && (
+                      <span className="ml-2 px-2 py-0.5 rounded-full text-[10px] font-semibold border bg-red-100 text-red-700 border-red-300">
+                        {noCodeCount} with no line code
                       </span>
-                      {li.partDescription && (
-                        <span className="text-slate-500 flex-1 min-w-0 truncate">{li.partDescription}</span>
-                      )}
-                      {li.quantity && <span className="text-slate-500">Qty {li.quantity}</span>}
-                      {li.costPrice && <span className="font-medium text-slate-700">${li.costPrice}</span>}
-                    </div>
-                  ))}
-                </div>
-              </details>
-            )}
+                    )}
+                  </summary>
+                  <div className="mt-2 space-y-1">
+                    {inv.lineItems.map((li, li2) => (
+                      <PartRow
+                        key={`${inv.invoiceNumber || "inv"}-${idx}-part-${li2}`}
+                        rowKey={`${inv.invoiceNumber || "inv"}-${idx}-part-${li2}`}
+                        li={li}
+                      />
+                    ))}
+                  </div>
+                </details>
+              );
+            })()}
           </Card>
         );
       })}
