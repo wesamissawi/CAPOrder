@@ -40,6 +40,7 @@ const { openEpicorSite } = require('./src/scrapers/epicorScraper');
 const { fetchTransbecInvoices } = require('./src/scrapers/transbecInvoice');
 const { fetchBestbuyInvoices } = require('./src/scrapers/bestbuyInvoice');
 const { fetchBestbuyCreditInvoices } = require('./src/scrapers/bestbuyCreditInvoice');
+const { fetchProforceCreditInvoices } = require('./src/scrapers/proforceCreditInvoice');
 const { fetchTransbecCreditInvoices } = require('./src/scrapers/transbecCreditInvoice');
 const { fetchCbkInvoices } = require('./src/scrapers/cbkInvoice');
 const { runInteractiveAuth, verifyConnection } = require('./src/scrapers/gmail.auth');
@@ -138,6 +139,9 @@ function getBestbuyInvoiceCachePath() {
 function getBestbuyCreditInvoiceCachePath() {
   return path.join(getGmailAssetsDir(), 'bestbuy_credit_invoice_cache.json');
 }
+function getProforceCreditInvoiceCachePath() {
+  return path.join(getGmailAssetsDir(), 'proforce_credit_invoice_cache.json');
+}
 function getCbkInvoiceCachePath() {
   return path.join(getGmailAssetsDir(), 'cbk_invoice_cache.json');
 }
@@ -171,7 +175,23 @@ function normalizeAppConfig(raw = {}) {
     Number.isFinite(timeoutMsRaw) && timeoutMsRaw >= 10000 ? Math.round(timeoutMsRaw) : 5 * 60 * 1000;
   const itemsReplaceAll =
     typeof raw.itemsReplaceAll === 'boolean' ? raw.itemsReplaceAll : true;
-  return { sharedDataDir, ahkExePath, sageAhkTimeoutMs, itemsReplaceAll, instanceDataDir: INSTANCE_DIR };
+  const scrapersHeadless =
+    typeof raw.scrapersHeadless === 'boolean' ? raw.scrapersHeadless : false;
+  const qtyThresholdRaw = Number(raw.qtyDiscrepancyThreshold);
+  const qtyDiscrepancyThreshold = Number.isFinite(qtyThresholdRaw) && qtyThresholdRaw >= 0 ? qtyThresholdRaw : 15;
+  const qtyTaxRateRaw = Number(raw.qtyDiscrepancyTaxRate);
+  const qtyDiscrepancyTaxRate =
+    Number.isFinite(qtyTaxRateRaw) && qtyTaxRateRaw >= 0 && qtyTaxRateRaw <= 1 ? qtyTaxRateRaw : 0.13;
+  return {
+    sharedDataDir,
+    ahkExePath,
+    sageAhkTimeoutMs,
+    itemsReplaceAll,
+    scrapersHeadless,
+    qtyDiscrepancyThreshold,
+    qtyDiscrepancyTaxRate,
+    instanceDataDir: INSTANCE_DIR,
+  };
 }
 function ensureAppConfigFile() {
   try { ensureDir(path.dirname(INSTANCE_PATHS.appConfig)); } catch {}
@@ -236,6 +256,10 @@ function getSageAhkTimeoutMs() {
 function getItemsReplaceAll() {
   const cfg = readAppConfig();
   return cfg?.itemsReplaceAll !== false;
+}
+function getScrapersHeadless() {
+  const cfg = readAppConfig();
+  return cfg?.scrapersHeadless === true;
 }
 function validateAhkExePath(targetPath) {
   const candidate = (targetPath || '').trim();
@@ -317,13 +341,21 @@ function validateWritable(targetDir) {
     return { ok: false, error: e?.message || 'Not writable' };
   }
 }
+// Read-then-write rather than fs.copyFileSync: on Windows a copy goes through
+// CopyFileExW, which opens the SOURCE denying delete-sharing. Every write backs
+// the file up first, so on the shared drive that left a window — as long as it
+// takes to copy orders.json over SMB — where no other machine could rename its
+// temp file over the original, surfacing as
+//   EPERM: operation not permitted, rename '...orders.json.tmp.NNN' -> '...orders.json'
+// fs.readFileSync shares delete, so the same backup no longer blocks a
+// concurrent atomic replace.
 function backupFile(srcPath, suffix = '.bak') {
   try {
     if (!fs.existsSync(srcPath)) return;
     const dir = path.dirname(srcPath);
     const base = path.basename(srcPath);
     const target = path.join(dir, `${base}${suffix}`);
-    fs.copyFileSync(srcPath, target);
+    fs.writeFileSync(target, fs.readFileSync(srcPath));
   } catch (e) {
     console.warn('[backup] failed', srcPath, e);
   }
@@ -1455,6 +1487,7 @@ const vendorOrdersService = createVendorOrdersService({
   getArchivedOrderRefs,
   getOrdersFile,
   loadConfig,
+  getScrapersHeadless,
   getWorldOrders,
   getTransbecOrders,
   getProforceOrders,
@@ -1467,6 +1500,7 @@ const vendorOrdersService = createVendorOrdersService({
   fetchBestbuyCreditInvoicesScraper: fetchBestbuyCreditInvoices,
   fetchCbkInvoicesScraper: fetchCbkInvoices,
   fetchTransbecCreditInvoicesScraper: fetchTransbecCreditInvoices,
+  fetchProforceCreditInvoicesScraper: fetchProforceCreditInvoices,
   getEpicorAssetsDir,
   getGmailAssetsDir,
   getTransbecInvoiceCachePath,
@@ -1474,6 +1508,7 @@ const vendorOrdersService = createVendorOrdersService({
   getBestbuyCreditInvoiceCachePath,
   getCbkInvoiceCachePath,
   getTransbecCreditInvoiceCachePath,
+  getProforceCreditInvoiceCachePath,
   runInteractiveAuth,
   verifyConnection,
   saveConfig,
@@ -1491,6 +1526,7 @@ const {
   scanEpicorRange,
   scanEpicorCredits,
   rescanEpicorInvoice,
+  setEpicorInvoiceUnmatchable,
   getEpicorScannedInvoices,
   getEpicorScannedCredits,
   fetchTransbecInvoices: fetchTransbecInvoicesService,
@@ -1498,6 +1534,7 @@ const {
   fetchBestbuyCreditInvoices: fetchBestbuyCreditInvoicesService,
   fetchCbkInvoices: fetchCbkInvoicesService,
   fetchTransbecCreditInvoices: fetchTransbecCreditInvoicesService,
+  fetchProforceCreditInvoices: fetchProforceCreditInvoicesService,
   getTransbecCreditInvoices,
   resetTransbecCreditScans,
   connectGmail,
@@ -1524,13 +1561,44 @@ const {
   migrateBusinessFilesToShared,
 } = appConfigService;
 
+// Replacing an existing file on Windows needs delete access on the DESTINATION,
+// so anything holding it open without delete-sharing (antivirus mid-scan, an
+// editor, AHK's FileRead, a stale SMB oplock) fails the rename with
+// EPERM/EACCES/EBUSY. Those holders let go within milliseconds, so retry
+// briefly instead of failing the save outright.
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+// Blocking pause that doesn't peg a core. This runs on the main process, but
+// only on a rare error path and for at most ~400ms across all retries.
+function sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch {}
+}
+
+function renameWithRetry(tmp, filePath, attempts = 5) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      fs.renameSync(tmp, filePath);
+      if (attempt > 0)
+        console.warn('[writeJsonAtomic] rename succeeded on attempt', attempt + 1, filePath);
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (!RENAME_RETRY_CODES.has(e?.code) || attempt === attempts - 1) break;
+      sleepSync(40 * (attempt + 1));
+    }
+  }
+  console.error('[writeJsonAtomic] rename failed after', attempts, 'attempts', filePath, lastErr);
+  throw lastErr;
+}
+
 function writeJsonAtomic(filePath, jsonString) {
   const dir = path.dirname(filePath);
   ensureDir(dir);
   const tmp = path.join(dir, `${path.basename(filePath)}.tmp.${process.pid}.${Date.now()}`);
   fs.writeFileSync(tmp, jsonString, 'utf-8');
   try {
-    fs.renameSync(tmp, filePath);
+    renameWithRetry(tmp, filePath);
   } catch (e) {
     try { fs.unlinkSync(tmp); } catch {}
     throw e;
@@ -1974,6 +2042,7 @@ function registerAllIpc() {
     scanEpicorRange,
     scanEpicorCredits,
     rescanEpicorInvoice,
+    setEpicorInvoiceUnmatchable,
     getEpicorScannedInvoices,
     getEpicorScannedCredits,
     // Passed as functions, not static strings: the shared folder is a runtime
@@ -1985,6 +2054,7 @@ function registerAllIpc() {
     fetchBestbuyCreditInvoices: fetchBestbuyCreditInvoicesService,
     fetchCbkInvoices: fetchCbkInvoicesService,
     fetchTransbecCreditInvoices: fetchTransbecCreditInvoicesService,
+    fetchProforceCreditInvoices: fetchProforceCreditInvoicesService,
     getTransbecCreditInvoices,
     resetTransbecCreditScans,
     connectGmail,

@@ -163,12 +163,16 @@ WriteJSON(path, obj) {
             return false
         f.Write(text)
         f.Close()
-        FileMove, %tmpPath%, %path%, 1  ; 1 = overwrite
-        if (ErrorLevel) {
-            FileDelete, %tmpPath%
-            return false
+        ; Retry the replace: a reader or scanner holding the destination open
+        ; without delete-sharing denies the rename for a few milliseconds.
+        Loop, 5 {
+            FileMove, %tmpPath%, %path%, 1  ; 1 = overwrite
+            if (!ErrorLevel)
+                return true
+            Sleep, % 40 * A_Index
         }
-        return true
+        FileDelete, %tmpPath%
+        return false
     } catch e {
         return false
     }

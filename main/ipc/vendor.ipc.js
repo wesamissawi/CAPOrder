@@ -62,6 +62,7 @@ const registerVendorIpc = (ipcMain, deps) => {
     scanEpicorRange,
     scanEpicorCredits,
     rescanEpicorInvoice,
+    setEpicorInvoiceUnmatchable,
     getEpicorScannedInvoices,
     getEpicorScannedCredits,
     shell,
@@ -71,6 +72,7 @@ const registerVendorIpc = (ipcMain, deps) => {
     fetchBestbuyCreditInvoices,
     fetchCbkInvoices,
     fetchTransbecCreditInvoices,
+    fetchProforceCreditInvoices,
     getTransbecCreditInvoices,
     resetTransbecCreditScans,
     connectGmail,
@@ -102,6 +104,12 @@ const registerVendorIpc = (ipcMain, deps) => {
 
   ipcMain.handle('vendor:rescan-epicor-invoice', async (_evt, payload) => {
     return rescanEpicorInvoice(payload);
+  });
+
+  // Flag a scanned document as matching no scraped order, so the assign picker
+  // stops offering it. Reversible — pass unmatchable: false to put it back.
+  ipcMain.handle('vendor:set-epicor-invoice-unmatchable', async (_evt, payload) => {
+    return setEpicorInvoiceUnmatchable(payload);
   });
 
   ipcMain.handle('vendor:open-epicor-invoice-image', async (_evt, fileName) => {
@@ -163,6 +171,22 @@ const registerVendorIpc = (ipcMain, deps) => {
 
   ipcMain.handle('vendor:get-transbec-credits', async () => {
     return getTransbecCreditInvoices();
+  });
+
+  // --- Proforce CREDIT invoices from Gmail (Proforce never emails regular
+  // invoices - those come straight off the portal scrape in proforceScraper.js
+  // - only credit memos, from noreply@epartconnection.com. PDFs land in the
+  // same gmail data dir, so viewing/printing reuse the handlers below by name) ---
+  ipcMain.handle('vendor:fetch-proforce-credit-invoices', async (_evt, payload) => {
+    return fetchProforceCreditInvoices(payload);
+  });
+
+  ipcMain.handle('vendor:open-proforce-invoice-image', async (_evt, fileName) => {
+    return openVendorImage(getGmailAssetsDir(), fileName);
+  });
+
+  ipcMain.handle('vendor:read-proforce-invoice-image', async (_evt, fileName) => {
+    return readVendorImage(getGmailAssetsDir(), fileName);
   });
 
   // DEV-ONLY: wipe the Transbec credit scan cache + downloaded PDFs so a

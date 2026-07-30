@@ -54,6 +54,9 @@ export default function SettingsView() {
   const [ahkStatus, setAhkStatus] = useState("Not set");
   const [sageTimeoutSeconds, setSageTimeoutSeconds] = useState(300);
   const [itemsReplaceAll, setItemsReplaceAll] = useState(true);
+  const [scrapersHeadless, setScrapersHeadless] = useState(false);
+  const [qtyDiscrepancyThreshold, setQtyDiscrepancyThreshold] = useState(15);
+  const [qtyDiscrepancyTaxRatePercent, setQtyDiscrepancyTaxRatePercent] = useState(13);
   const [updateStatus, setUpdateStatus] = useState("idle");
   const [updateMessage, setUpdateMessage] = useState("");
   const [updateVersion, setUpdateVersion] = useState("");
@@ -166,6 +169,15 @@ export default function SettingsView() {
         setSageTimeoutSeconds(300);
       }
       setItemsReplaceAll(res.config?.itemsReplaceAll !== false);
+      setScrapersHeadless(res.config?.scrapersHeadless === true);
+      const qtyThresholdRaw = Number(res.config?.qtyDiscrepancyThreshold);
+      setQtyDiscrepancyThreshold(Number.isFinite(qtyThresholdRaw) && qtyThresholdRaw >= 0 ? qtyThresholdRaw : 15);
+      const qtyTaxRateRaw = Number(res.config?.qtyDiscrepancyTaxRate);
+      setQtyDiscrepancyTaxRatePercent(
+        Number.isFinite(qtyTaxRateRaw) && qtyTaxRateRaw >= 0 && qtyTaxRateRaw <= 1
+          ? Math.round(qtyTaxRateRaw * 1000) / 10
+          : 13
+      );
       await refreshAhkStatus(incomingAhk);
       setStatus("");
       await refreshSummary();
@@ -295,6 +307,15 @@ export default function SettingsView() {
         ahkExePath: trimmedAhk,
         sageAhkTimeoutMs: nextTimeoutMs,
         itemsReplaceAll: Boolean(itemsReplaceAll),
+        scrapersHeadless: Boolean(scrapersHeadless),
+        qtyDiscrepancyThreshold:
+          Number.isFinite(Number(qtyDiscrepancyThreshold)) && Number(qtyDiscrepancyThreshold) >= 0
+            ? Number(qtyDiscrepancyThreshold)
+            : 15,
+        qtyDiscrepancyTaxRate:
+          Number.isFinite(Number(qtyDiscrepancyTaxRatePercent)) && Number(qtyDiscrepancyTaxRatePercent) >= 0
+            ? Number(qtyDiscrepancyTaxRatePercent) / 100
+            : 0.13,
       });
       if (!res?.ok) throw new Error(res?.error || "Failed to save app config.");
       setStatus("Saved.");
@@ -1027,6 +1048,58 @@ export default function SettingsView() {
               </label>
               <div className="text-xs text-slate-500">
                 Disable for partial updates that should not delete missing items.
+              </div>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">
+                Scraper Browser Visibility
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={scrapersHeadless}
+                  onChange={(e) => setScrapersHeadless(e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                <span>Run scraper logins headless (no visible browser window)</span>
+              </label>
+              <div className="text-xs text-slate-500">
+                Applies to World, Transbec, CBK, Tiger, BestBuy, and Proforce order fetches. Epicor
+                always opens visibly since you interact with it directly.
+              </div>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">
+                Qty Discrepancy Threshold ($)
+              </label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={qtyDiscrepancyThreshold}
+                onChange={(e) => setQtyDiscrepancyThreshold(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+              <div className="text-xs text-slate-500">
+                When a confirmed billed total is off from the line items total by more than this,
+                Order Management shows a "Confirm Quantities" button instead of "Send to Sage".
+              </div>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">
+                Qty Discrepancy Tax Rate (%)
+              </label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={qtyDiscrepancyTaxRatePercent}
+                onChange={(e) => setQtyDiscrepancyTaxRatePercent(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+              <div className="text-xs text-slate-500">
+                Tax rate used only to estimate the expected total from line items for the check
+                above (default 13%, Ontario HST).
               </div>
             </div>
           </div>

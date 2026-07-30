@@ -139,6 +139,7 @@ async function parseOrderList(page) {
           orderDateRaw: dateRaw,
           referenceCol,
           status,
+          docType: type,
           totalRaw,
           total: money(totalRaw),
           paidRaw,

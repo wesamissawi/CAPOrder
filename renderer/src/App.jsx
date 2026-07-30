@@ -2,6 +2,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import api from "./api";
 import InvoicePreview from "./components/InvoicePreview";
+import AssignInvoiceModal from "./components/AssignInvoiceModal";
+import QtyConfirmModal from "./components/QtyConfirmModal";
 import DashboardView from "./views/DashboardView";
 import StockFlowView from "./views/StockFlowView";
 import OrderManagementView from "./views/OrderManagementView";
@@ -25,6 +27,22 @@ import {
 import { isOrderSageLocked, orderKeyMatches } from "./utils/sageLock";
 
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
+
+// Scanned Epicor invoices that belong to no order yet: OCR couldn't match them
+// to a reference (known), no epicorOnly order was created from them (created),
+// and they weren't hand-assigned (assignedTo). These are exactly the ones the
+// assign picker offers, and the same set the Epicor tab badges.
+//
+// `unmatchable` is the hand-set escape hatch: some scans have no counterpart on
+// our side at all (a counter sale, another branch's purchase, a re-scan of
+// something already filed), and without it they'd be re-offered on every future
+// match forever. It's persisted in the Epicor cache and reversible from the
+// Epicor tab, so this stays a display filter, never a deletion.
+function unassignedEpicorInvoices(invoices) {
+  return (Array.isArray(invoices) ? invoices : []).filter(
+    (i) => i && !i.known && !i.created && !i.assignedTo && !i.unmatchable
+  );
+}
 
 // Debug logger — prints to the renderer DevTools console AND forwards to the
 // main-process terminal (via api.debugLog) so logs can be copied from the
@@ -354,6 +372,18 @@ export default function App() {
   const [epicorOpening, setEpicorOpening] = useState(false);
   const [epicorStatus, setEpicorStatus] = useState("");
   const [epicorError, setEpicorError] = useState("");
+  // Open state for the "assign a scanned invoice to an order" picker.
+  // { orderReference, fromSageDate, toSageDate, invoiceNumber, fromOrders }
+  // fromOrders marks the Order Management entry point — only that one offers the
+  // "Get Invoice from Epicor" escape hatch (it's the only one with a specific
+  // order + date range to search on).
+  const [assignInvoiceModal, setAssignInvoiceModal] = useState(null);
+  // Pre-Sage quantity-vs-billed-total check (see utils/qtyDiscrepancy.js).
+  // Defaults mirror main.js's normalizeAppConfig fallback so the UI matches
+  // what's actually on disk before the config load below completes.
+  const [qtyDiscrepancyThreshold, setQtyDiscrepancyThreshold] = useState(15);
+  const [qtyDiscrepancyTaxRate, setQtyDiscrepancyTaxRate] = useState(0.13);
+  const [qtyConfirmModal, setQtyConfirmModal] = useState(null); // { order, refKey }
   const [epicorReviewOrder, setEpicorReviewOrder] = useState(null);
   const [epicorReviewImageDataUrl, setEpicorReviewImageDataUrl] = useState("");
   const [epicorReviewInvoiceDraft, setEpicorReviewInvoiceDraft] = useState("");
@@ -404,6 +434,17 @@ export default function App() {
   const [cbkFetching, setCbkFetching] = useState(false);
   const [cbkStatus, setCbkStatus] = useState("");
   const [cbkError, setCbkError] = useState("");
+  const [proforceCreditFetching, setProforceCreditFetching] = useState(false);
+  const [proforceCreditStatus, setProforceCreditStatus] = useState("");
+  const [proforceCreditError, setProforceCreditError] = useState("");
+  // Proforce credit orders already exist (unlike Epicor's OCR "discoveries")
+  // with real lineItems from the portal scrape, so matching them to a return
+  // requisition needs none of the Epicor modal's scan-image/line-correction
+  // steps — just pick a waiting slip and stamp the order with it.
+  const [proforceCreditMatch, setProforceCreditMatch] = useState(null); // the order being matched
+  const [proforceCreditMatchSlipId, setProforceCreditMatchSlipId] = useState("");
+  const [proforceCreditMatchSaving, setProforceCreditMatchSaving] = useState(false);
+  const [proforceCreditMatchError, setProforceCreditMatchError] = useState("");
   const [invoicePrintingRef, setInvoicePrintingRef] = useState("");
   const [printAllRunning, setPrintAllRunning] = useState(false);
   const [archiveAllRunning, setArchiveAllRunning] = useState(false);
@@ -442,6 +483,22 @@ export default function App() {
   useEffect(() => {
     editingItemUidRef.current = editingItemUid;
   }, [editingItemUid]);
+
+  // Load the qty-discrepancy threshold/tax rate once so Order Management can
+  // decide whether to show "Confirm Quantities" without SettingsView being
+  // open. SettingsView owns editing these; this just needs the read.
+  useEffect(() => {
+    api.getAppConfig?.()
+      .then((res) => {
+        if (!res?.ok) return;
+        const cfg = res.config || {};
+        const thresholdNum = Number(cfg.qtyDiscrepancyThreshold);
+        if (Number.isFinite(thresholdNum)) setQtyDiscrepancyThreshold(thresholdNum);
+        const taxRateNum = Number(cfg.qtyDiscrepancyTaxRate);
+        if (Number.isFinite(taxRateNum)) setQtyDiscrepancyTaxRate(taxRateNum);
+      })
+      .catch(() => {});
+  }, []);
 
 
 
@@ -2535,6 +2592,22 @@ export default function App() {
     sendOrderToSage(referenceKey, "purchase");
   }
 
+  function handleOpenQtyConfirm(refKey) {
+    const found = orders.find((o) => orderKeyMatches(o, refKey));
+    if (!found) return;
+    setQtyConfirmModal({ order: found, refKey });
+  }
+
+  // Quantities can only be lowered in the modal, so this always shrinks the
+  // billed-vs-line-items gap; saved immediately (like the billed-total edit)
+  // rather than left for "Save Changes" since it gates whether the order can
+  // go to Sage at all.
+  async function handleSaveQtyConfirm(refKey, nextLineItems, nextSageLineItems) {
+    const patch = { lineItems: nextLineItems };
+    if (nextSageLineItems) patch.sage_lineItems = nextSageLineItems;
+    await updateOrderByKeyAndSave(refKey, patch);
+  }
+
   function handleRenameBubble(bubbleId, newName) {
     const trimmed = newName.trim();
     if (!trimmed) return;
@@ -3048,12 +3121,39 @@ export default function App() {
         setCbkStatus("");
         setCbkError("");
         break;
+      case "proforce":
+        setProforceCreditStatus("");
+        setProforceCreditError("");
+        break;
       default:
         break;
     }
   }
 
+  // Order Management's "Get Invoice from Epicor" button. The invoice is often
+  // already scanned and sitting in the Epicor cache unassigned (OCR misread the
+  // order reference), in which case re-driving the portal is wasted work — so
+  // offer the assign picker first and only fall through to the real fetch when
+  // there's nothing to assign.
   async function handleOpenEpicor(reference, fromSageDate, toSageDate) {
+    let invoices = epicorScanInvoices;
+    // The Epicor view may never have been opened this session, so the cache
+    // hasn't been read yet. Load it (no browser) before deciding.
+    if (!invoices.length) invoices = await handleLoadEpicorScanned();
+    if (unassignedEpicorInvoices(invoices).length > 0) {
+      setAssignInvoiceModal({
+        orderReference: reference,
+        fromSageDate,
+        toSageDate,
+        invoiceNumber: "",
+        fromOrders: true,
+      });
+      return;
+    }
+    await runEpicorInvoiceFetch(reference, fromSageDate, toSageDate);
+  }
+
+  async function runEpicorInvoiceFetch(reference, fromSageDate, toSageDate) {
     if (!api?.openEpicor) return;
     try {
       setEpicorOpening(true);
@@ -3151,9 +3251,10 @@ export default function App() {
 
   // Load previously-scanned invoices straight from the on-disk cache (no
   // browser). Called when the Epicor view opens so a restart still shows prior
-  // results instead of an empty page.
+  // results instead of an empty page. Returns the list so callers that need it
+  // immediately (the assign picker) don't have to wait for a state flush.
   async function handleLoadEpicorScanned() {
-    if (!api?.getEpicorScanned) return;
+    if (!api?.getEpicorScanned) return [];
     try {
       setEpicorScanError("");
       const res = await api.getEpicorScanned();
@@ -3165,9 +3266,11 @@ export default function App() {
         unknown: res.unknownCount ?? invoices.filter((i) => !i.known).length,
       });
       await backfillEpicorOrders(invoices);
+      return invoices;
     } catch (e) {
       console.error("[vendor] load scanned epicor invoices failed", e);
       setEpicorScanError(e?.message || "Failed to load scanned invoices.");
+      return [];
     }
   }
 
@@ -3439,9 +3542,38 @@ export default function App() {
     }
   }
 
+  // Mark a scanned invoice as belonging to no order (or put it back). The flag
+  // lives in the Epicor cache on disk, so it survives restarts and applies on
+  // every machine — the point is that a scan you've already ruled out never
+  // clutters the picker again. Nothing about the scan itself is altered, so
+  // "Put back" fully restores it.
+  async function handleSetEpicorInvoiceUnmatchable(invoiceNumber, unmatchable = true) {
+    if (!api?.setEpicorInvoiceUnmatchable) return { ok: false, error: "Not supported." };
+    const invNum = String(invoiceNumber || "").trim();
+    if (!invNum) return { ok: false, error: "Missing invoice number." };
+    try {
+      const res = await api.setEpicorInvoiceUnmatchable(invNum, unmatchable);
+      if (!res?.ok) throw new Error(res?.error || "Failed to update the invoice.");
+      const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+      const invKey = norm(invNum);
+      setEpicorScanInvoices((prev) =>
+        prev.map((i) =>
+          norm(i.invoiceNumber) === invKey
+            ? { ...i, unmatchable, unmatchableAt: res.invoice?.unmatchableAt || "" }
+            : i
+        )
+      );
+      return { ok: true };
+    } catch (e) {
+      console.error("[vendor] set epicor invoice unmatchable failed", e);
+      setEpicorScanError(e?.message || "Failed to update the invoice.");
+      return { ok: false, error: e?.message || "Failed to update the invoice." };
+    }
+  }
+
   // Orders eligible to receive a scanned Epicor invoice: World orders (Epicor is
   // the World vendor portal) that don't have an invoice number yet, and that
-  // aren't themselves Epicor-generated. Sorted by reference for a stable dropdown.
+  // aren't themselves Epicor-generated. Sorted by reference for a stable list.
   const assignableEpicorOrders = useMemo(() => {
     return (orders || [])
       .filter(
@@ -3454,9 +3586,14 @@ export default function App() {
       )
       .map((o) => ({
         reference: String(o.reference).trim(),
-        label: `${String(o.reference).trim()}${o.seller || o.warehouse ? ` — ${o.seller || o.warehouse}` : ""}${
-          o.total || o.totalRaw ? ` (${o.totalRaw || o.total})` : ""
-        }`,
+        seller: o.seller || "",
+        warehouse: o.warehouse || "",
+        total: o.totalRaw || o.total || "",
+        sageDate: o.sageDate || o.orderDateRaw || "",
+        // Carried so the assign picker can show an order's parts next to the
+        // scanned invoice's — comparing parts is how you confirm a match when
+        // OCR lost the order reference.
+        lineItems: Array.isArray(o.lineItems) ? o.lineItems : [],
       }))
       .sort((a, b) => a.reference.localeCompare(b.reference));
   }, [orders]);
@@ -4751,6 +4888,162 @@ export default function App() {
     }
   }
 
+  // Proforce: credit memos are the ONLY thing Proforce emails — regular
+  // invoices are already fully captured by the portal scrape (proforceScraper.js
+  // flags a credit via isCreditFromLineItems at scrape time). So this fetch
+  // only attaches the PDF to an order that's already isCredit: true, purely so
+  // it can be viewed/printed — mirrors CBK's single-pass fetch/patch/save.
+  async function handleFetchProforceCreditInvoices(reference) {
+    if (!api?.fetchProforceCreditInvoices) return;
+    try {
+      setProforceCreditFetching(true);
+      setProforceCreditError("");
+      setProforceCreditStatus("");
+      const res = await api.fetchProforceCreditInvoices({ reference });
+      if (!res?.ok) throw new Error(res?.error || "Failed to fetch Proforce credit invoices.");
+      const logMsg = Array.isArray(res.statusLog) && res.statusLog.length ? res.statusLog.join("\n") : "";
+      const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
+
+      let appliedCount = 0;
+      const patchedOrders = orders.map((o) => {
+        if (!o?.reference || o.source !== "proforce" || !o.isCredit) return o;
+        // Skip once the credit PDF is already attached (don't overwrite on a re-fetch).
+        if (o.proforceCreditFile) return o;
+        const keys = [o.reference, o.source_invoice]
+          .map((v) => (v ? String(v).trim().toUpperCase() : ""))
+          .filter(Boolean);
+        const found = discoveries.find(
+          (d) => d.invoiceNumber && keys.includes(String(d.invoiceNumber).trim().toUpperCase())
+        );
+        if (!found || !found.fileName) return o;
+        appliedCount += 1;
+        return {
+          ...o,
+          proforceCreditFile: found.fileName,
+          lastUpdatedAt: new Date().toISOString(),
+          _localDirty: true,
+        };
+      });
+
+      let saveFailed = false;
+      if (appliedCount > 0) {
+        setOrders(patchedOrders);
+        setOrdersDirty(true);
+        if (api?.writeOrders) {
+          const normalized = normalizeOrdersForSave(patchedOrders);
+          try {
+            const saveRes = await api.writeOrders(normalized);
+            if (saveRes?.ok) {
+              setOrders(normalized);
+              ordersLastSavedRef.current = JSON.stringify(normalized);
+              setOrdersDirty(false);
+            } else {
+              saveFailed = true;
+              console.error("[vendor] failed to auto-save proforce credit matches", saveRes);
+            }
+          } catch (saveErr) {
+            saveFailed = true;
+            console.error("[vendor] failed to auto-save proforce credit matches", saveErr);
+          }
+        }
+      }
+
+      if (saveFailed) {
+        setProforceCreditError(
+          "Filled invoice data but could not save it to orders.json. It will not survive a page refresh or another fetch until you click Save. Click Save now to retry."
+        );
+      }
+      const appliedMsg = appliedCount > 0 ? `Filled credit invoice for ${appliedCount} order(s).` : "";
+      setProforceCreditStatus([logMsg, appliedMsg].filter(Boolean).join("\n") || "Checked Gmail.");
+    } catch (e) {
+      console.error("[vendor] proforce credit fetch error", e);
+      setProforceCreditError(e?.message || "Failed to fetch Proforce credit invoices.");
+    } finally {
+      setProforceCreditFetching(false);
+    }
+  }
+
+  async function handleViewProforceCreditInvoiceImage(order) {
+    const fileName = typeof order === "string" ? order : order?.proforceCreditFile;
+    if (!api?.openProforceInvoiceImage || !fileName) return;
+    try {
+      const res = await api.openProforceInvoiceImage(fileName);
+      if (!res?.ok) {
+        setProforceCreditError(res?.error || "Failed to open credit invoice image.");
+      }
+    } catch (e) {
+      console.error("[vendor] failed to open proforce credit invoice image", e);
+      setProforceCreditError(e?.message || "Failed to open credit invoice image.");
+    }
+  }
+
+  function handleOpenProforceCreditMatch(order) {
+    if (!order) return;
+    setProforceCreditMatch(order);
+    setProforceCreditMatchSlipId(order.returnSlipId || "");
+    setProforceCreditMatchError("");
+  }
+
+  function handleCloseProforceCreditMatch() {
+    setProforceCreditMatch(null);
+    setProforceCreditMatchSlipId("");
+    setProforceCreditMatchError("");
+  }
+
+  // Unlike the Epicor credit modal (which creates a brand-new order from a
+  // scanned OCR "discovery"), a Proforce credit is already a real order with
+  // real lineItems by the time this runs — matching just stamps the chosen
+  // slip's identity onto it for traceability, then settles that slip out of
+  // Returns Management exactly like the Epicor flow does (same
+  // settleSlipAsCreditReceived — the parts are removed from active stock,
+  // recorded as credit_received, no vendor-specific logic needed there).
+  async function handleConfirmProforceCreditMatch() {
+    if (!proforceCreditMatch || !api?.writeOrders) return;
+    const slip = waitingCreditSlips.find((s) => s.id === proforceCreditMatchSlipId) || null;
+    if (!slip) {
+      setProforceCreditMatchError("Pick a requisition to match, or cancel.");
+      return;
+    }
+    setProforceCreditMatchSaving(true);
+    setProforceCreditMatchError("");
+    try {
+      const key = proforceCreditMatch.reference;
+      const patch = {
+        returnSlipId: slip.id,
+        returnSlipWarehouse: slip.warehouse || "",
+        ...(slip.po ? { returnSlipPo: slip.po } : {}),
+        ...(slip.date ? { returnSlipDate: slip.date } : {}),
+        lastUpdatedAt: new Date().toISOString(),
+      };
+      const nextOrders = orders.map((o) =>
+        o?.reference === key && o.source === "proforce" ? { ...o, ...patch } : o
+      );
+      const normalized = normalizeOrdersForSave(nextOrders);
+      const saveRes = await api.writeOrders(normalized);
+      if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the matched order.");
+      setOrders(normalized);
+      ordersLastSavedRef.current = JSON.stringify(normalized);
+      setOrdersDirty(false);
+
+      const settled = await settleSlipAsCreditReceived(slip.id);
+      if (!settled.ok) throw new Error(settled.error || "Failed to settle the requisition slip.");
+
+      handleCloseProforceCreditMatch();
+      // Settling only clears the digital record — there's still a paper copy
+      // of the requisition on the board somewhere that this can't touch. Lead
+      // with the PO since that's what's actually written on the paper slip.
+      const slipLabel = slip.po
+        ? `PO ${slip.po}`
+        : `the requisition (${[slip.warehouse || "Unspecified", slip.date || "no date"].join(" · ")})`;
+      alert(`Mark ${slipLabel} as credited, then destroy it — it's settled now.`);
+    } catch (e) {
+      console.error("[vendor] failed to match proforce credit to requisition", e);
+      setProforceCreditMatchError(e?.message || "Failed to match credit to requisition.");
+    } finally {
+      setProforceCreditMatchSaving(false);
+    }
+  }
+
   // Sends page 1 of the invoice straight to the printer with no dialog, same
   // as Sage's print button — uses the printer configured in Settings, or the
   // OS default if none is set. Because it's silent there's no "did the user
@@ -4764,9 +5057,17 @@ export default function App() {
         ? order?.cbkInvoiceFile
         : vendor === "bestbuy-credit"
         ? order?.bestbuyCreditFile
+        : vendor === "proforce-credit"
+        ? order?.proforceCreditFile
         : order?.bestbuyInvoiceFile;
     const setError =
-      vendor === "transbec" ? setTransbecError : vendor === "cbk" ? setCbkError : setBestbuyError;
+      vendor === "transbec"
+        ? setTransbecError
+        : vendor === "cbk"
+        ? setCbkError
+        : vendor === "proforce-credit"
+        ? setProforceCreditError
+        : setBestbuyError;
     if (!fileName || !api?.printInvoiceSilent || !order?.reference) return;
     const printKey = `${vendor}:${order.reference}`;
     // Transbec credit memos print in full — the actual "Credit Memo BALANCE
@@ -4788,6 +5089,8 @@ export default function App() {
           ? "cbkInvoicePrinted"
           : vendor === "bestbuy-credit"
           ? "bestbuyCreditInvoicePrinted"
+          : vendor === "proforce-credit"
+          ? "proforceCreditInvoicePrinted"
           : "bestbuyInvoicePrinted";
       updateOrderByKeyAndSave(order.reference, { [field]: true, [`${field}At`]: new Date().toISOString() });
     } catch (e) {
@@ -4818,6 +5121,9 @@ export default function App() {
         }
         if (order.cbkInvoiceFile && !order.cbkInvoicePrinted) {
           await handlePrintVendorInvoice(order, "cbk");
+        }
+        if (order.proforceCreditFile && !order.proforceCreditInvoicePrinted) {
+          await handlePrintVendorInvoice(order, "proforce-credit");
         }
       }
     } finally {
@@ -5165,7 +5471,9 @@ export default function App() {
   }
 
   useEffect(() => {
-    const needsOrders = currentView === "order-management";
+    // The Epicor view needs orders too: assigning a scan to an order lists the
+    // orders still waiting on an invoice, and that list is derived from `orders`.
+    const needsOrders = currentView === "order-management" || currentView === "epicor";
     if (needsOrders && !ordersInitialized && !ordersLoading) {
       loadOrders();
     }
@@ -5260,10 +5568,11 @@ export default function App() {
 
   const hasSearch = ordersSearch.trim().length > 0;
 
-  const epicorNeedsAssignmentCount = useMemo(
-    () => epicorScanInvoices.filter((i) => !i.known && !i.created && !i.assignedTo).length,
+  const epicorUnassignedInvoices = useMemo(
+    () => unassignedEpicorInvoices(epicorScanInvoices),
     [epicorScanInvoices]
   );
+  const epicorNeedsAssignmentCount = epicorUnassignedInvoices.length;
   // Derived, not tracked: the credit list is the single source of truth for how
   // many credits are scanned / still missing an order, so the two can't drift.
   const epicorCreditUnknownCount = useMemo(
@@ -5524,12 +5833,23 @@ export default function App() {
             onViewCbkInvoiceImage={handleViewCbkInvoiceImage}
             onVerifyCbkInvoice={handleOpenEpicorReview}
             onPrintCbkInvoice={(order) => handlePrintVendorInvoice(order, "cbk")}
+            onFetchProforceCreditInvoices={handleFetchProforceCreditInvoices}
+            proforceCreditFetching={proforceCreditFetching}
+            proforceCreditStatus={proforceCreditStatus}
+            proforceCreditError={proforceCreditError}
+            onViewProforceCreditInvoiceImage={handleViewProforceCreditInvoiceImage}
+            onPrintProforceCreditInvoice={(order) => handlePrintVendorInvoice(order, "proforce-credit")}
+            onMatchProforceCreditToRequisition={handleOpenProforceCreditMatch}
+            waitingCreditSlipCount={waitingCreditSlips.length}
             invoicePrintingRef={invoicePrintingRef}
             onPrintAllNotPrinted={handlePrintAllNotPrinted}
             printAllRunning={printAllRunning}
             onArchiveAllNeedsArchive={handleArchiveAllNeedsArchive}
             archiveAllRunning={archiveAllRunning}
             onUpdateInvoiceTrigger={handleUpdateInvoiceTrigger}
+            qtyDiscrepancyThreshold={qtyDiscrepancyThreshold}
+            qtyDiscrepancyTaxRate={qtyDiscrepancyTaxRate}
+            onOpenQtyConfirm={handleOpenQtyConfirm}
           />
         ) : currentView === "epicor" ? (
           <EpicorView
@@ -5546,7 +5866,14 @@ export default function App() {
             onRescanInvoice={handleRescanEpicorInvoice}
             onLoadScanned={handleLoadEpicorScanned}
             assignableOrders={assignableEpicorOrders}
-            onAssignOrder={handleAssignEpicorInvoiceToOrder}
+            onOpenAssignModal={(inv) =>
+              setAssignInvoiceModal({
+                orderReference: "",
+                invoiceNumber: inv?.invoiceNumber || "",
+                fromOrders: false,
+              })
+            }
+            onSetUnmatchable={handleSetEpicorInvoiceUnmatchable}
             onScanCredits={handleScanEpicorCredits}
             epicorCreditScanning={epicorCreditScanning}
             epicorCredits={epicorCredits}
@@ -5619,6 +5946,39 @@ export default function App() {
           <PaymentManagementView currentViewMeta={currentViewMeta} />
         )}
       </div>
+      {assignInvoiceModal && (
+        <AssignInvoiceModal
+          invoices={epicorUnassignedInvoices}
+          orders={assignableEpicorOrders}
+          preselectInvoice={assignInvoiceModal.invoiceNumber}
+          preselectOrder={assignInvoiceModal.orderReference}
+          onAssign={handleAssignEpicorInvoiceToOrder}
+          onViewInvoiceImage={handleViewEpicorInvoiceImage}
+          onMarkUnmatchable={(inv) => handleSetEpicorInvoiceUnmatchable(inv?.invoiceNumber, true)}
+          onRefreshScans={handleLoadEpicorScanned}
+          epicorOpening={epicorOpening}
+          onFetchFromEpicor={
+            assignInvoiceModal.fromOrders
+              ? async () => {
+                  const { orderReference, fromSageDate, toSageDate } = assignInvoiceModal;
+                  setAssignInvoiceModal(null);
+                  await runEpicorInvoiceFetch(orderReference, fromSageDate, toSageDate);
+                }
+              : null
+          }
+          onClose={() => setAssignInvoiceModal(null)}
+        />
+      )}
+      {qtyConfirmModal && (
+        <QtyConfirmModal
+          order={qtyConfirmModal.order}
+          refKey={qtyConfirmModal.refKey}
+          taxRate={qtyDiscrepancyTaxRate}
+          threshold={qtyDiscrepancyThreshold}
+          onSave={handleSaveQtyConfirm}
+          onClose={() => setQtyConfirmModal(null)}
+        />
+      )}
       {printBubble && (
         <div className="fixed inset-0 z-[5000] bg-slate-900/60 flex items-center justify-center px-4">
           <div className="bg-white rounded-3xl shadow-2xl w-full max-w-7xl p-6 flex flex-col gap-4">
@@ -6235,6 +6595,233 @@ export default function App() {
                     : selectedSlip
                     ? "Add to Orders & close requisition"
                     : "Add to Orders"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {proforceCreditMatch && (() => {
+        const selectedSlip = waitingCreditSlips.find((s) => s.id === proforceCreditMatchSlipId) || null;
+        const slipItems = selectedSlip?.items || [];
+        const money = (n) => `$${(Number.isFinite(Number(n)) ? Number(n) : 0).toFixed(2)}`;
+        const orderLines = Array.isArray(proforceCreditMatch.lineItems) ? proforceCreditMatch.lineItems : [];
+        // Part numbers on each side, so both lists can show whether they line
+        // up — same bidirectional check as the Epicor credit-match modal.
+        const orderPartKeys = new Set(orderLines.map((l) => normalizePartKey(l.partNumber)).filter(Boolean));
+        const slipKeys = new Set(slipItems.map((it) => normalizePartKey(it.itemcode)).filter(Boolean));
+        const unmatchedSlipCount = slipItems.filter(
+          (it) => !orderPartKeys.has(normalizePartKey(it.itemcode))
+        ).length;
+        const unmatchedOrderCount = orderLines.filter(
+          (l) => !slipKeys.has(normalizePartKey(l.partNumber))
+        ).length;
+        return (
+          <div className="fixed inset-0 z-[5000] bg-slate-900/60 flex items-center justify-center px-4">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-[95vw] p-6 flex flex-col gap-4 max-h-[95vh]">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-semibold text-slate-800">
+                  Match Credit {proforceCreditMatch.reference} to a Return Requisition
+                </h2>
+                <button className="text-slate-500 hover:text-slate-700" onClick={handleCloseProforceCreditMatch}>
+                  x
+                </button>
+              </div>
+              {proforceCreditMatchError && (
+                <div className="text-sm text-red-600 whitespace-pre-line">{proforceCreditMatchError}</div>
+              )}
+              <p className="text-sm text-slate-500">
+                This credit is already a real order with its own parts — no scan to correct here.
+                Compare it against the requisition on the right before confirming; confirming stamps
+                the order with the requisition and closes it out of Returns Management, the same as
+                its own "Credit received" button.
+              </p>
+
+              <div className="grid gap-4 lg:grid-cols-2 overflow-auto">
+                {/* Left: the credit's own parts, read-only. */}
+                <div className="flex flex-col gap-2 min-w-0">
+                  <div className="flex flex-wrap gap-4 text-sm rounded-2xl border border-indigo-100 bg-indigo-50/40 px-3 py-2">
+                    <div>
+                      <div className="text-xs uppercase tracking-wide text-slate-400">Credit #</div>
+                      <div className="font-bold text-amber-700">{proforceCreditMatch.reference || "—"}</div>
+                    </div>
+                    {Number.isFinite(Number(proforceCreditMatch.total)) && (
+                      <div>
+                        <div className="text-xs uppercase tracking-wide text-slate-400">Credit total</div>
+                        <div className="font-semibold text-slate-800">{money(proforceCreditMatch.total)}</div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-sm font-semibold text-slate-700">
+                    1 · Credit's parts <span className="font-normal text-slate-400">(read-only, {orderLines.length})</span>
+                  </div>
+                  {orderLines.length === 0 ? (
+                    <p className="text-sm text-slate-500 border rounded-xl px-3 py-2 bg-slate-50">
+                      This credit has no line items.
+                    </p>
+                  ) : (
+                    <div className="space-y-1 max-h-[60vh] overflow-auto border rounded-2xl p-2 bg-slate-50/60">
+                      {orderLines.map((li, i) => {
+                        const onSlip = selectedSlip ? slipKeys.has(normalizePartKey(li.partNumber)) : null;
+                        return (
+                          <div
+                            key={`${li.partNumber || "part"}-${i}`}
+                            className={`flex items-center justify-between gap-2 text-xs bg-white border rounded-lg px-2 py-1 ${
+                              onSlip === false ? "border-amber-300 bg-amber-50/50" : "border-slate-100"
+                            }`}
+                          >
+                            <span className="font-semibold text-slate-800">
+                              {[li.partLineCode, li.partNumber].filter(Boolean).join(" ") || "—"}
+                            </span>
+                            <span className="text-slate-500 truncate">{li.partDescription || ""}</span>
+                            <span className="text-slate-500 whitespace-nowrap">
+                              {li.quantity ?? ""} × {money(li.costPriceValue)}
+                            </span>
+                            {onSlip !== null && (
+                              <span
+                                className={`px-2 py-0.5 rounded-full border font-semibold whitespace-nowrap ${
+                                  onSlip
+                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                    : "bg-amber-100 text-amber-800 border-amber-300"
+                                }`}
+                                title={
+                                  onSlip
+                                    ? "This part number is on the requisition"
+                                    : "No line on the requisition has this part number"
+                                }
+                              >
+                                {onSlip ? "on requisition" : "not on requisition"}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {selectedSlip && unmatchedOrderCount > 0 && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
+                      <span className="font-semibold">{unmatchedOrderCount}</span> part(s) on the
+                      credit have no matching part number on the requisition.
+                    </p>
+                  )}
+                </div>
+
+                {/* Right: pick a requisition, compare its parts. */}
+                <div className="flex flex-col gap-2 min-w-0">
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">
+                      2 · Match to a return requisition{" "}
+                      <span className="font-normal text-slate-400">(waiting on credit, any warehouse)</span>
+                    </label>
+                    {waitingCreditSlips.length === 0 ? (
+                      <p className="text-sm text-slate-500 border rounded-xl px-3 py-2 bg-slate-50">
+                        No requisitions are waiting on a credit right now.
+                      </p>
+                    ) : (
+                      <select
+                        className="w-full border rounded-xl px-3 py-2 text-sm"
+                        value={proforceCreditMatchSlipId}
+                        onChange={(e) => setProforceCreditMatchSlipId(e.target.value)}
+                      >
+                        <option value="">Select a requisition…</option>
+                        {waitingCreditSlips.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {[
+                              s.warehouse || "Unspecified",
+                              s.date || "no date",
+                              s.po ? `PO ${s.po}` : "no PO",
+                              `${s.items.length} part(s)`,
+                            ].join(" · ")}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+
+                  {selectedSlip ? (
+                    <div className="border rounded-2xl p-3 bg-slate-50/60">
+                      <div className="text-sm font-semibold text-slate-700 mb-1">
+                        Parts on this requisition <span className="font-normal text-slate-400">({slipItems.length})</span>
+                      </div>
+                      {slipItems.length > 0 && (
+                        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 mb-2">
+                          Confirming marks the requisition as credited:{" "}
+                          <span className="font-semibold">{slipItems.length} part(s)</span> will be
+                          removed from Returns Management.
+                        </p>
+                      )}
+                      {slipItems.length === 0 && (
+                        <p className="text-xs text-slate-500">This requisition has no parts.</p>
+                      )}
+                      <div className="space-y-1 max-h-[55vh] overflow-auto">
+                        {slipItems.map((it) => {
+                          const onCredit = orderPartKeys.has(normalizePartKey(it.itemcode));
+                          return (
+                            <div
+                              key={it.uid}
+                              className={`flex items-center justify-between gap-2 text-xs bg-white border rounded-lg px-2 py-1 ${
+                                onCredit ? "border-slate-100" : "border-amber-300 bg-amber-50/50"
+                              }`}
+                            >
+                              <span className="font-semibold text-slate-800">{it.itemcode || "—"}</span>
+                              <span className="text-slate-500 whitespace-nowrap">
+                                {Math.max(1, Number(it.quantity) || 1)} × {money(it.cost)}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded-full border font-semibold whitespace-nowrap ${
+                                  onCredit
+                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                    : "bg-amber-100 text-amber-800 border-amber-300"
+                                }`}
+                                title={
+                                  onCredit
+                                    ? "This part number is on the credit"
+                                    : "No line on the credit has this part number"
+                                }
+                              >
+                                {onCredit ? "on credit" : "not on credit"}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {unmatchedSlipCount > 0 && (
+                        <p className="text-xs text-amber-700 mt-2">
+                          <span className="font-semibold">{unmatchedSlipCount}</span> part(s) on the
+                          requisition have no matching part number on the credit — double check this
+                          is the right requisition before confirming.
+                        </p>
+                      )}
+                      {unmatchedSlipCount === 0 && unmatchedOrderCount === 0 && slipItems.length > 0 && (
+                        <p className="text-xs text-emerald-700 mt-2 font-semibold">
+                          Every part number matches both sides.
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-500 border rounded-xl px-3 py-2 bg-slate-50">
+                      Pick a requisition above to compare its parts against the credit.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-3 border-t pt-4">
+                <button
+                  className="px-4 py-2 rounded-xl border text-sm"
+                  onClick={handleCloseProforceCreditMatch}
+                  disabled={proforceCreditMatchSaving}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold disabled:opacity-60"
+                  onClick={handleConfirmProforceCreditMatch}
+                  disabled={proforceCreditMatchSaving || !selectedSlip}
+                  title="Stamp the order with this requisition and close it out of Returns Management"
+                >
+                  {proforceCreditMatchSaving ? "Matching…" : "Match & close requisition"}
                 </button>
               </div>
             </div>

@@ -97,6 +97,14 @@ const SAGE_OWNED_FIELDS = [
   "invoiceSageUpdate",
 ];
 
+// The two flags a completed Sage run also sets (helpers.ahk's UpdateOrderJournal
+// writes enteredInSage alongside the journal entry). They can't join
+// SAGE_OWNED_FIELDS — the user ticks these same checkboxes by hand in Order
+// Management, and disk-always-wins would make the checkbox impossible to clear.
+// Instead they're sticky in the TRUE direction only, and only against a renderer
+// copy that predates the run: see mergeOrdersForWrite.
+const SAGE_RESULT_FLAGS = ["enteredInSage", "totalVerified"];
+
 // Stable identity for matching a renderer's copy of an order to the one on
 // disk. `reference` never changes once an order exists (filling in an invoice
 // number sets source_invoice/sage_reference instead), so it survives the whole
@@ -144,6 +152,28 @@ function mergeOrdersForWrite(diskList, incomingList) {
       if (Object.prototype.hasOwnProperty.call(current, field)) next[field] = current[field];
       else delete next[field];
     });
+
+    // AHK writes enteredInSage/totalVerified straight into orders.json at the
+    // end of a run, next to sage_processed_at. A renderer window that loaded
+    // BEFORE that run still holds the old `false` for both, and its next save
+    // would quietly revert them — leaving an order that really is in Sage
+    // looking un-entered, and unarchivable forever (canArchiveOrder needs both
+    // true). Observed on OI9489/OI9989/652663: every SAGE_OWNED field survived
+    // the save and precisely these two came back false.
+    //
+    // sage_processed_at is the tell. It is SAGE_OWNED, so disk's value is
+    // authoritative; if the incoming copy carries a different one it was read
+    // before this run finished and has nothing to say about the outcome. When
+    // the two agree the window HAS seen the result, so a false there is a
+    // deliberate un-tick and is honoured. Only true is ever restored — a Sage
+    // run never clears these.
+    const sawThisSageRun =
+      String(inc.sage_processed_at || "") === String(current.sage_processed_at || "");
+    if (!sawThisSageRun) {
+      SAGE_RESULT_FLAGS.forEach((field) => {
+        if (current[field] === true) next[field] = true;
+      });
+    }
     // Sweep away a lock whose work is done (or that timed out) instead of
     // leaving a dead field on the order forever.
     if (next.sage_lock) next.sage_lock = null;
@@ -174,4 +204,5 @@ module.exports = {
   mergeOrdersForWrite,
   SAGE_ORDER_LOCK_MAX_MS,
   SAGE_OWNED_FIELDS,
+  SAGE_RESULT_FLAGS,
 };

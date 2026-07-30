@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import Card from "../components/Card";
 import { isOrderSageLocked, sageLockLabel } from "../utils/sageLock";
+import { getOrderQtyDiscrepancy } from "../utils/qtyDiscrepancy";
 
 function DismissibleMessage({ tone, onDismiss, children }) {
   const boxStyles =
@@ -143,6 +144,14 @@ export default function OrderManagementView({
   onViewCbkInvoiceImage,
   onVerifyCbkInvoice,
   onPrintCbkInvoice,
+  onFetchProforceCreditInvoices,
+  proforceCreditFetching,
+  proforceCreditStatus,
+  proforceCreditError,
+  onViewProforceCreditInvoiceImage,
+  onPrintProforceCreditInvoice,
+  onMatchProforceCreditToRequisition,
+  waitingCreditSlipCount,
   invoicePrintingRef,
   onPrintAllNotPrinted,
   printAllRunning,
@@ -150,6 +159,9 @@ export default function OrderManagementView({
   archiveAllRunning,
   onUpdateInvoiceTrigger,
   onConfirmOrderEdit,
+  qtyDiscrepancyThreshold,
+  qtyDiscrepancyTaxRate,
+  onOpenQtyConfirm,
 }) {
   const [invoiceEdits, setInvoiceEdits] = useState({});
   const [dirtyRefs, setDirtyRefs] = useState({});
@@ -600,6 +612,16 @@ export default function OrderManagementView({
               {cbkStatus}
             </DismissibleMessage>
           )}
+          {proforceCreditError && (
+            <DismissibleMessage tone="error" onDismiss={() => onClearInvoiceFetchMessage?.("proforce")}>
+              {proforceCreditError}
+            </DismissibleMessage>
+          )}
+          {proforceCreditStatus && !proforceCreditError && (
+            <DismissibleMessage tone="status" onDismiss={() => onClearInvoiceFetchMessage?.("proforce")}>
+              {proforceCreditStatus}
+            </DismissibleMessage>
+          )}
         </Card>
       </section>
       <section>
@@ -626,6 +648,12 @@ export default function OrderManagementView({
                 Number.isFinite(sageNum) &&
                 Math.abs(billedNum - sageNum) > 0.009;
               const needsValueCheck = Boolean(order.valueCheckAlert);
+              const qtyDiscrepancy = getOrderQtyDiscrepancy(
+                order,
+                qtyDiscrepancyTaxRate,
+                qtyDiscrepancyThreshold
+              );
+              const hasQtyDiscrepancy = Boolean(qtyDiscrepancy?.overThreshold);
               const allBubblified =
                 Array.isArray(order.lineItems) &&
                 order.lineItems.length > 0 &&
@@ -718,7 +746,17 @@ export default function OrderManagementView({
                             {allBubblified ? "Bubblified" : "Bubblify"}
                           </button>
                         )}
-                        {!order.enteredInSage && (
+                        {!order.enteredInSage && hasQtyDiscrepancy && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenQtyConfirm?.(refKey)}
+                            className="px-3 py-1 rounded-full text-xs font-semibold border bg-red-600 text-white border-red-600 hover:bg-red-700 animate-pulse"
+                            title={`Billed total is ${qtyDiscrepancy.diff >= 0 ? "+" : ""}$${qtyDiscrepancy.diff.toFixed(2)} vs. the line items total ($${qtyDiscrepancy.expectedTotal.toFixed(2)}) — confirm quantities before sending to Sage`}
+                          >
+                            Confirm Quantities
+                          </button>
+                        )}
+                        {!order.enteredInSage && !hasQtyDiscrepancy && (
                           <button
                             type="button"
                             onClick={() => onMarkForSage(refKey)}
@@ -1110,6 +1148,73 @@ export default function OrderManagementView({
                             : "Print Invoice"}
                         </button>
                       )}
+                      {/* Proforce never emails regular invoices (those are
+                          already fully captured off the portal scrape) - only
+                          credit memos, so this fetch/view/print is restricted
+                          to orders proforceScraper.js already flagged isCredit. */}
+                      {order.source === "proforce" &&
+                        order.isCredit &&
+                        !order.proforceCreditFile &&
+                        onFetchProforceCreditInvoices && (
+                          <button
+                            type="button"
+                            onClick={() => onFetchProforceCreditInvoices(order.reference)}
+                            disabled={proforceCreditFetching}
+                            className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
+                          >
+                            {proforceCreditFetching ? "Checking Gmail..." : "Get Invoice from Gmail"}
+                          </button>
+                        )}
+                      {order.proforceCreditFile && onViewProforceCreditInvoiceImage && (
+                        <button
+                          type="button"
+                          onClick={() => onViewProforceCreditInvoiceImage(order)}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-slate-700 border-slate-200 hover:bg-slate-50 self-start"
+                          title="Open the credit invoice PDF in your default viewer"
+                        >
+                          View Credit PDF
+                        </button>
+                      )}
+                      {order.proforceCreditFile && onPrintProforceCreditInvoice && (
+                        <button
+                          type="button"
+                          onClick={() => onPrintProforceCreditInvoice(order)}
+                          disabled={invoicePrintingRef === `proforce-credit:${order.reference}`}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
+                          title="Print the credit invoice"
+                        >
+                          {invoicePrintingRef === `proforce-credit:${order.reference}`
+                            ? "Printing..."
+                            : order.proforceCreditInvoicePrinted
+                            ? "Print Credit Again"
+                            : "Print Credit"}
+                        </button>
+                      )}
+                      {order.source === "proforce" &&
+                        order.isCredit &&
+                        !order.returnSlipId &&
+                        onMatchProforceCreditToRequisition && (
+                          <button
+                            type="button"
+                            onClick={() => onMatchProforceCreditToRequisition(order)}
+                            className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-amber-700 border-amber-300 hover:bg-amber-50 self-start"
+                            title={
+                              waitingCreditSlipCount
+                                ? `Match this credit to one of the ${waitingCreditSlipCount} requisition(s) waiting on a credit`
+                                : "Match this credit to a return requisition (none are waiting on a credit right now)"
+                            }
+                          >
+                            Match to Requisition…
+                          </button>
+                        )}
+                      {order.source === "proforce" && order.isCredit && order.returnSlipId && (
+                        <span
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200 self-start"
+                          title={`Matched to a requisition${order.returnSlipWarehouse ? ` (${order.returnSlipWarehouse})` : ""}`}
+                        >
+                          Matched to Requisition
+                        </span>
+                      )}
                     </div>
                     <div className="flex flex-col gap-1">
                       <span className="text-xs uppercase tracking-wide text-slate-400">Journal Entry</span>
@@ -1315,6 +1420,23 @@ export default function OrderManagementView({
                           onClick={() => onUpdateInvoiceTrigger?.(refKey)}
                         >
                           Update Invoice
+                        </button>
+                      </div>
+                    )}
+                    {hasQtyDiscrepancy && (
+                      <div className="mt-3 text-xs font-semibold text-red-700 flex items-center gap-2 flex-wrap">
+                        <span className="inline-block h-2 w-2 rounded-full bg-red-600"></span>
+                        <span>
+                          Billed total ${qtyDiscrepancy.billedTotal.toFixed(2)} vs. line items total $
+                          {qtyDiscrepancy.expectedTotal.toFixed(2)} (diff {qtyDiscrepancy.diff >= 0 ? "+" : ""}
+                          ${qtyDiscrepancy.diff.toFixed(2)}) — confirm quantities before sending to Sage.
+                        </span>
+                        <button
+                          type="button"
+                          className="px-2 py-1 text-xs rounded-lg border border-red-500 text-red-700 bg-white hover:bg-red-50"
+                          onClick={() => onOpenQtyConfirm?.(refKey)}
+                        >
+                          Confirm Quantities
                         </button>
                       </div>
                     )}

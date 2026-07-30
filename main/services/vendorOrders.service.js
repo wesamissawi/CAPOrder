@@ -35,6 +35,12 @@ function cacheEntryToInvoice(invoiceNumber, v, known) {
     releaseNumber: v.releaseNumber || '',
     checkedAt: v.checkedAt || '',
     known: key ? known.has(key) : false,
+    // Hand-flagged as belonging to no scraped order (a counter sale, another
+    // branch's purchase, a duplicate scan...). Persisted so the assign picker
+    // stops offering it on every future match — see setEpicorInvoiceUnmatchable.
+    unmatchable: Boolean(v.unmatchable),
+    unmatchableAt: v.unmatchableAt || '',
+    unmatchableNote: v.unmatchableNote || '',
   };
 }
 
@@ -56,6 +62,7 @@ const createVendorOrdersService = (deps) => {
     getArchivedOrderRefs,
     getOrdersFile,
     loadConfig,
+    getScrapersHeadless,
     getWorldOrders,
     getTransbecOrders,
     getProforceOrders,
@@ -68,6 +75,7 @@ const createVendorOrdersService = (deps) => {
     fetchBestbuyCreditInvoicesScraper,
     fetchCbkInvoicesScraper,
     fetchTransbecCreditInvoicesScraper,
+    fetchProforceCreditInvoicesScraper,
     getEpicorAssetsDir,
     getGmailAssetsDir,
     getTransbecInvoiceCachePath,
@@ -75,6 +83,7 @@ const createVendorOrdersService = (deps) => {
     getBestbuyCreditInvoiceCachePath,
     getCbkInvoiceCachePath,
     getTransbecCreditInvoiceCachePath,
+    getProforceCreditInvoiceCachePath,
     runInteractiveAuth,
     verifyConnection,
     saveConfig,
@@ -115,6 +124,7 @@ const createVendorOrdersService = (deps) => {
         existingOrders: existing,
         existingRefs: archivedRefs,
         credentials: { user: worldUser, pass: worldPass },
+        headless: getScrapersHeadless(),
       });
       if (res?.ok && Array.isArray(res.orders)) {
         writeOrdersMerged(res.orders);
@@ -149,6 +159,7 @@ const createVendorOrdersService = (deps) => {
         existingRefs: archivedRefs,
         maxPages,
         credentials: { user: transbecUser, pass: transbecPass },
+        headless: getScrapersHeadless(),
       });
       let merged = Array.isArray(res?.orders) ? res.orders : [];
       if (res?.ok) {
@@ -201,6 +212,7 @@ const createVendorOrdersService = (deps) => {
         existingOrders: existing,
         existingRefs: archivedRefs,
         credentials: { store, customer, pass },
+        headless: getScrapersHeadless(),
       });
       if (res?.ok && Array.isArray(res.orders)) {
         writeOrdersMerged(res.orders);
@@ -231,6 +243,7 @@ const createVendorOrdersService = (deps) => {
         existingOrders: existing,
         existingRefs: archivedRefs,
         credentials: { user: cbkUser, pass: cbkPass },
+        headless: getScrapersHeadless(),
       });
       if (res?.ok && Array.isArray(res.orders)) {
         writeOrdersMerged(res.orders);
@@ -261,6 +274,7 @@ const createVendorOrdersService = (deps) => {
         existingOrders: existing,
         existingRefs: archivedRefs,
         credentials: { user: tigerUser, pass: tigerPass },
+        headless: getScrapersHeadless(),
       });
       if (res?.ok && Array.isArray(res.orders)) {
         writeOrdersMerged(res.orders);
@@ -291,6 +305,7 @@ const createVendorOrdersService = (deps) => {
         existingOrders: existing,
         existingRefs: archivedRefs,
         credentials: { user: bestUser, pass: bestPass },
+        headless: getScrapersHeadless(),
       });
       if (res?.ok && Array.isArray(res.orders)) {
         writeOrdersMerged(res.orders);
@@ -524,6 +539,58 @@ const createVendorOrdersService = (deps) => {
       .sort((a, b) => String(b.checkedAt).localeCompare(String(a.checkedAt)));
   }
 
+  // Flag (or unflag) a scanned document as belonging to no scraped order, so
+  // the assign picker stops offering it. Some Epicor invoices genuinely have no
+  // counterpart on our side — a counter sale, another branch's purchase, a
+  // re-scan of something already on file under a different number — and without
+  // this they sit in the "needs assignment" list forever, re-offered on every
+  // single match. Purely a display/queue decision: no order is touched, and the
+  // OCR data, image and cache entry all stay exactly as they were, so unflagging
+  // puts the document straight back in the picker.
+  async function setEpicorInvoiceUnmatchable(payload = {}) {
+    try {
+      const invoiceNumber = String(payload?.invoiceNumber || '').trim();
+      if (!invoiceNumber) return { ok: false, error: 'Missing invoice number.' };
+      const isCredit = Boolean(payload?.isCredit);
+      // Default true so a bare { invoiceNumber } call flags rather than clears.
+      const unmatchable = payload?.unmatchable !== false;
+      const note = typeof payload?.note === 'string' ? payload.note.trim() : '';
+
+      const { cachePath, cache } = readEpicorCache();
+      const key = invoiceCacheKey(invoiceNumber, isCredit);
+      const entry = cache[key];
+      if (!entry) return { ok: false, error: `No scanned document cached for ${invoiceNumber}.` };
+
+      const updated = { ...entry };
+      if (unmatchable) {
+        updated.unmatchable = true;
+        updated.unmatchableAt = new Date().toISOString();
+        if (note) updated.unmatchableNote = note;
+      } else {
+        // Clear rather than store false, so an unflagged entry is byte-identical
+        // to one that was never flagged.
+        delete updated.unmatchable;
+        delete updated.unmatchableAt;
+        delete updated.unmatchableNote;
+      }
+      cache[key] = updated;
+
+      try {
+        fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+        fs.writeFileSync(cachePath, JSON.stringify(cache, null, 2), 'utf8');
+      } catch (e) {
+        console.error('[epicor] unmatchable cache save failed', e);
+        return { ok: false, error: e?.message || 'Failed to save the flag.' };
+      }
+
+      const known = collectKnownInvoiceNumbers ? collectKnownInvoiceNumbers() : new Set();
+      return { ok: true, invoice: cacheEntryToInvoice(invoiceNumber, updated, known) };
+    } catch (e) {
+      console.error('[vendor:set-epicor-invoice-unmatchable]', e);
+      return { ok: false, error: e?.message || 'Failed to flag the invoice.' };
+    }
+  }
+
   async function getEpicorScannedInvoices() {
     try {
       const invoices = listScannedFromCache(false);
@@ -580,6 +647,10 @@ const createVendorOrdersService = (deps) => {
         typeof config.TRANSBEC_CREDIT_INVOICE_SENDER === 'string' ? config.TRANSBEC_CREDIT_INVOICE_SENDER : '',
       transbecCreditSubject:
         typeof config.TRANSBEC_CREDIT_INVOICE_SUBJECT === 'string' ? config.TRANSBEC_CREDIT_INVOICE_SUBJECT : '',
+      proforceCreditSender:
+        typeof config.PROFORCE_CREDIT_INVOICE_SENDER === 'string' ? config.PROFORCE_CREDIT_INVOICE_SENDER : '',
+      proforceCreditSubject:
+        typeof config.PROFORCE_CREDIT_INVOICE_SUBJECT === 'string' ? config.PROFORCE_CREDIT_INVOICE_SUBJECT : '',
     };
   }
 
@@ -717,6 +788,36 @@ const createVendorOrdersService = (deps) => {
     } catch (e) {
       console.error('[vendor:fetch-bestbuy-credit-invoices]', e);
       return { ok: false, error: e?.message || 'Failed to fetch BestBuy credit invoices.' };
+    }
+  }
+
+  // Proforce credit invoices are the ONLY thing Proforce emails - regular
+  // invoices are already fully captured by the portal scrape (proforceScraper.js).
+  // See proforceCreditInvoice.js for the sender/subject/attachment convention.
+  async function fetchProforceCreditInvoices(payload = {}) {
+    try {
+      const { clientId, clientSecret, refreshToken, proforceCreditSender, proforceCreditSubject } = getGmailCreds();
+      if (!clientId || !clientSecret) {
+        return { ok: false, error: 'Missing Gmail OAuth client id/secret. Set them in Settings.' };
+      }
+      if (!refreshToken) {
+        return { ok: false, error: 'Gmail is not connected. Click “Connect Gmail” in Settings.' };
+      }
+      const gmailDataDir = getGmailAssetsDir();
+      ensureDir(gmailDataDir);
+      const reference = typeof payload?.reference === 'string' ? payload.reference : '';
+      const res = await fetchProforceCreditInvoicesScraper({
+        credentials: { clientId, clientSecret, refreshToken },
+        sender: proforceCreditSender || 'noreply@epartconnection.com',
+        subjectPattern: proforceCreditSubject || 'invoice',
+        reference,
+        dataDir: gmailDataDir,
+        cachePath: getProforceCreditInvoiceCachePath(),
+      });
+      return res;
+    } catch (e) {
+      console.error('[vendor:fetch-proforce-credit-invoices]', e);
+      return { ok: false, error: e?.message || 'Failed to fetch Proforce credit invoices.' };
     }
   }
 
@@ -861,6 +962,7 @@ const createVendorOrdersService = (deps) => {
     scanEpicorRange,
     scanEpicorCredits,
     rescanEpicorInvoice,
+    setEpicorInvoiceUnmatchable,
     getEpicorScannedInvoices,
     getEpicorScannedCredits,
     connectGmail,
@@ -870,6 +972,7 @@ const createVendorOrdersService = (deps) => {
     fetchBestbuyCreditInvoices,
     fetchCbkInvoices,
     fetchTransbecCreditInvoices,
+    fetchProforceCreditInvoices,
     getTransbecCreditInvoices,
     resetTransbecCreditScans,
   };

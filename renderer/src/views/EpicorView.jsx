@@ -76,7 +76,8 @@ export default function EpicorView({
   onRescanInvoice,
   onLoadScanned,
   assignableOrders,
-  onAssignOrder,
+  onOpenAssignModal,
+  onSetUnmatchable,
   onScanCredits,
   epicorCreditScanning,
   epicorCredits,
@@ -107,8 +108,6 @@ export default function EpicorView({
   const [onlyNew, setOnlyNew] = useState(true);
   const [createStatus, setCreateStatus] = useState({}); // { [invoiceNumber]: "adding" | "created" | "error:msg" }
   const [rescanStatus, setRescanStatus] = useState({}); // { [invoiceNumber]: "rescanning" | "error:msg" }
-  const [assignSelection, setAssignSelection] = useState({}); // { [invoiceNumber]: orderReference }
-  const [assignStatus, setAssignStatus] = useState({}); // { [invoiceNumber]: "assigning" | "assigned" | "error:msg" }
   const [creditCreateStatus, setCreditCreateStatus] = useState({}); // { [creditMemoNumber]: "adding" | "created" | "removing" | "error:msg" }
   // Epicor credit scan (same portal/date range as the invoice scan above, with
   // the "Credit" document type ticked). Pinning a credit memo # returns just
@@ -238,14 +237,25 @@ export default function EpicorView({
   }
 
   const invoices = Array.isArray(results) ? results : [];
+  // `unmatchable` scans are hand-ruled-out and must not count as outstanding
+  // work here either, or the badge would keep advertising a queue the assign
+  // picker no longer offers.
   const needsAssignmentCount = useMemo(
-    () => invoices.filter((i) => !i.known && !i.created && !i.assignedTo).length,
+    () => invoices.filter((i) => !i.known && !i.created && !i.assignedTo && !i.unmatchable).length,
+    [invoices]
+  );
+  const unmatchableCount = useMemo(
+    () => invoices.filter((i) => i.unmatchable).length,
     [invoices]
   );
   const visible = useMemo(
     // Keep just-created invoices visible (with a badge) even though they now
-    // count as "on file", so the user sees the confirmation.
-    () => (onlyNew ? invoices.filter((i) => !i.known || i.created || i.assignedTo) : invoices),
+    // count as "on file", so the user sees the confirmation. Flagged ones stay
+    // listed too — this view is where you undo the flag.
+    () =>
+      onlyNew
+        ? invoices.filter((i) => !i.known || i.created || i.assignedTo || i.unmatchable)
+        : invoices,
     [invoices, onlyNew]
   );
 
@@ -276,20 +286,6 @@ export default function EpicorView({
       });
     } catch (e) {
       setRescanStatus((p) => ({ ...p, [key]: "error:" + (e?.message || "Failed") }));
-    }
-  }
-
-  async function handleAssign(inv) {
-    const key = inv.invoiceNumber || "";
-    const orderRef = assignSelection[key];
-    if (!orderRef) return;
-    setAssignStatus((p) => ({ ...p, [key]: "assigning" }));
-    try {
-      const res = await onAssignOrder(inv, orderRef);
-      if (!res?.ok) throw new Error(res?.error || "Failed to assign invoice.");
-      setAssignStatus((p) => ({ ...p, [key]: "assigned" }));
-    } catch (e) {
-      setAssignStatus((p) => ({ ...p, [key]: "error:" + (e?.message || "Failed") }));
     }
   }
 
@@ -358,6 +354,23 @@ export default function EpicorView({
                 >
                   Refresh list
                 </button>
+              )}
+              {onOpenAssignModal && needsAssignmentCount > 0 && (
+                <button
+                  className="rounded-xl bg-white border border-indigo-200 text-indigo-700 px-4 py-2 font-semibold hover:bg-indigo-50 whitespace-nowrap"
+                  onClick={() => onOpenAssignModal(null)}
+                  title="Match scanned invoices to the orders they belong to, side by side"
+                >
+                  Assign scans ({needsAssignmentCount})
+                </button>
+              )}
+              {unmatchableCount > 0 && (
+                <span
+                  className="rounded-xl bg-slate-100 border border-slate-300 text-slate-600 px-4 py-2 font-semibold whitespace-nowrap"
+                  title="Scans flagged as having no order on our side. They're listed below with a Put back button, and are no longer offered when matching."
+                >
+                  No matching order ({unmatchableCount})
+                </span>
               )}
             </div>
           </div>
@@ -1111,14 +1124,37 @@ export default function EpicorView({
                     </button>
                   );
                 })()}
-                {!inv.known && onAssignOrder && (() => {
-                  const key = inv.invoiceNumber || "";
-                  const status = assignStatus[key];
-                  const isError = status?.startsWith("error:");
-                  if (status === "assigned" || inv.assignedTo) {
+                {/* A scan ruled out by hand: say so plainly and offer the undo.
+                    Shown ahead of the assign/create actions because while it's
+                    flagged those don't apply. */}
+                {!inv.known && inv.unmatchable && (
+                  <span className="flex items-center gap-2">
+                    <span
+                      className="px-3 py-1 rounded-full text-xs font-semibold border bg-slate-100 text-slate-600 border-slate-300"
+                      title={
+                        inv.unmatchableAt
+                          ? `Flagged as having no order on ${new Date(inv.unmatchableAt).toLocaleString()}`
+                          : "Flagged as having no order on our side"
+                      }
+                    >
+                      No matching order
+                    </span>
+                    {onSetUnmatchable && (
+                      <button
+                        className="px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50"
+                        title="Put this scan back in the assign picker"
+                        onClick={() => onSetUnmatchable(inv.invoiceNumber, false)}
+                      >
+                        Put back
+                      </button>
+                    )}
+                  </span>
+                )}
+                {!inv.known && !inv.unmatchable && onOpenAssignModal && (() => {
+                  if (inv.assignedTo) {
                     return (
                       <span className="px-3 py-1 rounded-full text-xs font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200">
-                        Assigned to {inv.assignedTo || assignSelection[key]} ✓
+                        Assigned to {inv.assignedTo} ✓
                       </span>
                     );
                   }
@@ -1126,35 +1162,25 @@ export default function EpicorView({
                   if (options.length === 0) {
                     return <span className="text-xs text-slate-400">No unassigned orders to link</span>;
                   }
-                  const selected = assignSelection[key] || "";
                   return (
-                    <div className="flex items-center gap-2">
-                      <select
-                        className="rounded-full border border-slate-200 px-2 py-1 text-xs text-slate-700 max-w-[220px]"
-                        value={selected}
-                        onChange={(e) => setAssignSelection((p) => ({ ...p, [key]: e.target.value }))}
-                        title="Assign this invoice to an existing order that has no invoice yet"
-                      >
-                        <option value="">Assign to order…</option>
-                        {options.map((o) => (
-                          <option key={o.reference} value={o.reference}>
-                            {o.label}
-                          </option>
-                        ))}
-                      </select>
+                    <>
                       <button
-                        className={`px-3 py-1 rounded-full text-xs font-semibold border disabled:opacity-60 ${
-                          isError
-                            ? "bg-red-50 text-red-600 border-red-200"
-                            : "bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50"
-                        }`}
-                        disabled={!selected || status === "assigning"}
-                        title={isError ? status.slice(6) : "Assign this invoice to the selected order"}
-                        onClick={() => handleAssign(inv)}
+                        className="px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50"
+                        title="Open the assign picker with this invoice selected, and pick the order it belongs to"
+                        onClick={() => onOpenAssignModal(inv)}
                       >
-                        {status === "assigning" ? "Assigning…" : isError ? "Retry assign" : "Assign"}
+                        Assign to an order…
                       </button>
-                    </div>
+                      {onSetUnmatchable && (
+                        <button
+                          className="px-3 py-1 rounded-full text-xs font-semibold border bg-white text-slate-600 border-slate-300 hover:bg-amber-50 hover:text-amber-800 hover:border-amber-300"
+                          title="This scan belongs to no order of ours (counter sale, another branch, duplicate). Stops it being offered when matching — reversible."
+                          onClick={() => onSetUnmatchable(inv.invoiceNumber, true)}
+                        >
+                          No matching order
+                        </button>
+                      )}
+                    </>
                   );
                 })()}
                 {(!inv.known || inv.created) && onCreateOrder && (() => {

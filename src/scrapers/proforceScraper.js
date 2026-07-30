@@ -14,6 +14,33 @@ require("dotenv").config();
 
 const DEFAULT_HEADLESS = process.env.PROFORCE_HEADLESS === "true";
 
+// Fallback guess for rows whose detail page can't be fetched (no lineItems
+// to inspect yet). The list Type column's actual wording is unconfirmed, so
+// this is only a secondary signal - see isCreditFromLineItems below.
+function isCreditDocType(docType) {
+  const t = String(docType || "").trim();
+  if (!t) return false;
+  return /credit/i.test(t) || /^cm$/i.test(t);
+}
+
+// Proforce doesn't mark credit memos with a reliable document-type flag, but
+// their line items are scraped already correctly signed: negative quantity,
+// negative extended, positive unit cost (confirmed against a real Proforce
+// credit memo - e.g. qty "-2", extended "-25", costPrice "12.5"). A memo's
+// lines always net negative, so that's the ground truth for isCredit.
+//
+// Header total/journal amounts are left exactly as scraped (positive) -
+// confirmed against a live example that Sage records this as a Credit Note
+// document type entered with a positive dollar amount, not a negative total.
+// isCredit is purely a classification flag for this app's own filtering/
+// matching (see App.jsx's "Credit" filter), not a sign convention.
+function isCreditFromLineItems(lineItems) {
+  if (!Array.isArray(lineItems) || !lineItems.length) return false;
+  const netExtended = lineItems.reduce((sum, li) => sum + (Number(li.extendedValue) || 0), 0);
+  if (netExtended < 0) return true;
+  return lineItems.some((li) => /^-/.test(String(li.quantity || "").trim()));
+}
+
 function resolvePaths(options = {}) {
   const baseDir = options.storageDir || path.join(__dirname, "..");
   const storageStatePath =
@@ -76,9 +103,12 @@ async function getProforceOrders(options = {}) {
       statusLog.push(`Found ${list.length} Proforce orders on list page.`);
     }
 
-    // Normalize base fields
+    // Normalize base fields. Proforce lists invoices and credit memos together
+    // in #InvoiceTable, distinguished only by the "Type" column (docType) -
+    // there is no separate credit search like Epicor/BestBuy/Transbec have.
     const orders = list.map((o) => {
       const { iso, sageDate } = parseProforceDate(o.orderDateRaw);
+      const isCredit = isCreditDocType(o.docType);
       return {
         ...o,
         warehouse: "Proforce",
@@ -102,6 +132,7 @@ async function getProforceOrders(options = {}) {
         source: "proforce",
         source_invoice: o.reference || "",
         customerReference: o.referenceCol || "",
+        isCredit,
       };
     });
 
@@ -120,6 +151,9 @@ async function getProforceOrders(options = {}) {
       const detailRes = await fetchOrderDetail(context, order.detailUrl);
       if (detailRes.ok && detailRes.detail) {
         const d = detailRes.detail;
+        // Line items are the reliable signal (see isCreditFromLineItems) -
+        // recheck against them even if the docType guess above missed it.
+        order.isCredit = order.isCredit || isCreditFromLineItems(d.lineItems);
         order.lineItems = d.lineItems || [];
         const parsedDate = parseProforceDate(d.orderDateRaw);
         order.orderDateRaw = d.orderDateRaw || order.orderDateRaw;

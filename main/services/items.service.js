@@ -114,7 +114,10 @@ const createItemsService = (deps) => {
       fs.mkdirSync(dir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       const base = path.basename(file, '.json');
-      fs.copyFileSync(file, path.join(dir, `${base}.${stamp}.json`));
+      // Read-then-write, not copyFileSync: a Windows copy opens the source
+      // denying delete-sharing, which makes another machine's atomic replace of
+      // this same file fail with EPERM on its rename.
+      fs.writeFileSync(path.join(dir, `${base}.${stamp}.json`), fs.readFileSync(file));
       const siblings = fs.readdirSync(dir)
         .filter((f) => f.startsWith(`${base}.`) && f.endsWith('.json'))
         .sort();

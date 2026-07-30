@@ -274,7 +274,14 @@ UpdateOrderJournal(ref, journalEntry, jsonPath := "") {
     ; Safe write via temp file, UTF-8 without BOM (keep original if copy fails)
     tmp := jsonPath . ".tmp"
     bak := jsonPath . ".bak"
-    FileCopy, %jsonPath%, %bak%, 1  ; best-effort backup
+
+    ; Best-effort backup, written from the copy already in memory. FileCopy
+    ; would reopen the live file denying delete-sharing, which blocks the
+    ; Electron app on another machine from replacing it (EPERM on its rename).
+    fb := FileOpen(bak, "w", "UTF-8-RAW")
+    if IsObject(fb) {
+        fb.Write(jsonText), fb.Close()
+    }
 
     f := FileOpen(tmp, "w", "UTF-8-RAW")
     if !IsObject(f) {
@@ -285,8 +292,18 @@ UpdateOrderJournal(ref, journalEntry, jsonPath := "") {
 
     ; FileMove (rename) replaces the target atomically — FileCopy truncated the
     ; destination first, letting concurrent readers see a partial file.
-    FileMove, %tmp%, %jsonPath%, 1  ; 1 = overwrite
-    if (ErrorLevel) {
+    ; Retry: another machine or a scanner can briefly hold the destination open
+    ; without delete-sharing, which denies the replace for a few milliseconds.
+    moved := false
+    Loop, 5 {
+        FileMove, %tmp%, %jsonPath%, 1  ; 1 = overwrite
+        if (!ErrorLevel) {
+            moved := true
+            break
+        }
+        Sleep, % 40 * A_Index
+    }
+    if (!moved) {
         MsgBox, 16, Error, Couldn't move temp over original:`n%jsonPath%
         FileDelete, %tmp%
         return false

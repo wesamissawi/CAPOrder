@@ -415,12 +415,22 @@ const registerOrdersIpc = (ipcMain, deps) => {
       if (isOrderSageLocked?.(target)) {
         return { ok: false, error: 'This order is busy with Sage right now.' };
       }
+      // Proforce credits post to Sage as a "Credit Note" document (positive
+      // billed_total, positive on-screen total — see alignSageTotalSign),
+      // where raising the tax field LOWERS the total instead of raising it,
+      // the opposite of a regular invoice. Confirmed against a live reconcile
+      // on order 652522: intended +$0.01 (78.19 -> 78.20) actually landed at
+      // 78.18. Flip the sign of only what we hand the AHK tax adjustment so
+      // the on-screen total moves the direction we mean; `delta` itself stays
+      // correctly signed for applyReconcileResult's bookkeeping/the caller.
+      const isProforceCredit = mergedTarget.source === 'proforce' && mergedTarget.isCredit === true;
+      const ahkDelta = isProforceCredit ? -delta : delta;
       // Reconciling drives Sage for this order just like a purchase run does —
       // hold the same lock so no machine can save over it mid-adjustment.
       setSageOrderLock?.(key, 'reconcile');
       let res;
       try {
-        res = await runSageReconcile(mergedTarget, delta);
+        res = await runSageReconcile(mergedTarget, ahkDelta);
       } finally {
         // applyReconcileResult clears the lock on the applied path; anything
         // else has to release it here or the card stays blurred.

@@ -80,6 +80,13 @@ contextBridge.exposeInMainWorld('api', {
   getEpicorScannedCredits: () => ipcRenderer.invoke('vendor:get-epicor-scanned-credits'),
   rescanEpicorInvoice: (invoiceNumber, isCredit = false) =>
     ipcRenderer.invoke('vendor:rescan-epicor-invoice', { invoiceNumber, isCredit }),
+  setEpicorInvoiceUnmatchable: (invoiceNumber, unmatchable = true, opts = {}) =>
+    ipcRenderer.invoke('vendor:set-epicor-invoice-unmatchable', {
+      invoiceNumber,
+      unmatchable,
+      isCredit: Boolean(opts.isCredit),
+      note: typeof opts.note === 'string' ? opts.note : '',
+    }),
   openEpicorInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:open-epicor-invoice-image', fileName),
   readEpicorInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:read-epicor-invoice-image', fileName),
   fetchTransbecInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-transbec-invoices', payload),
@@ -97,6 +104,9 @@ contextBridge.exposeInMainWorld('api', {
   fetchCbkInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-cbk-invoices', payload),
   openCbkInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:open-cbk-invoice-image', fileName),
   readCbkInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:read-cbk-invoice-image', fileName),
+  fetchProforceCreditInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-proforce-credit-invoices', payload),
+  openProforceInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:open-proforce-invoice-image', fileName),
+  readProforceInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:read-proforce-invoice-image', fileName),
   printInvoiceSilent: (fileName, allPages) => ipcRenderer.invoke('vendor:print-invoice-silent', fileName, allPages),
   listPrinters: () => ipcRenderer.invoke('printers:list'),
   reconcileTotals: (refKey, order) => ipcRenderer.invoke('orders:reconcile-totals', refKey, order),
