@@ -90,6 +90,7 @@ const createVendorOrdersService = (deps) => {
     shell,
     collectKnownInvoiceNumbers,
     mergeOrdersForWrite,
+    getArchivedOrderKeys,
   } = deps;
 
   // A crawl takes minutes and builds its result from a snapshot of orders.json
@@ -97,9 +98,14 @@ const createVendorOrdersService = (deps) => {
   // that finished meanwhile is not reverted, and an order currently locked by
   // Sage is left exactly as it is. See mergeOrdersForWrite.
   function writeOrdersMerged(list) {
-    const { orders, blocked } = mergeOrdersForWrite(readOrders(), list);
+    const { orders, blocked, resurrected } = mergeOrdersForWrite(readOrders(), list, {
+      archivedKeys: getArchivedOrderKeys?.(),
+    });
     if (blocked.length) {
       console.warn('[vendor] left Sage-locked order(s) untouched:', blocked.join(', '));
+    }
+    if (resurrected?.length) {
+      console.warn('[vendor] refused to re-add already-archived order(s):', resurrected.join(', '));
     }
     writeOrders(orders);
     return orders;

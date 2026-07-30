@@ -119,6 +119,42 @@ function orderIdentityKey(order) {
 // Renderer-only bookkeeping that must never be written to orders.json.
 const RENDERER_EDIT_MARKS = ["_dirtyFields", "_localDirty"];
 
+// Every value an order can be recognised by. Archiving fills sage_reference /
+// source_invoice with the invoice number, so a sender holding the pre-archive
+// copy may only know it by its original `reference` — checking one field alone
+// would miss it.
+function orderLookupKeys(order) {
+  return [
+    order?.sage_reference_synced,
+    order?.sage_reference,
+    order?.source_invoice,
+    order?.reference,
+    order?.__row,
+  ]
+    .map((v) => (v === null || v === undefined ? "" : String(v).trim().toUpperCase()))
+    .filter(Boolean);
+}
+
+function isArchivedOrder(order, archivedKeys) {
+  if (!archivedKeys || !archivedKeys.size) return false;
+  return orderLookupKeys(order).some((k) => archivedKeys.has(k));
+}
+
+// Build the key set from an orders index (orders_index.json). Only entries the
+// index marks archived are included; an order that is BOTH active and archived
+// is indexed as active, so it will not be dropped.
+function buildArchivedKeySet(indexEntries) {
+  const keys = new Set();
+  (Array.isArray(indexEntries) ? indexEntries : []).forEach((e) => {
+    if (!e || !e.archived) return;
+    [e.key, e.reference].forEach((v) => {
+      const k = v === null || v === undefined ? "" : String(v).trim().toUpperCase();
+      if (k) keys.add(k);
+    });
+  });
+  return keys;
+}
+
 function stripEditMarks(order) {
   if (!order) return order;
   let out = order;
@@ -144,7 +180,16 @@ function stripEditMarks(order) {
 // and re-apply only those fields, which is what stops one machine's save from
 // reverting another's unrelated edit to the same order. Callers that send no
 // tags (vendor scrapes, older builds) keep the previous whole-order behaviour.
-function mergeOrdersForWrite(diskList, incomingList) {
+//
+// `options.archivedKeys` is a Set of keys already in the orders archive. An
+// order the sender still holds but that is NOT on disk is normally a new one to
+// add — that is how scrapes introduce orders — but it is also exactly what an
+// already-archived order looks like to a window that loaded before it was
+// archived. Without this the next save from that window silently resurrects it,
+// which then double-counts its parts into stock if it is archived a second time
+// (observed on OJ0168: archived 20:36:13, back in orders.json by 20:39:56).
+function mergeOrdersForWrite(diskList, incomingList, options = {}) {
+  const archivedKeys = options.archivedKeys instanceof Set ? options.archivedKeys : null;
   const disk = (Array.isArray(diskList) ? diskList : []).filter(Boolean);
   const incoming = (Array.isArray(incomingList) ? incomingList : []).filter(Boolean);
 
@@ -158,11 +203,21 @@ function mergeOrdersForWrite(diskList, incomingList) {
 
   const consumed = new Set();
   const blocked = [];
+  const resurrected = [];
   const merged = incoming.map((inc) => {
     const key = orderIdentityKey(inc);
     const queue = key ? byKey.get(key) : null;
     const current = queue && queue.length ? queue.shift() : null;
-    if (!current) return stripEditMarks(inc);
+    if (!current) {
+      // Not on disk. Either genuinely new, or archived out from under a sender
+      // that still has it — every key this order can be known by is checked,
+      // since archiving stamps the invoice number onto sage_reference.
+      if (archivedKeys && isArchivedOrder(inc, archivedKeys)) {
+        if (key) resurrected.push(key);
+        return null;
+      }
+      return stripEditMarks(inc);
+    }
     consumed.add(current);
 
     if (isOrderSageLocked(current)) {
@@ -217,8 +272,9 @@ function mergeOrdersForWrite(diskList, incomingList) {
     return next;
   });
 
+  const kept = merged.filter(Boolean);
   const leftovers = disk.filter((o) => !consumed.has(o));
-  return { orders: merged.concat(leftovers), blocked, restored: leftovers.length };
+  return { orders: kept.concat(leftovers), blocked, restored: leftovers.length, resurrected };
 }
 
 function getVendorName(order) {
@@ -239,6 +295,8 @@ module.exports = {
   sageOrderWorkFinished,
   isOrderSageLocked,
   mergeOrdersForWrite,
+  buildArchivedKeySet,
+  isArchivedOrder,
   SAGE_ORDER_LOCK_MAX_MS,
   SAGE_OWNED_FIELDS,
   SAGE_RESULT_FLAGS,

@@ -70,6 +70,7 @@ function registerAllIpc(ipcMain, deps) {
     stopSageHeartbeat: deps.stopSageHeartbeat,
     getMachineId: deps.getMachineId,
     mergeOrdersForWrite: deps.mergeOrdersForWrite,
+    getArchivedOrderKeys: deps.getArchivedOrderKeys,
     sageOrderLockIsLive: deps.sageOrderLockIsLive,
     isOrderSageLocked: deps.isOrderSageLocked,
     setSageOrderLock: deps.setSageOrderLock,

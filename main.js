@@ -13,6 +13,7 @@ const {
   sageOrderLockIsLive,
   isOrderSageLocked,
   mergeOrdersForWrite,
+  buildArchivedKeySet,
 } = require('./main/domain/orders.domain');
 const { extractJournalLine, extractSageTotal, extractReconcileApplied, createSageDomain } = require('./main/domain/sage.domain');
 const { searchArchiveEntries } = require('./main/domain/archive.domain');
@@ -811,7 +812,20 @@ function buildOrdersIndex(activeOrders, archivedOrders) {
   const add = (order, archived) => {
     if (!order) return;
     const key = normalizeOrderRef(order);
-    if (!key || indexByKey.has(key)) return;
+    if (!key) return;
+    const existing = indexByKey.get(key);
+    if (existing) {
+      // Already indexed from the active list. If it ALSO turns up in the
+      // archive, record that rather than discarding it: an order present in
+      // both IS a resurrected one, and indexing it as merely active is what
+      // would blind the guard in mergeOrdersForWrite to it forever. The active
+      // entry still supplies reference/source.
+      if (archived && !existing.archived) {
+        existing.archived = true;
+        existing.archivedAt = order.archivedAt || existing.archivedAt || null;
+      }
+      return;
+    }
     const reference =
       (order.reference || order.sage_reference || order.source_invoice || "").toString().trim();
     const source = (order.source || getVendorName(order) || "").toString().trim();
@@ -827,6 +841,18 @@ function buildOrdersIndex(activeOrders, archivedOrders) {
   (activeOrders || []).forEach((o) => add(o, false));
   (archivedOrders || []).forEach((o) => add(o, true));
   return Array.from(indexByKey.values());
+}
+// Keys of every order already in the archive, for mergeOrdersForWrite's
+// resurrection guard. Read fresh on each save — the index is rewritten whenever
+// anything is archived. Fails OPEN: an unreadable index must never start
+// silently dropping orders from a save, it just leaves the guard inactive.
+function getArchivedOrderKeys() {
+  try {
+    return buildArchivedKeySet(readOrdersIndex());
+  } catch (e) {
+    console.error('[orders] archive guard disabled — orders index unreadable', e?.message || e);
+    return new Set();
+  }
 }
 function refreshOrdersIndex(activeOrders, archivedOrders) {
   const archive = Array.isArray(archivedOrders) ? archivedOrders : readOrdersArchive();
@@ -1548,6 +1574,7 @@ const vendorOrdersService = createVendorOrdersService({
   readOrders,
   writeOrders,
   mergeOrdersForWrite,
+  getArchivedOrderKeys,
   getArchivedOrderRefs,
   getOrdersFile,
   loadConfig,
@@ -2132,6 +2159,7 @@ function registerAllIpc() {
     getGmailAssetsDir,
     orderMatchesKey,
     mergeOrdersForWrite,
+    getArchivedOrderKeys,
     sageOrderLockIsLive,
     isOrderSageLocked,
     setSageOrderLock,

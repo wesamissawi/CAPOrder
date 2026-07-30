@@ -40,6 +40,7 @@ const registerOrdersIpc = (ipcMain, deps) => {
     stopSageHeartbeat,
     getMachineId,
     mergeOrdersForWrite,
+    getArchivedOrderKeys,
     sageOrderLockIsLive,
     isOrderSageLocked,
     setSageOrderLock,
@@ -132,7 +133,14 @@ const registerOrdersIpc = (ipcMain, deps) => {
   // change, so the UI can refresh them instead of silently keeping its version.
   ipcMain.handle('orders:write', (_evt, orders) => {
     const current = readOrders();                  // existing array
-    const { orders: merged, blocked, restored } = mergeOrdersForWrite(current, orders ?? []);
+    const { orders: merged, blocked, restored, resurrected } = mergeOrdersForWrite(
+      current,
+      orders ?? [],
+      { archivedKeys: getArchivedOrderKeys?.() }
+    );
+    if (resurrected?.length) {
+      console.warn('[orders:write] refused to re-add already-archived order(s):', resurrected.join(', '));
+    }
     if (blocked.length) {
       console.warn('[orders:write] ignored stale copy of Sage-locked order(s):', blocked.join(', '));
     }
