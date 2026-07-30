@@ -1,5 +1,5 @@
 const registerUpdatesIpc = (ipcMain, deps) => {
-  const { app, autoUpdater, sendUpdateStatus } = deps;
+  const { app, autoUpdater, sendUpdateStatus, beginManualCheck } = deps;
 
   ipcMain.handle('updates:check', async () => {
     if (!app.isPackaged) {
@@ -8,6 +8,9 @@ const registerUpdatesIpc = (ipcMain, deps) => {
       return { ok: false, error: msg };
     }
     try {
+      // Tell the service this one is user-initiated: unlike the background
+      // timers, its failures must be shown rather than just logged.
+      beginManualCheck?.();
       sendUpdateStatus({ status: 'checking' });
       await autoUpdater.checkForUpdates();
       return { ok: true };

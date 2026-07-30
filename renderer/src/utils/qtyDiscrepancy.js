@@ -41,11 +41,41 @@ export function computeExpectedTotal(lineItems, taxRate = DEFAULT_TAX_RATE) {
   return { subtotal, tax, total: subtotal + tax };
 }
 
+// A credit memo's lines are stored already-signed — negative quantity, negative
+// extension — so qty x price nets negative while billed_total stays positive.
+// The comparison below assumes a purchase and can't read that: it lands on a
+// diff of roughly twice the invoice and trips every single time, and lowering a
+// negative quantity is meaningless so the correction modal can't clear it
+// either. Credits were always out of scope here; the problem is that `isCredit`
+// alone doesn't identify them, since only the Proforce scraper sets it. Shape is
+// the reliable signal. Measured against the order archive this is 7 of the 15
+// orders that trip the check.
+export function looksLikeCredit(order) {
+  if (order?.isCredit === true) return true;
+  const lineItems = getOrderLineItemsForCalc(order);
+  if (!lineItems.length) return false;
+  if (lineItems.some((li) => toNumber(li?.quantity) < 0)) return true;
+  return computeLineItemsSubtotal(lineItems) < 0;
+}
+
+// A gap the user has looked at and explicitly chosen to send anyway. Tied to the
+// exact diff that was acknowledged, so it stops gating THAT discrepancy and
+// nothing else: if the billed total or the line items move afterwards the check
+// comes back. Without this an order whose gap can't be closed by lowering
+// quantities (an environmental fee or core charge on the invoice, say) could
+// never be sent to Sage at all.
+export function qtyDiscrepancyAcknowledged(order, diff) {
+  const ackDiff = Number(order?.qtyDiscrepancyAckDiff);
+  if (!Number.isFinite(ackDiff)) return false;
+  return Math.abs(ackDiff - diff) < 0.01;
+}
+
 // Returns null when there isn't enough information to judge (no confirmed
 // billed total yet, no line items, already in Sage, or a credit — credits
 // follow their own sign conventions and aren't what this check targets).
 export function getOrderQtyDiscrepancy(order, taxRate = DEFAULT_TAX_RATE, threshold = DEFAULT_THRESHOLD) {
-  if (!order || order.enteredInSage === true || order.isCredit === true) return null;
+  if (!order || order.enteredInSage === true) return null;
+  if (looksLikeCredit(order)) return null;
   const billedRaw = order.billed_total ?? order.billedTotal;
   const billedNum = billedRaw === null || billedRaw === undefined || billedRaw === "" ? NaN : Number(billedRaw);
   if (!Number.isFinite(billedNum)) return null;
@@ -54,13 +84,17 @@ export function getOrderQtyDiscrepancy(order, taxRate = DEFAULT_TAX_RATE, thresh
   const expected = computeExpectedTotal(lineItems, taxRate);
   const diff = Number((billedNum - expected.total).toFixed(2));
   const thresholdNum = Number.isFinite(Number(threshold)) ? Number(threshold) : DEFAULT_THRESHOLD;
+  const acknowledged = qtyDiscrepancyAcknowledged(order, diff);
   return {
     billedTotal: billedNum,
     expectedTotal: expected.total,
     subtotal: expected.subtotal,
     tax: expected.tax,
     diff,
-    overThreshold: Math.abs(diff) > thresholdNum,
+    acknowledged,
+    // Gate Sage only on an unacknowledged gap — `overThreshold` is what the card
+    // reads to decide between "Confirm Quantities" and "Send to Sage".
+    overThreshold: Math.abs(diff) > thresholdNum && !acknowledged,
   };
 }
 

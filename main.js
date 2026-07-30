@@ -575,6 +575,28 @@ function ensureDataFileAt(file) {
 // Such failures now throw after a few quick retries; callers must abort
 // instead of writing.
 function readItemsAt(file) {
+  // ensureDataFileAt below creates an empty [] when the file is absent, which is
+  // right on first run but would otherwise turn "the file vanished" into a
+  // silent empty list — and the next save would then commit that emptiness. A
+  // populated .bak next to a missing primary is the signature of a deleted (not
+  // new) file, so refuse rather than guess. Atomic renames never leave the
+  // primary missing, so this only fires for a non-atomic writer or a hiccup.
+  try {
+    if (!fs.existsSync(file)) {
+      const bak = `${file}.bak`;
+      if (fs.existsSync(bak) && fs.statSync(bak).size > 2) {
+        const err = new Error(
+          `${path.basename(file)} is missing but its backup still has data — refusing to treat it as empty.`
+        );
+        err.code = 'ITEMS_READ_FAILED';
+        err.file = file;
+        throw err;
+      }
+    }
+  } catch (e) {
+    if (e?.code === 'ITEMS_READ_FAILED') throw e;
+    // stat/exists failure: fall through to the normal read + retry path
+  }
   ensureDataFileAt(file);
   let lastErr = null;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -677,6 +699,43 @@ function writeOrders(orders) {
   refreshOrdersIndex(orders);
   return res;
 }
+// Identity for matching one specific order against a freshly-read orders.json.
+// Scoped by source because a reference can collide across vendors.
+function orderRemovalKey(order) {
+  const ref = (order?.reference || order?.__row || '').toString().trim().toUpperCase();
+  const src = (order?.source || '').toString().trim().toUpperCase();
+  return ref ? `${ref}|${src}` : '';
+}
+
+// Remove exactly the orders we just archived or deleted, against a FRESH read of
+// orders.json — never by overwriting the file with the array we read earlier.
+// Archiving does real work in between (adding parts to Outstanding, reconciling
+// a credit against stock, writing the 3.5MB archive over SMB), and a blind
+// write-back of the pre-work array erased anything another machine had added or
+// edited in that window. Removal is expressed as a set operation so concurrent
+// changes survive: counted per key, so archiving one of two same-reference
+// orders still removes only one.
+function removeOrdersFromDisk(removedOrders) {
+  const counts = new Map();
+  (removedOrders || []).forEach((o) => {
+    const k = orderRemovalKey(o);
+    if (!k) return;
+    counts.set(k, (counts.get(k) || 0) + 1);
+  });
+  const fresh = readOrders() || [];
+  const keep = fresh.filter((o) => {
+    const k = orderRemovalKey(o);
+    const n = k ? counts.get(k) || 0 : 0;
+    if (n > 0) {
+      counts.set(k, n - 1);
+      return false;
+    }
+    return true;
+  });
+  writeOrders(keep);
+  return keep;
+}
+
 // Read-modify-write a SINGLE order on disk. Every Sage lock transition and both
 // Sage triggers go through here rather than riding along on the renderer's bulk
 // save, so a minutes-old in-memory array can never travel with them.
@@ -856,6 +915,7 @@ function getOrderLastUpdatedAt(order) {
 }
 function isOrderCompleteForArchive(order, minDays) {
   if (!order) return false;
+  if (isOrderSageLocked(order)) return false;   // see meetsArchiveCriteria
   const updatedAt = getOrderLastUpdatedAt(order);
   const updatedMs = parseDateMs(updatedAt);
   if (!updatedMs) return false;
@@ -881,6 +941,11 @@ function isOrderCompleteForArchive(order, minDays) {
 }
 function meetsArchiveCriteria(order) {
   if (!order) return false;
+  // Never archive an order the Sage pipeline currently holds. An invoice re-run
+  // happens on an order that is ALREADY enteredInSage, so every other criterion
+  // below can be satisfied while a run is mid-flight on another machine —
+  // archiving it there would pull it out from under the AHK.
+  if (isOrderSageLocked(order)) return false;
   return (
     order.detailStored === true &&
     order.pickedUp === true &&
@@ -1233,9 +1298,12 @@ function archiveCompletedOrders(options = {}) {
     archiveByKey.set(key, o);
   });
 
-  const keepActive = [];
   let archivedCount = 0;
   const newlyArchivedOrders = [];
+  // The orders as they were BEFORE processing — removeOrdersFromDisk matches on
+  // reference+source, which processing never changes, but keeping the originals
+  // makes that independence explicit.
+  const archivedSourceOrders = [];
   const allNewOutstandingItems = [];
   const nowIso = new Date().toISOString();
 
@@ -1258,9 +1326,8 @@ function archiveCompletedOrders(options = {}) {
         archiveByKey.set(key, archivedOrder);
         archivedCount += 1;
         newlyArchivedOrders.push(archivedOrder);
+        archivedSourceOrders.push(order);
       }
-    } else {
-      keepActive.push(order);
     }
   });
 
@@ -1274,7 +1341,9 @@ function archiveCompletedOrders(options = {}) {
 
   const mergedArchive = Array.from(archiveByKey.values());
   writeOrdersArchive(mergedArchive);
-  writeOrders(keepActive);
+  // Removal-only against a fresh read: the active list was loaded before the
+  // Outstanding/credit/archive writes above, which take seconds over SMB.
+  const remainingActive = removeOrdersFromDisk(archivedSourceOrders);
 
   try {
     archiveWorldEpicorAssets(newlyArchivedOrders);
@@ -1295,7 +1364,7 @@ function archiveCompletedOrders(options = {}) {
   return {
     ok: true,
     archived: archivedCount,
-    remaining: keepActive.length,
+    remaining: remainingActive.length,
     archiveCount: mergedArchive.length,
   };
 }
@@ -1391,14 +1460,9 @@ function archiveOrderByKey(refKeyRaw, source) {
   // any coincidental same-reference order from another vendor stays active
   // instead of being silently dropped.
   let found = null;
-  const keepActive = [];
   (active || []).forEach((order) => {
-    if (!order) return;
-    if (!found && orderMatchesKeyAndSource(order, key, src)) {
-      found = order;
-      return;
-    }
-    keepActive.push(order);
+    if (!order || found) return;
+    if (orderMatchesKeyAndSource(order, key, src)) found = order;
   });
 
   if (!found) return { ok: false, error: 'Order not found.' };
@@ -1429,7 +1493,7 @@ function archiveOrderByKey(refKeyRaw, source) {
 
   const mergedArchive = Array.from(archiveByKey.values());
   writeOrdersArchive(mergedArchive);
-  writeOrders(keepActive);
+  const remainingActive = removeOrdersFromDisk([found]);
 
   if (archivedOrder) {
     try {
@@ -1449,7 +1513,7 @@ function archiveOrderByKey(refKeyRaw, source) {
     }
   }
 
-  return { ok: true, archived: 1, remaining: keepActive.length };
+  return { ok: true, archived: 1, remaining: remainingActive.length };
 }
 
 // Permanently drop an order from active orders.json (no archive, no invoice
@@ -1463,16 +1527,16 @@ function deleteOrderByKey(refKeyRaw, source) {
   const src = (source || '').toString().trim().toUpperCase();
   const active = readOrders();
   let removed = 0;
-  const keep = (active || []).filter((order) => {
+  const matched = [];
+  (active || []).forEach((order) => {
     if (order && orderMatchesKeyAndSource(order, key, src)) {
       removed += 1;
-      return false;
+      matched.push(order);
     }
-    return true;
   });
   if (!removed) return { ok: false, error: 'Order not found.' };
-  writeOrders(keep);
-  return { ok: true, removed, remaining: keep.length };
+  const remainingActive = removeOrdersFromDisk(matched);
+  return { ok: true, removed, remaining: remainingActive.length };
 }
 
 const sageDomain = createSageDomain({ readOrders, writeOrders, orderMatchesKey });
@@ -1810,7 +1874,7 @@ const updatesService = createUpdatesService({
   app,
   getWin: () => win,
 });
-const { setupAutoUpdater, sendUpdateStatus } = updatesService;
+const { setupAutoUpdater, stopAutoUpdater, sendUpdateStatus, beginManualCheck } = updatesService;
 
 
 
@@ -1975,6 +2039,11 @@ app.on('before-quit', () => {
   } catch (e) {
     console.error('[sage-lock] release on quit failed', e);
   }
+  try {
+    stopAutoUpdater();
+  } catch (e) {
+    console.error('[updates] stopping update timers failed', e);
+  }
 });
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -1995,6 +2064,7 @@ function registerAllIpc() {
     app,
     autoUpdater,
     sendUpdateStatus,
+    beginManualCheck,
     LOCK_DURATION_MS,
     INSTANCE_DIR,
     INSTANCE_PATHS,

@@ -116,11 +116,34 @@ function orderIdentityKey(order) {
 }
 
 // Reconcile a full array coming from a renderer against what is on disk right
+// Renderer-only bookkeeping that must never be written to orders.json.
+const RENDERER_EDIT_MARKS = ["_dirtyFields", "_localDirty"];
+
+function stripEditMarks(order) {
+  if (!order) return order;
+  let out = order;
+  RENDERER_EDIT_MARKS.forEach((f) => {
+    if (Object.prototype.hasOwnProperty.call(out, f)) {
+      if (out === order) out = { ...order };
+      delete out[f];
+    }
+  });
+  return out;
+}
+
+// Reconcile a full array coming from a renderer against what is on disk right
 // now. Per order: a live Sage lock means the disk copy wins outright; otherwise
 // the renderer's edits are kept but the Sage-owned fields are taken from disk.
 // Orders present on disk but missing from the incoming array are preserved —
 // a renderer never deletes through a bulk write (archive/delete have their own
 // IPC), so a missing order just means the sender loaded before it existed.
+//
+// A renderer save carries the WHOLE array even when one checkbox changed, so
+// most of what arrives is simply whatever that window last read. When the
+// sender tags an order with `_dirtyFields` we therefore rebuild it from disk
+// and re-apply only those fields, which is what stops one machine's save from
+// reverting another's unrelated edit to the same order. Callers that send no
+// tags (vendor scrapes, older builds) keep the previous whole-order behaviour.
 function mergeOrdersForWrite(diskList, incomingList) {
   const disk = (Array.isArray(diskList) ? diskList : []).filter(Boolean);
   const incoming = (Array.isArray(incomingList) ? incomingList : []).filter(Boolean);
@@ -139,7 +162,7 @@ function mergeOrdersForWrite(diskList, incomingList) {
     const key = orderIdentityKey(inc);
     const queue = key ? byKey.get(key) : null;
     const current = queue && queue.length ? queue.shift() : null;
-    if (!current) return inc;
+    if (!current) return stripEditMarks(inc);
     consumed.add(current);
 
     if (isOrderSageLocked(current)) {
@@ -147,7 +170,20 @@ function mergeOrdersForWrite(diskList, incomingList) {
       return current;
     }
 
-    const next = { ...inc };
+    // Field-level when the sender said what it touched, whole-order otherwise.
+    const dirtyFields = Array.isArray(inc._dirtyFields) ? inc._dirtyFields : null;
+    let next;
+    if (dirtyFields) {
+      next = { ...current };
+      dirtyFields.forEach((field) => {
+        if (RENDERER_EDIT_MARKS.includes(field)) return;
+        next[field] = inc[field];
+      });
+      // Carry the edit's own timestamp; everything else already came from disk.
+      if (inc.lastUpdatedAt) next.lastUpdatedAt = inc.lastUpdatedAt;
+    } else {
+      next = { ...inc };
+    }
     SAGE_OWNED_FIELDS.forEach((field) => {
       if (Object.prototype.hasOwnProperty.call(current, field)) next[field] = current[field];
       else delete next[field];
@@ -177,6 +213,7 @@ function mergeOrdersForWrite(diskList, incomingList) {
     // Sweep away a lock whose work is done (or that timed out) instead of
     // leaving a dead field on the order forever.
     if (next.sage_lock) next.sage_lock = null;
+    RENDERER_EDIT_MARKS.forEach((f) => delete next[f]);
     return next;
   });
 

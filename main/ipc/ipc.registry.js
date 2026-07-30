@@ -156,6 +156,7 @@ function registerAllIpc(ipcMain, deps) {
     app: deps.app,
     autoUpdater: deps.autoUpdater,
     sendUpdateStatus: deps.sendUpdateStatus,
+    beginManualCheck: deps.beginManualCheck,
   });
 
   registerBubbleLocksIpc(ipcMain, {

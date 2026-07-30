@@ -44,6 +44,18 @@ function unassignedEpicorInvoices(invoices) {
   );
 }
 
+// Union of the field names already edited on an order and the ones in a new
+// patch. Bookkeeping fields are excluded — they change on every edit and would
+// otherwise make every order look like it had been touched everywhere.
+const DIRTY_FIELD_IGNORE = new Set(["lastUpdatedAt", "_localDirty", "_dirtyFields"]);
+function mergeDirtyFields(existing, patchVal) {
+  const set = new Set(Array.isArray(existing) ? existing : []);
+  Object.keys(patchVal || {}).forEach((f) => {
+    if (!DIRTY_FIELD_IGNORE.has(f)) set.add(f);
+  });
+  return Array.from(set);
+}
+
 // Debug logger — prints to the renderer DevTools console AND forwards to the
 // main-process terminal (via api.debugLog) so logs can be copied from the
 // window where `npm start` runs. Prefixed/tagged so they're easy to grep.
@@ -2420,8 +2432,7 @@ export default function App() {
       ]);
       const list = ordersRes?.state || ordersRes || [];
       const normalized = Array.isArray(list) ? list : [];
-      setOrders(normalized);
-      ordersLastSavedRef.current = JSON.stringify(normalized);
+      adoptSavedOrders(normalized);
       setOrdersDirty(false);
       if (pathRes?.path) setOrdersSourcePath(pathRes.path);
       setOrdersInitialized(true);
@@ -2472,6 +2483,12 @@ export default function App() {
             ...(patchVal || {}),
             lastUpdatedAt: new Date().toISOString(),
             _localDirty: true,
+            // WHICH fields the user changed, not just that the order changed.
+            // Tracking this per field is what lets two machines edit different
+            // fields of the same order without either silently losing the
+            // other's work — see the external merge below and
+            // mergeOrdersForWrite. Accumulates until the order is saved.
+            _dirtyFields: mergeDirtyFields(o._dirtyFields, patchVal),
           };
         });
       if (changed) setOrdersDirty(true);
@@ -2480,12 +2497,34 @@ export default function App() {
     });
     return result;
   }
+  // `_dirtyFields` rides along on the wire so main can tell a real edit from a
+  // stale value this window merely happened to be holding. It is stripped in
+  // mergeOrdersForWrite and so never reaches orders.json; `_localDirty` is
+  // renderer-only and is stripped here.
   function normalizeOrdersForSave(list) {
     return (list || []).map((o) => {
       const invFilled = Boolean((o?.source_invoice || "").trim());
       const { _localDirty, ...rest } = o || {};
       return { ...rest, hasInvoiceNum: invFilled };
     });
+  }
+  // Drop the edit-tracking marks once a save has been accepted, so the next
+  // external update doesn't keep re-protecting fields that are already on disk.
+  function clearDirtyMarks(list) {
+    return (list || []).map((o) => {
+      const { _localDirty, _dirtyFields, ...rest } = o || {};
+      return rest;
+    });
+  }
+  // Take an array that is now believed to match disk, put it in state and make
+  // it the clean baseline. Always goes through clearDirtyMarks so a saved edit
+  // stops being treated as pending — otherwise the next external update would
+  // keep re-applying it over fresher values from another machine.
+  function adoptSavedOrders(list) {
+    const cleaned = clearDirtyMarks(list);
+    setOrders(cleaned);
+    ordersLastSavedRef.current = JSON.stringify(cleaned);
+    return cleaned;
   }
   function handleOrderFieldChange(referenceKey, field, value) {
     updateOrderByKey(referenceKey, { [field]: value });
@@ -2503,8 +2542,9 @@ export default function App() {
     try {
       const saveRes = await api.writeOrders(normalized);
       if (saveRes?.ok) {
-        setOrders(normalized);
-        ordersLastSavedRef.current = JSON.stringify(normalized);
+        // Adopt what main actually wrote (it reconciles against disk), and drop
+        // the edit marks now that they're committed.
+        adoptSavedOrders(Array.isArray(saveRes.orders) ? saveRes.orders : normalized);
         setOrdersDirty(false);
       } else {
         console.error("[orders] failed to save", saveRes);
@@ -2605,7 +2645,24 @@ export default function App() {
   async function handleSaveQtyConfirm(refKey, nextLineItems, nextSageLineItems) {
     const patch = { lineItems: nextLineItems };
     if (nextSageLineItems) patch.sage_lineItems = nextSageLineItems;
+    // Correcting the quantities makes any earlier "send it anyway" moot — drop
+    // it so the check judges the new numbers on their own merits.
+    patch.qtyDiscrepancyAckDiff = null;
+    patch.qtyDiscrepancyAckAt = "";
     await updateOrderByKeyAndSave(refKey, patch);
+  }
+
+  // "Send to Sage anyway": record the exact gap the user reviewed, so the gate
+  // stops blocking THIS discrepancy without going blind to a future one — see
+  // qtyDiscrepancyAcknowledged. Needed because a gap where the invoice exceeds
+  // the line items (environmental fee, core charge, freight) can't be closed by
+  // lowering quantities, and without an override such an order could never
+  // reach Sage at all.
+  async function handleAcknowledgeQtyDiscrepancy(refKey, diff) {
+    await updateOrderByKeyAndSave(refKey, {
+      qtyDiscrepancyAckDiff: Number(diff),
+      qtyDiscrepancyAckAt: new Date().toISOString(),
+    });
   }
 
   function handleRenameBubble(bubbleId, newName) {
@@ -2729,8 +2786,13 @@ export default function App() {
       // Do NOT skip the whole push just because something on the page is
       // unsaved — that is how this window used to end up holding a copy of an
       // order that was already entered in Sage, and offering to send it again.
-      // Merge per order instead: locally edited orders keep the user's version,
-      // every other order takes the incoming one.
+      //
+      // Merge per FIELD, not per order. Keeping the whole locally-edited order
+      // meant that if another machine changed the same order, its change was
+      // invisible here until a refresh — and then quietly overwritten on the
+      // next save. Two people editing different fields of one order is not
+      // actually a conflict, so take the incoming (disk) copy as the base and
+      // re-apply only the fields this user actually touched.
       console.log("[orders] external update merged (local edits present)");
       setOrders((prev) => {
         const localDirty = new Map();
@@ -2747,14 +2809,21 @@ export default function App() {
           // if this window has unsaved changes to it — main would refuse them
           // anyway, so showing them would be a lie.
           if (!mine || isOrderSageLocked(o)) return o;
-          return mine;
+          const fields = Array.isArray(mine._dirtyFields) ? mine._dirtyFields : null;
+          // No field list (an edit made before this tracking existed): fall back
+          // to the old whole-order behaviour rather than dropping the edit.
+          if (!fields) return mine;
+          const merged = { ...o, _localDirty: true, _dirtyFields: fields };
+          fields.forEach((f) => {
+            merged[f] = mine[f];
+          });
+          return merged;
         });
       });
       setOrdersInitialized(true);
       return;
     }
-    setOrders(normalized);
-    ordersLastSavedRef.current = JSON.stringify(normalized);
+    adoptSavedOrders(normalized);
     setOrdersInitialized(true);
     setOrdersDirty(false);
   }
@@ -2773,9 +2842,7 @@ export default function App() {
       // wrote, so adopt that rather than our own array: any order it refused to
       // change (locked by Sage, or where our Sage fields were stale) is already
       // corrected in there.
-      const saved = Array.isArray(res.orders) ? res.orders : normalized;
-      setOrders(saved);
-      ordersLastSavedRef.current = JSON.stringify(saved);
+      adoptSavedOrders(Array.isArray(res.orders) ? res.orders : normalized);
       setOrdersDirty(false);
       if (res.blocked?.length) {
         setOrdersError(
@@ -2876,9 +2943,7 @@ export default function App() {
       const normalized = normalizeOrdersForSave(orders);
       const res = await api.writeOrders(normalized);
       if (!res?.ok) return false;
-      const saved = Array.isArray(res.orders) ? res.orders : normalized;
-      setOrders(saved);
-      ordersLastSavedRef.current = JSON.stringify(saved);
+      adoptSavedOrders(Array.isArray(res.orders) ? res.orders : normalized);
       setOrdersDirty(false);
       return true;
     } catch (e) {
@@ -3221,8 +3286,7 @@ export default function App() {
         try {
           const saveRes = await api.writeOrders(normalized);
           if (saveRes?.ok) {
-            setOrders(normalized);
-            ordersLastSavedRef.current = JSON.stringify(normalized);
+            adoptSavedOrders(normalized);
             setOrdersDirty(false);
           } else {
             saveFailed = true;
@@ -3318,8 +3382,7 @@ export default function App() {
       const saveRes = await api.writeOrders(normalizeOrdersForSave(next));
       if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save backfilled dates.");
       if (ordersInitialized) {
-        setOrders(next);
-        ordersLastSavedRef.current = JSON.stringify(next);
+        adoptSavedOrders(next);
         setOrdersDirty(false);
       }
     } catch (e) {
@@ -3434,8 +3497,7 @@ export default function App() {
         const saveRes = await api.writeOrders(nextList);
         if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the new order.");
         if (ordersInitialized) {
-          setOrders(nextList);
-          ordersLastSavedRef.current = JSON.stringify(nextList);
+          adoptSavedOrders(nextList);
           setOrdersDirty(false);
         }
       }
@@ -3521,8 +3583,7 @@ export default function App() {
       const saveRes = await api.writeOrders(normalized);
       if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the assignment.");
       if (ordersInitialized) {
-        setOrders(normalized);
-        ordersLastSavedRef.current = JSON.stringify(normalized);
+        adoptSavedOrders(normalized);
         setOrdersDirty(false);
       }
 
@@ -3871,8 +3932,7 @@ export default function App() {
         const saveRes = await api.writeOrders(nextList);
         if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the new credit order.");
         if (ordersInitialized) {
-          setOrders(nextList);
-          ordersLastSavedRef.current = JSON.stringify(nextList);
+          adoptSavedOrders(nextList);
           setOrdersDirty(false);
         }
       }
@@ -4172,8 +4232,7 @@ export default function App() {
         const saveRes = await api.writeOrders(nextList);
         if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the new order.");
         if (ordersInitialized) {
-          setOrders(nextList);
-          ordersLastSavedRef.current = JSON.stringify(nextList);
+          adoptSavedOrders(nextList);
           setOrdersDirty(false);
         }
       }
@@ -4440,8 +4499,7 @@ export default function App() {
         const normalized = normalizeOrdersForSave(patchedOrders);
         const saveRes = await api.writeOrders(normalized);
         if (!saveRes?.ok) throw new Error("Failed to save order. Your corrections are kept on screen — click Save to retry.");
-        setOrders(normalized);
-        ordersLastSavedRef.current = JSON.stringify(normalized);
+        adoptSavedOrders(normalized);
         setOrdersDirty(false);
       }
 
@@ -4511,8 +4569,7 @@ export default function App() {
         try {
           const saveRes = await api.writeOrders(normalized);
           if (saveRes?.ok) {
-            setOrders(normalized);
-            ordersLastSavedRef.current = JSON.stringify(normalized);
+            adoptSavedOrders(normalized);
             setOrdersDirty(false);
           } else {
             saveFailed = true;
@@ -4708,8 +4765,7 @@ export default function App() {
         try {
           const saveRes = await api.writeOrders(normalized);
           if (saveRes?.ok) {
-            setOrders(normalized);
-            ordersLastSavedRef.current = JSON.stringify(normalized);
+            adoptSavedOrders(normalized);
             setOrdersDirty(false);
           } else {
             saveFailed = true;
@@ -4844,8 +4900,7 @@ export default function App() {
           try {
             const saveRes = await api.writeOrders(normalized);
             if (saveRes?.ok) {
-              setOrders(normalized);
-              ordersLastSavedRef.current = JSON.stringify(normalized);
+              adoptSavedOrders(normalized);
               setOrdersDirty(false);
             } else {
               saveFailed = true;
@@ -4934,8 +4989,7 @@ export default function App() {
           try {
             const saveRes = await api.writeOrders(normalized);
             if (saveRes?.ok) {
-              setOrders(normalized);
-              ordersLastSavedRef.current = JSON.stringify(normalized);
+              adoptSavedOrders(normalized);
               setOrdersDirty(false);
             } else {
               saveFailed = true;
@@ -5021,8 +5075,7 @@ export default function App() {
       const normalized = normalizeOrdersForSave(nextOrders);
       const saveRes = await api.writeOrders(normalized);
       if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the matched order.");
-      setOrders(normalized);
-      ordersLastSavedRef.current = JSON.stringify(normalized);
+      adoptSavedOrders(normalized);
       setOrdersDirty(false);
 
       const settled = await settleSlipAsCreditReceived(slip.id);
@@ -5976,6 +6029,7 @@ export default function App() {
           taxRate={qtyDiscrepancyTaxRate}
           threshold={qtyDiscrepancyThreshold}
           onSave={handleSaveQtyConfirm}
+          onAcknowledge={handleAcknowledgeQtyDiscrepancy}
           onClose={() => setQtyConfirmModal(null)}
         />
       )}

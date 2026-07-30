@@ -97,9 +97,34 @@ AddNewOrders(allOrdersPath, newOrdersPath, defaultWarehouse := "TestWarehouse") 
     }
 
     ; --- Save back to file (pretty) ---
+    ; Temp file + FileMove, never FileDelete + FileAppend: deleting first leaves
+    ; a window with NO file on disk, and a reader that lands in it creates an
+    ; empty one and reads it back as "no orders" — which a later save then
+    ; commits for real. The replace is also retried, since another machine can
+    ; briefly hold the destination open without delete-sharing.
     outText := json.Dump(allOrders, "", "    ")
-    FileDelete, %allOrdersPath%
-    FileAppend, %outText%, %allOrdersPath%
+    tmpPath := allOrdersPath . ".tmp"
+    f := FileOpen(tmpPath, "w", "UTF-8-RAW")
+    if !IsObject(f) {
+        MsgBox, 16, Error, Couldn't open temp file:`n%tmpPath%
+        return false
+    }
+    f.Write(outText), f.Close()
+
+    moved := false
+    Loop, 5 {
+        FileMove, %tmpPath%, %allOrdersPath%, 1  ; 1 = overwrite
+        if (!ErrorLevel) {
+            moved := true
+            break
+        }
+        Sleep, % 40 * A_Index
+    }
+    if (!moved) {
+        MsgBox, 16, Error, Couldn't move temp over original:`n%allOrdersPath%
+        FileDelete, %tmpPath%
+        return false
+    }
 
     ; Return a small result object for programmatic use
     result := {}
