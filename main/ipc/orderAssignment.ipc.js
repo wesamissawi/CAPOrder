@@ -520,18 +520,41 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
       const uid = payload?.uid;
       if (!uid) return { ok: false, error: 'Missing item uid.' };
 
+      // Where the part is headed. Defaults to NEW STOCK so an older caller that
+      // doesn't send one behaves exactly as before. RETURNS is for a part going
+      // back to the warehouse; CASHPAD puts it on the cash-sale path, which is
+      // what makes this usable from the New Stock pool as well as from an order.
+      const DESTINATIONS = new Set(['NEW STOCK', 'RETURNS', 'CASHPAD']);
+      const destination = upper(payload?.destination) || 'NEW STOCK';
+      if (!DESTINATIONS.has(destination)) {
+        return { ok: false, error: `Unsupported destination "${destination}".` };
+      }
+
       const items = readItems();
       const item = items.find((it) => it.uid === uid);
       if (!item) return { ok: false, error: 'Item not found.' };
-      if (isStagingDestination(item.allocated_to)) {
-        return { ok: false, error: 'This part is already unassigned.' };
+      // The old guard was "already unassigned", which also blocked the moves
+      // this now has to allow (New Stock -> CashPad/Returns). The thing actually
+      // worth refusing is a move that wouldn't change anything.
+      if (upper(item.allocated_to) === destination) {
+        return { ok: false, error: `This part is already in ${destination}.` };
       }
+      // Whether the part is leaving a real customer order, as opposed to being
+      // pushed out of a staging pool. Only the former is an unassignment, and
+      // only the former should touch the assignment ledger below.
+      const wasAllocated = !isStagingDestination(item.allocated_to);
 
       const nowIso = new Date().toISOString();
       const moved = {
         ...item,
-        allocated_to: 'NEW STOCK',
-        accountingPath: 'OUTSTANDING',
+        allocated_to: destination,
+        accountingPath: destination === 'CASHPAD' ? 'CASH_SALE' : 'OUTSTANDING',
+        // A requisition slip belongs to the part only while it's in RETURNS —
+        // carrying a stale slip link out of Returns would put it back on a slip
+        // it's no longer part of.
+        ...(destination === 'RETURNS'
+          ? {}
+          : { return_slip_id: '', return_slip_date: '', return_slip_po: '', return_slip_status: '' }),
         last_moved_at: nowIso,
         rev: (Number(item.rev) || 0) + 1,
       };
@@ -547,7 +570,7 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
       // every read — moving it is enough, there's no ledger entry to trim.
       const orderKey = upper(item.order_key);
       const lineIdx = Number(item.order_line_idx);
-      if (orderKey && Number.isInteger(lineIdx)) {
+      if (wasAllocated && orderKey && Number.isInteger(lineIdx)) {
         const ledger = readOrderAssignments();
         const ledgerLine = ledger[orderKey]?.lines?.[String(lineIdx)];
         if (ledgerLine?.assignments?.length) {
@@ -577,7 +600,12 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
         }
       }
 
-      return { ok: true, returned: Number(item.quantity) || 0, destination: upper(item.allocated_to) };
+      return {
+        ok: true,
+        returned: Number(item.quantity) || 0,
+        destination,
+        from: upper(item.allocated_to),
+      };
     } catch (e) {
       console.error('[order-assignment:unassign-item]', e);
       return { ok: false, error: e?.message || 'Failed to unassign item.' };

@@ -17,6 +17,7 @@ import {
   CardTotals,
   CashPadPanel,
   ItemRow,
+  MOVE_TARGETS,
   computeCardTotals,
   money,
   useItemHistoryByUid,
@@ -115,7 +116,7 @@ function OrderCard({
   onRequestPrint,
   onSetFlag,
   onSavePrice,
-  onRemoveItem,
+  onMoveItem,
   removingUids,
   onSendToCashPad,
   onSendToReturns,
@@ -353,9 +354,15 @@ function OrderCard({
                 )}
                 history={historyByUid.get(it.uid) || []}
                 onSavePrice={(next) => onSavePrice(it.uid, next)}
-                // "Remove" means "send back to New Stock", which is meaningless
-                // for a part already sitting in a pool.
-                onRemove={isPool ? undefined : () => onRemoveItem(it, bubble.name)}
+                // A part leaving an order goes back on the shelf, onto a cash
+                // sale, or back to the warehouse. A part sitting in a pool has
+                // already left the order — from there the useful moves are onto
+                // a sale or out as a return.
+                moveLabel={isPool ? "Move" : "Remove"}
+                moveTargets={
+                  isPool ? ["CASHPAD", "RETURNS"] : ["NEW STOCK", "CASHPAD", "RETURNS"]
+                }
+                onMove={(target) => onMoveItem(it, bubble.name, target)}
               />
             ))}
           </div>
@@ -520,17 +527,29 @@ export default function SalesOrderView({
     onUpdateItem(uid, { allocated_for: value });
   };
 
-  const handleRemoveItem = async (item, bubbleName) => {
+  // What each destination actually means for the part, spelled out in the
+  // confirm — "Remove" used to mean New Stock silently, and the whole point of
+  // the picker is that where it lands is now a decision.
+  const MOVE_BLURB = {
+    "NEW STOCK": "It goes back to New Stock as unallocated stock, and is no longer assigned to this order — Order Assignment will show it as unassigned again.",
+    RETURNS:
+      "It moves into RETURNS as unassigned returns stock — Returns Management can put it on a requisition slip — and it is no longer assigned to this order.",
+    CASHPAD:
+      'It moves into CashPad on the cash-sale path, where "Auto-fill from CashPad" can match it to a payment.',
+  };
+
+  const handleMoveItem = async (item, fromName, destination) => {
+    const label = MOVE_TARGETS[destination]?.label || destination;
     const ok = await api.confirm(
-      `Remove ${item.itemcode} from ${bubbleName}?`,
-      "It goes back to New Stock and is no longer assigned to this order — Order Assignment will show it as unassigned again."
+      `Send ${item.itemcode} from ${fromName} to ${label}?`,
+      MOVE_BLURB[destination] || ""
     );
     if (!ok) return;
     setError("");
     setRemovingUids((prev) => new Set(prev).add(item.uid));
     try {
-      const res = await api.unassignOrderItem({ uid: item.uid });
-      if (!res?.ok) setError(res?.error || "Failed to remove this part.");
+      const res = await api.unassignOrderItem({ uid: item.uid, destination });
+      if (!res?.ok) setError(res?.error || `Failed to send this part to ${label}.`);
     } finally {
       setRemovingUids((prev) => {
         const next = new Set(prev);
@@ -616,7 +635,7 @@ export default function SalesOrderView({
                   onRequestPrint={onRequestPrint}
                   onSetFlag={onSetBubbleFlag}
                   onSavePrice={handleSavePrice}
-                  onRemoveItem={handleRemoveItem}
+                  onMoveItem={handleMoveItem}
                   removingUids={removingUids}
                   onSendToCashPad={onSendToCashPad}
                   onSendToReturns={onSendToReturns}
@@ -661,7 +680,7 @@ export default function SalesOrderView({
                 onRequestPrint={onRequestPrint}
                 onSetFlag={onSetBubbleFlag}
                 onSavePrice={handleSavePrice}
-                onRemoveItem={handleRemoveItem}
+                onMoveItem={handleMoveItem}
                 removingUids={removingUids}
               />
             ))}
@@ -675,7 +694,7 @@ export default function SalesOrderView({
         historyByUid={historyByUid}
         removingUids={removingUids}
         onSavePrice={handleSavePrice}
-        onRemoveItem={handleRemoveItem}
+        onMoveItem={handleMoveItem}
         collapsed={cashPadCollapsed}
         onToggleCollapse={() => setCashPadCollapsed((v) => !v)}
       />

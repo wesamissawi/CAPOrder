@@ -161,6 +161,23 @@ function PriceField({ label, value, onSave, width = "w-16" }) {
 // One part inside an order card. `showDiscount` turns on the cash-sales extras:
 // a second "Disc" price box plus the cost/margin readout, which is the only
 // thing that differs between the two views' rows.
+// Where a part can be sent off a card. Kept here rather than per-view so the
+// wording and colours are identical everywhere the picker appears.
+export const MOVE_TARGETS = {
+  "NEW STOCK": {
+    label: "New Stock",
+    cls: "border-slate-300 bg-slate-50 text-slate-700 hover:bg-slate-100",
+  },
+  RETURNS: {
+    label: "Returns",
+    cls: "border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100",
+  },
+  CASHPAD: {
+    label: "CashPad",
+    cls: "border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100",
+  },
+};
+
 export function ItemRow({
   item,
   arrived,
@@ -169,9 +186,15 @@ export function ItemRow({
   showDiscount = false,
   onSavePrice,
   onSaveDiscount,
-  onRemove,
+  // Destinations this row can be sent to. The button opens a picker rather than
+  // moving straight away — "Remove" used to silently mean New Stock, which is
+  // only ever right half the time.
+  moveTargets = [],
+  moveLabel = "Move",
+  onMove,
 }) {
   const [showHistory, setShowHistory] = useState(false);
+  const [picking, setPicking] = useState(false);
   const qty = toNum(item.quantity);
   const cost = toNum(item.cost);
   const sell = toNum(item.allocated_for);
@@ -212,16 +235,45 @@ export function ItemRow({
             Arrived
           </span>
         )}
-        {onRemove && (
+        {moveTargets.length > 0 && onMove && !picking && (
           <button
-            onClick={onRemove}
-            className="shrink-0 rounded-md border border-rose-300 bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-700 hover:bg-rose-100"
-            title="Unassign this part — it goes back to New Stock"
+            onClick={() => setPicking(true)}
+            className="shrink-0 rounded-md border border-slate-300 bg-white px-1.5 py-0.5 text-[10px] font-bold text-slate-600 hover:bg-slate-50"
+            title="Send this part somewhere else"
           >
-            Remove
+            {moveLabel}
           </button>
         )}
       </div>
+
+      {picking && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+            Send to
+          </span>
+          {moveTargets.map((key) => {
+            const t = MOVE_TARGETS[key] || { label: key, cls: MOVE_TARGETS["NEW STOCK"].cls };
+            return (
+              <button
+                key={key}
+                onClick={() => {
+                  setPicking(false);
+                  onMove(key);
+                }}
+                className={`rounded-md border px-2 py-0.5 text-[10px] font-bold ${t.cls}`}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+          <button
+            onClick={() => setPicking(false)}
+            className="ml-auto rounded-md px-1.5 py-0.5 text-[10px] font-semibold text-slate-400 hover:text-slate-600"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
         <span>Qty {item.quantity}</span>
         <span>Cost {money(cost)}</span>
@@ -279,7 +331,7 @@ export function CashPadPanel({
   historyByUid,
   removingUids,
   onSavePrice,
-  onRemoveItem,
+  onMoveItem,
   collapsed,
   onToggleCollapse,
 }) {
@@ -333,7 +385,8 @@ export function CashPadPanel({
               )}
               history={historyByUid.get(it.uid) || []}
               onSavePrice={(next) => onSavePrice(it.uid, next)}
-              onRemove={() => onRemoveItem(it, "CashPad")}
+              moveTargets={["NEW STOCK", "RETURNS"]}
+              onMove={(target) => onMoveItem(it, "CashPad", target)}
             />
           ))}
         </div>

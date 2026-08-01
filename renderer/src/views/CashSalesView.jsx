@@ -16,6 +16,7 @@ import {
   CardTotals,
   CashPadPanel,
   ItemRow,
+  MOVE_TARGETS,
   computeCardTotals,
   effectivePrice,
   money,
@@ -241,7 +242,7 @@ function CashSaleCard({
   onRequestPrint,
   onSetFlag,
   onUpdateItem,
-  onRemoveItem,
+  onMoveItem,
   removingUids,
   payments,
   paymentsLoading,
@@ -385,7 +386,12 @@ function CashSaleCard({
                 showDiscount
                 onSavePrice={(next) => onUpdateItem(it.uid, { allocated_for: next })}
                 onSaveDiscount={(next) => onUpdateItem(it.uid, { discounted_price: next })}
-                onRemove={() => onRemoveItem(it, bubble.name)}
+                moveLabel="Remove"
+                // CashPad is a real destination from here: it pulls the part out
+                // of this sale and back into the staging pool, which is how a
+                // mis-split sale gets re-matched to a payment.
+                moveTargets={["NEW STOCK", "CASHPAD", "RETURNS"]}
+                onMove={(target) => onMoveItem(it, bubble.name, target)}
               />
             ))}
           </div>
@@ -587,17 +593,28 @@ export default function CashSalesView({
       return next;
     });
 
-  const handleRemoveItem = async (item, bubbleName) => {
+  // Same picker the Sales Order view uses: a part leaving a sale is either
+  // going back on the shelf or back to the warehouse, and which one it is was
+  // never something "Remove" should have decided on its own.
+  const MOVE_BLURB = {
+    "NEW STOCK": "It goes back to New Stock as unallocated stock and is no longer part of this sale.",
+    RETURNS:
+      "It moves into RETURNS as unassigned returns stock — Returns Management can put it on a requisition slip — and is no longer part of this sale.",
+    CASHPAD: 'It moves into CashPad, where "Auto-fill from CashPad" can match it to a payment.',
+  };
+
+  const handleMoveItem = async (item, bubbleName, destination) => {
+    const label = MOVE_TARGETS[destination]?.label || destination;
     const ok = await api.confirm(
-      `Remove ${item.itemcode} from ${bubbleName}?`,
-      "It goes back to New Stock and is no longer part of this sale."
+      `Send ${item.itemcode} from ${bubbleName} to ${label}?`,
+      MOVE_BLURB[destination] || ""
     );
     if (!ok) return;
     setError("");
     setRemovingUids((prev) => new Set(prev).add(item.uid));
     try {
-      const res = await api.unassignOrderItem({ uid: item.uid });
-      if (!res?.ok) setError(res?.error || "Failed to remove this part.");
+      const res = await api.unassignOrderItem({ uid: item.uid, destination });
+      if (!res?.ok) setError(res?.error || `Failed to send this part to ${label}.`);
     } finally {
       setRemovingUids((prev) => {
         const next = new Set(prev);
@@ -680,7 +697,7 @@ export default function CashSalesView({
             onRequestPrint={onRequestPrint}
             onSetFlag={onSetBubbleFlag}
             onUpdateItem={onUpdateItem}
-            onRemoveItem={handleRemoveItem}
+            onMoveItem={handleMoveItem}
             removingUids={removingUids}
             payments={payments}
             paymentsLoading={paymentsLoading}
@@ -702,7 +719,7 @@ export default function CashSalesView({
         historyByUid={historyByUid}
         removingUids={removingUids}
         onSavePrice={(uid, next) => onUpdateItem(uid, { allocated_for: next })}
-        onRemoveItem={handleRemoveItem}
+        onMoveItem={handleMoveItem}
         collapsed={cashPadCollapsed}
         onToggleCollapse={() => setCashPadCollapsed((v) => !v)}
       />
