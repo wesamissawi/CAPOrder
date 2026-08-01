@@ -17,6 +17,7 @@ const {
 } = require('./main/domain/orders.domain');
 const { extractJournalLine, extractSageTotal, extractReconcileApplied, createSageDomain } = require('./main/domain/sage.domain');
 const { searchArchiveEntries } = require('./main/domain/archive.domain');
+const { locatePart } = require('./main/domain/locate.domain');
 const { normalizeSharedBubblePayload } = require('./main/domain/sharedBubble.domain');
 const { createItemsService } = require('./main/services/items.service');
 const { createWatchersService } = require('./main/services/watchers.service');
@@ -45,6 +46,13 @@ const { fetchProforceCreditInvoices } = require('./src/scrapers/proforceCreditIn
 const { fetchTransbecCreditInvoices } = require('./src/scrapers/transbecCreditInvoice');
 const { fetchCbkInvoices } = require('./src/scrapers/cbkInvoice');
 const { runInteractiveAuth, verifyConnection } = require('./src/scrapers/gmail.auth');
+const {
+  openCloverSession,
+  scrapeCloverPayments,
+  closeCloverSession,
+  getCloverStatus,
+} = require('./src/scrapers/cloverScraper');
+const { resolveCapCode } = require('./src/scrapers/capRules');
 
 const isDev = !app.isPackaged;
 
@@ -72,10 +80,20 @@ const BUSINESS_FILE_BASENAMES = {
   ordersIndex: 'orders_index.json',
   ordersArchive: 'orders_archive.json',
   ordersArchiveBackup: 'orders_archive.json.bak',
+  orderAssignments: 'order_assignments.json',
   payments: 'payments.json',
   paymentsBackup: 'payments.json.bak',
+  // Every Clover payment id ever scraped, so a payment the user has since
+  // edited or deleted is never re-imported. Shared, like payments.json itself:
+  // a scrape on one machine must not reappear on another.
+  cloverLedger: 'clover_scraped.json',
   archived: 'archived_bubbles.json',
   archivedBackup: 'archived_bubbles.json.bak',
+  // One row per "Send to Sage Sales" run: what was sold, which payment settled
+  // it, and the Sage invoice number the AHK read off the form. Shared, because
+  // the report has to show every run whichever machine made it.
+  sageSalesRuns: 'sage_sales_runs.json',
+  sageSalesRunsBackup: 'sage_sales_runs.json.bak',
 };
 const BUSINESS_FILE_LIST = Object.values(BUSINESS_FILE_BASENAMES);
 
@@ -130,6 +148,12 @@ function getEpicorAssetsDir() {
 }
 function getGmailAssetsDir() {
   return path.join(getSharedDataDir(), 'gmail');
+}
+// Clover keeps nothing shared: no session is stored (the user logs in by hand
+// every time) and the only thing ever written is a page snapshot when a scrape
+// comes back empty, which is machine-local troubleshooting, not business data.
+function getCloverDebugDir() {
+  return path.join(INSTANCE_DIR, 'clover');
 }
 function getTransbecInvoiceCachePath() {
   return path.join(getGmailAssetsDir(), 'transbec_invoice_cache.json');
@@ -283,10 +307,14 @@ function resolveBusinessPaths() {
     ordersIndex: path.join(queueDir, BUSINESS_FILE_BASENAMES.ordersIndex),
     ordersArchive: path.join(queueDir, BUSINESS_FILE_BASENAMES.ordersArchive),
     ordersArchiveBackup: path.join(queueDir, BUSINESS_FILE_BASENAMES.ordersArchiveBackup),
+    orderAssignments: path.join(queueDir, BUSINESS_FILE_BASENAMES.orderAssignments),
     payments: path.join(queueDir, BUSINESS_FILE_BASENAMES.payments),
     paymentsBackup: path.join(queueDir, BUSINESS_FILE_BASENAMES.paymentsBackup),
+    cloverLedger: path.join(queueDir, BUSINESS_FILE_BASENAMES.cloverLedger),
     archived: path.join(sharedDir, BUSINESS_FILE_BASENAMES.archived),
     archivedBackup: path.join(sharedDir, BUSINESS_FILE_BASENAMES.archivedBackup),
+    sageSalesRuns: path.join(queueDir, BUSINESS_FILE_BASENAMES.sageSalesRuns),
+    sageSalesRunsBackup: path.join(queueDir, BUSINESS_FILE_BASENAMES.sageSalesRunsBackup),
   };
 }
 function ensureBusinessFiles() {
@@ -304,6 +332,8 @@ function ensureBusinessFiles() {
     resolved.paymentsBackup,
     resolved.archived,
     resolved.archivedBackup,
+    resolved.sageSalesRuns,
+    resolved.sageSalesRunsBackup,
   ].forEach((file) => ensureDataFileAt(file));
 }
 function getResolvedPathsSummary() {
@@ -321,6 +351,7 @@ function getResolvedPathsSummary() {
     payments_json_bak: { path: resolved.paymentsBackup, exists: fs.existsSync(resolved.paymentsBackup) },
     archived_bubbles: { path: resolved.archived, exists: fs.existsSync(resolved.archived) },
     archived_bubbles_bak: { path: resolved.archivedBackup, exists: fs.existsSync(resolved.archivedBackup) },
+    sage_sales_runs: { path: resolved.sageSalesRuns, exists: fs.existsSync(resolved.sageSalesRuns) },
   };
   return {
     sharedDir: resolved.sharedDir,
@@ -683,6 +714,53 @@ function readOrdersIndex() {
 function readOrdersArchive() {
   return readItemsAt(getOrdersArchiveFile());
 }
+// ---- Order Assignment ledger ----
+//
+// A durable record of "this line's parts went there". It exists because the
+// live item store is NOT a permanent history: archiving a bubble removes its
+// items entirely, which would make an old, fully-handled order line read as
+// untouched again. Assignment writes both the item movement (the mechanism)
+// and a ledger record (the memory).
+//
+// Shape: { "<orderKey>": { resolved, lines: { "<idx>": { resolved, assignments: [...] } } } }
+// An object, not an array — hence its own ensure/read rather than readItemsAt.
+function getOrderAssignmentsFile() {
+  const resolved = resolveBusinessPaths();
+  return resolved.orderAssignments;
+}
+function ensureOrderAssignmentsFile() {
+  const file = getOrderAssignmentsFile();
+  try {
+    ensureDir(path.dirname(file));
+    if (!fs.existsSync(file)) fs.writeFileSync(file, '{}', 'utf-8');
+  } catch (e) {
+    console.error('[order-assignments] ensure failed', e);
+  }
+  return file;
+}
+function readOrderAssignments() {
+  const file = ensureOrderAssignmentsFile();
+  try {
+    const raw = fs.readFileSync(file, 'utf-8');
+    if (!raw.trim()) return {};
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    return {};
+  } catch (e) {
+    // Unlike the item queues, a ledger read failure is not destructive on its
+    // own — but it must not silently read as "nothing assigned", which would
+    // wrongly blank the view. Surface it to the caller.
+    const err = new Error(`Could not read ${BUSINESS_FILE_BASENAMES.orderAssignments}: ${e?.message || e}`);
+    err.code = 'ASSIGNMENTS_READ_FAILED';
+    throw err;
+  }
+}
+function writeOrderAssignments(ledger) {
+  const file = getOrderAssignmentsFile();
+  backupFile(file);
+  ensureOrderAssignmentsFile();
+  writeJsonAtomic(file, JSON.stringify(ledger ?? {}, null, 2));
+}
 function ensureArchiveFileAt(file) {
   ensureDataFileAt(file);
 }
@@ -805,6 +883,33 @@ function writePayments(payments) {
   backupFile(file);
   ensureDataFileAt(file);
   writeJsonAtomic(file, JSON.stringify(payments ?? [], null, 2));
+  return { ok: true, path: file };
+}
+function getSageSalesRunsFile() {
+  const resolved = resolveBusinessPaths();
+  return resolved.sageSalesRuns;
+}
+function readSageSalesRuns() {
+  return readItemsAt(getSageSalesRunsFile());
+}
+function writeSageSalesRuns(runs) {
+  const file = getSageSalesRunsFile();
+  backupFile(file);
+  ensureDataFileAt(file);
+  writeJsonAtomic(file, JSON.stringify(runs ?? [], null, 2));
+  return { ok: true, path: file };
+}
+function getCloverLedgerFile() {
+  const resolved = resolveBusinessPaths();
+  return resolved.cloverLedger;
+}
+function readCloverLedger() {
+  return readItemsAt(getCloverLedgerFile());
+}
+function writeCloverLedger(entries) {
+  const file = getCloverLedgerFile();
+  ensureDataFileAt(file);
+  writeJsonAtomic(file, JSON.stringify(entries ?? [], null, 2));
   return { ok: true, path: file };
 }
 function buildOrdersIndex(activeOrders, archivedOrders) {
@@ -1216,9 +1321,9 @@ function archiveBestbuyGmailAssets(archivedOrders) {
 function addOrderLineItemsToNewStock(order) {
   if (!order || !Array.isArray(order.lineItems)) return { order, newItems: [] };
   const newItems = [];
-  const updatedLineItems = order.lineItems.map((line) => {
+  const updatedLineItems = order.lineItems.map((line, idx) => {
     if (!line || line.addedToOutstanding === true) return line;
-    newItems.push({ ...makeOutstandingFromLine(order, line), allocated_to: 'NEW STOCK' });
+    newItems.push({ ...makeOutstandingFromLine(order, line, idx), allocated_to: 'NEW STOCK' });
     return { ...line, addedToOutstanding: true };
   });
   if (!newItems.length) return { order, newItems: [] };
@@ -1406,6 +1511,18 @@ function purgeOldOrdersArchive(days = 90) {
   return { ok: true, removed, remaining: keep.length };
 }
 
+// Never let a bad/missing rule break a search — a blank capCode just falls the
+// archive view back to the raw "<line> <part>" comparison.
+function resolveCapCodeForLine(warehouse, line) {
+  try {
+    const r = resolveCapCode(warehouse, line?.partLineCode, line?.partNumber, line?.partDescription);
+    return (r?.code || '').trim();
+  } catch (e) {
+    console.error('[archive search] capCode resolve failed', e?.message);
+    return '';
+  }
+}
+
 function searchOrdersArchive(term) {
   const norm = (v) => (v ?? '').toString().trim().toLowerCase();
   const strip = (v) => v.replace(/[-\s]/g, '');
@@ -1442,6 +1559,13 @@ function searchOrdersArchive(term) {
         partNumber: line?.partNumber || '',
         partLineCode: line?.partLineCode || '',
         itemcode: line?.partLineCode ? `${line.partLineCode} ${line.partNumber}`.trim() : (line?.partNumber || ''),
+        // The code this line WOULD carry as a stock item. makeOutstandingFromLine
+        // runs every line through the CAP rules before storing it, so for some
+        // warehouses the stored itemcode differs from the raw "<line> <part>"
+        // (Transbec: "TRB BCD1210" -> "BCD 1210"). Resolve it here, with the
+        // same warehouse precedence, so the archive view can match a line
+        // against live stock and item history instead of missing it entirely.
+        capCode: resolveCapCodeForLine(warehouse || order?.source || '', line),
         partDescription: line?.partDescription || '',
         costPrice: line?.costPrice || '',
         costPriceValue: line?.costPriceValue ?? null,
@@ -2071,6 +2195,13 @@ app.on('before-quit', () => {
   } catch (e) {
     console.error('[updates] stopping update timers failed', e);
   }
+  // Playwright's Chromium is a child process, not an Electron window, so it
+  // outlives the app unless we close it here.
+  try {
+    closeCloverSession();
+  } catch (e) {
+    console.error('[clover] closing browser on quit failed', e);
+  }
 });
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -2111,6 +2242,14 @@ function registerAllIpc() {
     readPayments,
     writePayments,
     getPaymentsFile,
+    openCloverSession,
+    scrapeCloverPayments,
+    closeCloverSession,
+    getCloverStatus,
+    getCloverDebugDir,
+    readCloverLedger,
+    writeCloverLedger,
+    getCloverLedgerFile,
     archiveCompletedOrders,
     archiveOrderByKey,
     deleteOrderByKey,
@@ -2118,6 +2257,10 @@ function registerAllIpc() {
     purgeOldOrdersArchive,
     readOrdersArchive,
     writeOrdersArchive,
+    readOrderAssignments,
+    writeOrderAssignments,
+    getOrderAssignmentsFile,
+    randomUUID,
     resetSageQueue,
     stopOrdersWatching,
     startOrdersWatching,
@@ -2169,6 +2312,9 @@ function registerAllIpc() {
     runSageSalesInvoice,
     applyReconcileResult,
     alignSageTotalSign,
+    readSageSalesRuns,
+    writeSageSalesRuns,
+    getSageSalesRunsFile,
     readSharedBubbleData,
     getSharedBubbleDataPath,
     writeSharedBubbleData,
@@ -2177,6 +2323,7 @@ function registerAllIpc() {
     writeArchivedEntries,
     getArchiveFile,
     searchArchiveEntries,
+    locatePart,
     normalizeSharedBubblePayload,
     readUIState,
     writeUIState,

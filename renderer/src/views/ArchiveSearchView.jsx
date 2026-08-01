@@ -51,6 +51,182 @@ function historyDetail(h) {
   return "";
 }
 
+// "Find Anywhere" — the one search that answers "where IS this part", rather
+// than "did I buy it" (Search Purchases) or "did I archive it" (Search Sales).
+// Its whole point is that a part alive in CashPad reads as not-found in both of
+// those, which looks exactly like a lost part.
+function FindAnywhere() {
+  const [term, setTerm] = useState("");
+  const [res, setRes] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function run() {
+    const q = term.trim();
+    if (!q) return;
+    setBusy(true);
+    setError("");
+    try {
+      const out = await api.locatePart(q);
+      if (!out?.ok) throw new Error(out?.error || "Lookup failed.");
+      setRes(out);
+    } catch (e) {
+      setError(e?.message || "Lookup failed.");
+      setRes(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const Section = ({ title, count, tone, children }) => (
+    <Card className="space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="text-base font-bold text-slate-800">{title}</span>
+        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-bold ${tone}`}>{count}</span>
+      </div>
+      {children}
+    </Card>
+  );
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <div className="flex flex-col gap-3">
+          <div>
+            <h2 className="text-xl font-semibold text-slate-800">Find Anywhere</h2>
+            <p className="text-sm text-slate-500">
+              Sweeps every store at once — live stock, the sales archive, purchase orders
+              and the full lifecycle log. Part number, description, reference or uid.
+            </p>
+          </div>
+          <div className="flex gap-3 items-end">
+            <input
+              className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm"
+              placeholder="e.g. 661332, PRI C661332, OJ7719, or a description"
+              value={term}
+              onChange={(e) => setTerm(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && run()}
+            />
+            <button
+              className="rounded-xl bg-indigo-600 text-white px-4 py-2 font-semibold shadow hover:bg-indigo-700 disabled:opacity-60"
+              onClick={run}
+              disabled={busy || !term.trim()}
+            >
+              {busy ? "Looking..." : "Find"}
+            </button>
+          </div>
+          {error && <div className="text-sm text-red-600">{error}</div>}
+        </div>
+      </Card>
+
+      {res && !res.found && (
+        <Card className="text-sm text-slate-500">
+          Nothing anywhere matches "{res.term}" — not in stock, not archived, and no purchase
+          order has it.
+        </Card>
+      )}
+
+      {/* A source that failed to read is NOT the same as "the part isn't there",
+          so it's called out rather than folded into an empty result. */}
+      {res?.unreadable?.length > 0 && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800">
+          Could not read: {res.unreadable.join(", ")}. Results below may be incomplete.
+        </div>
+      )}
+
+      {res?.live?.length > 0 && (
+        <Section title="In stock right now" count={res.live.length} tone="bg-emerald-100 text-emerald-700 border-emerald-300">
+          {res.live.map((it) => (
+            <div key={it.uid} className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="font-mono text-base font-bold text-slate-900">{it.itemcode}</span>
+                <span className="text-lg font-bold text-emerald-700">📍 {it.bubble}</span>
+              </div>
+              {it.description && <div className="text-sm text-slate-600">{it.description}</div>}
+              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                <span>{it.queue}</span>
+                <span>Qty {it.quantity}</span>
+                {it.cost && <span>Cost {it.cost}</span>}
+                {it.allocated_for && <span>Sell {it.allocated_for}</span>}
+                {it.reference_num && <span>Ref {it.reference_num}</span>}
+                {it.warehouse && <span>{it.warehouse}</span>}
+                {it.lastMovedAt && <span>Moved {formatWhen(it.lastMovedAt)}</span>}
+              </div>
+              <div className="mt-1 font-mono text-[10px] text-slate-400">{it.uid}</div>
+            </div>
+          ))}
+        </Section>
+      )}
+
+      {res?.archived?.length > 0 && (
+        <Section title="Sold / archived" count={res.archived.length} tone="bg-amber-100 text-amber-800 border-amber-300">
+          {res.archived.map((it, i) => (
+            <div key={`${it.uid}-${i}`} className="rounded-xl border border-slate-200 bg-white p-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="font-mono text-base font-bold text-slate-900">{it.itemcode}</span>
+                <span className="text-sm font-semibold text-amber-700">
+                  {it.bubbleName} · {formatDate(it.archivedAt)}
+                </span>
+              </div>
+              {it.description && <div className="text-sm text-slate-600">{it.description}</div>}
+              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                <span>Qty {it.quantity}</span>
+                {it.allocated_for && <span>Sold for {it.allocated_for}</span>}
+                {it.reference_num && <span>Ref {it.reference_num}</span>}
+              </div>
+            </div>
+          ))}
+        </Section>
+      )}
+
+      {res?.purchases?.length > 0 && (
+        <Section title="Purchased on" count={res.purchases.length} tone="bg-indigo-100 text-indigo-700 border-indigo-300">
+          {res.purchases.map((p, i) => (
+            <div key={`${p.reference}-${i}`} className="rounded-xl border border-slate-200 bg-white p-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="font-mono text-base font-bold text-slate-900">{p.line.itemcode}</span>
+                <span className="text-sm font-semibold text-indigo-700">
+                  {p.reference}
+                  {p.list === "archived" ? " (archived order)" : ""}
+                </span>
+              </div>
+              {p.line.description && <div className="text-sm text-slate-600">{p.line.description}</div>}
+              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                {p.warehouse && <span>{p.warehouse}</span>}
+                {p.orderDate && <span>{formatDate(p.orderDate)}</span>}
+                {p.invoice && <span>Inv {p.invoice}</span>}
+                <span>Qty {p.line.quantity}</span>
+                {p.line.costPrice && <span>Cost {p.line.costPrice}</span>}
+                <span>{p.pickedUp ? "Picked up" : "Not picked up"}</span>
+                <span>{p.line.addedToOutstanding ? "Added to stock" : "Never added to stock"}</span>
+              </div>
+            </div>
+          ))}
+        </Section>
+      )}
+
+      {res?.history?.length > 0 && (
+        <Section title="Lifecycle" count={res.history.length} tone="bg-slate-200 text-slate-600 border-slate-300">
+          <div className="space-y-1">
+            {res.history.map((h, i) => {
+              const meta = HISTORY_EVENTS[h.event] || { label: h.event || "Event", dot: "bg-slate-400" };
+              const detail = historyDetail(h);
+              return (
+                <div key={i} className="flex items-center gap-2 text-sm">
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${meta.dot}`} />
+                  <span className="w-40 shrink-0 text-xs text-slate-400">{formatWhen(h.at)}</span>
+                  <span className="font-semibold text-slate-700">{meta.label}</span>
+                  <span className="text-slate-500">{detail}</span>
+                </div>
+              );
+            })}
+          </div>
+        </Section>
+      )}
+    </div>
+  );
+}
+
 function PurchasesSearch({
   searchTerm,
   setSearchTerm,
@@ -91,15 +267,31 @@ function PurchasesSearch({
 
   const handleKey = (e) => { if (e.key === "Enter") onSearch(); };
 
+  // An archive line and the stock item it became don't necessarily carry the
+  // same code: makeOutstandingFromLine resolves every line through the CAP
+  // rules first, so for some warehouses the stored itemcode is the Sage code
+  // ("TRB BCD1210" -> "BCD 1210" on Transbec). The search hands us that
+  // resolved code as line.capCode; the raw form stays as a fallback for items
+  // created before the rules were applied.
+  function lineCodes(line) {
+    const raw = (`${line.partLineCode || ''} ${line.partNumber || ''}`).trim().toUpperCase()
+      || (line.partNumber || '').toUpperCase();
+    const cap = (line.capCode || '').trim().toUpperCase();
+    return [cap, raw].filter(Boolean);
+  }
+
+  function codeMatches(record, line) {
+    const code = (record?.itemcode || '').toUpperCase();
+    return code ? lineCodes(line).includes(code) : false;
+  }
+
   function findActiveItem(order, line) {
     if (!items.length) return null;
-    const targetCode = (`${line.partLineCode || ''} ${line.partNumber || ''}`).trim().toUpperCase()
-      || (line.partNumber || '').toUpperCase();
-    if (!targetCode) return null;
+    if (!lineCodes(line).length) return null;
     return (
       items.find(
         (it) =>
-          (it.itemcode || '').toUpperCase() === targetCode &&
+          codeMatches(it, line) &&
           (it.reference_num || '') === (order.reference || '')
       ) || null
     );
@@ -109,13 +301,11 @@ function PurchasesSearch({
   // deleted), oldest-first, so a looked-up part shows its whole journey.
   function findItemHistory(order, line) {
     if (!itemHistory.length) return [];
-    const targetCode = (`${line.partLineCode || ''} ${line.partNumber || ''}`).trim().toUpperCase()
-      || (line.partNumber || '').toUpperCase();
-    if (!targetCode) return [];
+    if (!lineCodes(line).length) return [];
     return itemHistory
       .filter(
         (h) =>
-          (h.itemcode || '').toUpperCase() === targetCode &&
+          codeMatches(h, line) &&
           (h.reference_num || '') === (order.reference || '')
       )
       .sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
@@ -483,7 +673,19 @@ export default function ArchiveSearchView({
         >
           Search Sales
         </button>
+        <button
+          onClick={() => setTab("anywhere")}
+          className={`px-4 py-2 rounded-xl text-sm font-semibold transition-colors ${
+            tab === "anywhere"
+              ? "bg-indigo-600 text-white shadow"
+              : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"
+          }`}
+        >
+          Find Anywhere
+        </button>
       </div>
+
+      {tab === "anywhere" && <FindAnywhere />}
 
       {tab === "sales" && (
         <div className="space-y-4">

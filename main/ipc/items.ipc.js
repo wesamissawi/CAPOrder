@@ -29,11 +29,17 @@ const registerItemsIpc = (ipcMain, deps) => {
       const deletions = Array.isArray(deletedUids) ? deletedUids.filter(Boolean) : [];
       const allowedReasons = ['archived', 'credit_received'];
       const deleteReason = allowedReasons.includes(options?.deleteReason) ? options.deleteReason : 'deleted';
+      // Allowlisted so the renderer can't write arbitrary event names into the
+      // lifecycle log — the timeline's labels are a fixed vocabulary.
+      const allowedEvents = ['sent_to_sage'];
+      const historyEvent = allowedEvents.includes(options?.historyEvent?.event)
+        ? { event: options.historyEvent.event, extra: options.historyEvent.extra || {} }
+        : null;
       const current = readItems();              // throws if any queue file is unreadable
       const a = JSON.stringify(current);
       const b = JSON.stringify(items ?? []);
       if (a !== b || deletions.length > 0) {
-        writeItems(items, { replaceAll: false, deletedUids: deletions, deleteReason });
+        writeItems(items, { replaceAll: false, deletedUids: deletions, deleteReason, historyEvent });
       }
       return { ok: true };
     } catch (e) {
@@ -163,7 +169,7 @@ const registerItemsIpc = (ipcMain, deps) => {
     }
   });
 
-  ipcMain.handle('items:sage-sales-invoice', async (_evt, bubbleName, customerCode, notes, paymentType) => {
+  ipcMain.handle('items:sage-sales-invoice', async (_evt, bubbleName, customerCode, notes, paymentType, options) => {
     if (typeof runSageSalesInvoice !== 'function') {
       return { ok: false, code: 'not-configured', error: 'Sage sales invoice action not available.' };
     }
@@ -177,7 +183,11 @@ const registerItemsIpc = (ipcMain, deps) => {
     if (!items.length) {
       return { ok: false, code: 'no-items', error: `No items found in bubble "${bubbleName}".` };
     }
-    return runSageSalesInvoice(items, customerCode || '', notes || '', paymentType || '');
+    return runSageSalesInvoice(items, customerCode || '', notes || '', paymentType || '', {
+      // Default ON, so an older caller that sends nothing keeps the existing
+      // behaviour rather than silently dropping the line.
+      includeGrandTotal: options?.includeGrandTotal !== false,
+    });
   });
 
   // Optional: manual lock release (e.g., user cancels)

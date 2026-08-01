@@ -74,6 +74,37 @@ const registerOrdersIpc = (ipcMain, deps) => {
   ipcMain.handle('orders:read', () => readOrders());
   ipcMain.handle('orders:get-path', () => ({ path: getOrdersFile() }));
 
+  // For the Sales Order view's per-item "Arrived" badge: a stock item only
+  // carries its ORIGINATING purchase order's reference, not whether that
+  // purchase has physically shown up — that's the order's own `inStore` flag.
+  // Scans both active and archived orders once and returns a lookup keyed by
+  // every reference an item might carry (order_key, reference, __row), so the
+  // renderer can check `map[item.order_key] ?? map[item.reference_num]`
+  // without re-deriving order-matching logic on the client.
+  ipcMain.handle('orders:get-arrival-map', () => {
+    try {
+      const map = {};
+      const record = (o) => {
+        if (!o) return;
+        const inStore = o.inStore === true;
+        [o.sage_reference, o.reference, o.__row]
+          .map((v) => String(v ?? '').trim().toUpperCase())
+          .filter(Boolean)
+          .forEach((key) => {
+            // Prefer a true — an order with multiple candidate keys colliding
+            // across different rows should read "arrived" if ANY of them are.
+            map[key] = map[key] === true ? true : inStore;
+          });
+      };
+      (readOrders() || []).forEach(record);
+      (readOrdersArchive() || []).forEach(record);
+      return { ok: true, map };
+    } catch (e) {
+      console.error('[orders:get-arrival-map]', e);
+      return { ok: false, error: e?.message || 'Failed to build arrival map.', map: {} };
+    }
+  });
+
   // Purchase-order processing: cross-machine exclusive via the heartbeat lock.
   ipcMain.handle('sage:set-po-active', (_evt, enable = true) => {
     try {
@@ -216,9 +247,9 @@ const registerOrdersIpc = (ipcMain, deps) => {
 
       const updatedOrders = orders.map((order) => {
         if (!order || !Array.isArray(order.lineItems)) return order;
-        const updatedLineItems = order.lineItems.map((line) => {
+        const updatedLineItems = order.lineItems.map((line, idx) => {
           if (!line || line.addedToOutstanding === true) return line;
-          const outItem = makeOutstandingFromLine(order, line);
+          const outItem = makeOutstandingFromLine(order, line, idx);
           newItems.push(outItem);
           lineUpdates += 1;
           return { ...line, addedToOutstanding: true };
@@ -248,9 +279,9 @@ const registerOrdersIpc = (ipcMain, deps) => {
       const updatedOrders = orders.map((order) => {
         if (!orderMatchesKey(order, refKey)) return order;
         if (!Array.isArray(order.lineItems)) return order;
-        const updatedLineItems = order.lineItems.map((line) => {
+        const updatedLineItems = order.lineItems.map((line, idx) => {
           if (!line || line.addedToOutstanding === true) return line;
-          const outItem = { ...makeOutstandingFromLine(order, line), allocated_to: bubbleName };
+          const outItem = { ...makeOutstandingFromLine(order, line, idx), allocated_to: bubbleName };
           newItems.push(outItem);
           return { ...line, addedToOutstanding: true };
         });

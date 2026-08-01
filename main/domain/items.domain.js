@@ -48,7 +48,13 @@ const createItemsDomain = (deps) => {
     return '';
   }
 
-  function makeOutstandingFromLine(order, line) {
+  // lineIdx is the item's position in order.lineItems. It's stamped onto the
+  // item (with order_key) so the Order Assignment view can link a stock row back
+  // to the exact line it came from. Order lines have no id of their own, so
+  // without this the only linkage is a reference_num + itemcode guess — see
+  // main/domain/orderAssignment.domain.js. Callers that genuinely have no index
+  // may omit it; those items just fall back to the guess.
+  function makeOutstandingFromLine(order, line, lineIdx) {
     const nowIso = new Date().toISOString();
     // Resolve the CAP/Sage code ONCE, here, when the scraped line becomes a
     // stock item — so the bubble stores the exact code Sage will hold after the
@@ -83,6 +89,9 @@ const createItemsDomain = (deps) => {
       reference_num: order?.reference || '',
       sold_date: '',
       sold_status: '',
+      // Exact back-link to the originating order line (Order Assignment).
+      order_key: String(order?.sage_reference || order?.reference || order?.__row || '').trim().toUpperCase(),
+      order_line_idx: Number.isInteger(lineIdx) ? lineIdx : null,
     };
   }
 

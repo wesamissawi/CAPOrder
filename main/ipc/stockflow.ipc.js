@@ -10,6 +10,12 @@ const registerStockFlowIpc = (ipcMain, deps) => {
     fs,
     searchArchiveEntries,
     normalizeSharedBubblePayload,
+    locatePart,
+    readItems,
+    readHistory,
+    readOrders,
+    readOrdersArchive,
+    readOrderAssignments,
   } = deps;
 
   ipcMain.handle('bubble-shared:read', () => {
@@ -72,6 +78,72 @@ const registerStockFlowIpc = (ipcMain, deps) => {
     } catch (e) {
       console.error('[archive:search]', e);
       return { ok: false, error: e?.message || 'Failed to search archive' };
+    }
+  });
+
+  // "Find this part anywhere" — sweeps every store at once: the live queues,
+  // the sales archive, the purchase orders (active and archived) and the
+  // lifecycle log. Search Purchases and Search Sales each only see their own
+  // corner, so a part that's alive in CashPad reads as "not found" in both.
+  //
+  // Every source is read defensively: one unreadable or malformed file must
+  // degrade that section only, not fail the whole lookup, and the sources it
+  // couldn't read come back so the UI can say so rather than quietly implying
+  // the part isn't there.
+  ipcMain.handle('items:locate', (_evt, term) => {
+    try {
+      const failed = [];
+      const safely = (label, fn) => {
+        try {
+          return fn() || [];
+        } catch (e) {
+          console.error(`[items:locate] ${label} read failed`, e);
+          failed.push(label);
+          return [];
+        }
+      };
+      const result = locatePart(term, {
+        items: safely('live items', readItems),
+        archivedEntries: safely('sales archive', readArchivedEntries),
+        orders: safely('purchase orders', readOrders),
+        ordersArchive: safely('archived purchases', readOrdersArchive),
+        history: safely('item history', readHistory),
+        assignments: safely('order assignments', readOrderAssignments),
+      });
+      return { ok: true, ...result, unreadable: failed };
+    } catch (e) {
+      console.error('[items:locate]', e);
+      return { ok: false, error: e?.message || 'Failed to locate part.' };
+    }
+  });
+
+  // Which payments are already spoken for by an ARCHIVED cash sale.
+  //
+  // Archiving a sale clears its live payment assignment and deletes the bubble,
+  // so the live state only ever knows about sales still open. Without this,
+  // every payment older than what's currently on screen would read as free on
+  // the Payments view — the exact opposite of the truth, and the reading that
+  // gets a payment double-assigned.
+  ipcMain.handle('archive:payment-usage', () => {
+    try {
+      const usage = {};
+      (readArchivedEntries() || []).forEach((entry) => {
+        const ids = entry?.meta?.paymentIds;
+        if (!Array.isArray(ids)) return;
+        ids.filter(Boolean).forEach((id) => {
+          // A payment settles one sale, so the first archive claiming it wins;
+          // a duplicate would be a data problem, not something to merge here.
+          if (usage[id]) return;
+          usage[id] = {
+            bubbleName: entry?.bubble?.name || entry?.id || '',
+            archivedAt: entry?.archivedAt || '',
+          };
+        });
+      });
+      return { ok: true, usage };
+    } catch (e) {
+      console.error('[archive:payment-usage]', e);
+      return { ok: false, error: e?.message || 'Failed to read archived payment usage.', usage: {} };
     }
   });
 

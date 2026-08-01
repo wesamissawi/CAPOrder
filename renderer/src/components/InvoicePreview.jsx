@@ -10,6 +10,16 @@ const toNumber = (value) => {
   return Number.isFinite(num) ? num : 0;
 };
 
+// Supplier application text runs long (200+ chars is common) — untruncated it
+// wraps the part-number column onto several lines and pushes rows apart, so
+// the printed invoice truncates the same way Order Assignment / Sales Orders
+// already do on screen.
+const DESC_LIMIT = 30;
+const truncate = (s, n = DESC_LIMIT) => {
+  const v = String(s || "").trim();
+  return v.length > n ? `${v.slice(0, n)}…` : v;
+};
+
 const styles = {
   page: {
     width: "8.5in",
@@ -170,7 +180,7 @@ export default function InvoicePreview({
       key: it.uid,
       type: "item",
       partNumber: it.itemcode || "—",
-      description: "",
+      description: truncate(it.notes1),
       qty,
       price,
       extension,
@@ -186,7 +196,7 @@ export default function InvoicePreview({
       key: line.id || `extra-${index}`,
       type: "extra",
       partNumber: line.partLineCode || "Extra Line",
-      description: line.description || "—",
+      description: truncate(line.description) || "—",
       qty,
       price,
       extension,

@@ -71,6 +71,12 @@ export function normalizeItems(arr) {
       reference_num: String(it.reference_num ?? ""),
       sold_date: String(it.sold_date ?? ""),
       sold_status: String(it.sold_status ?? ""),
+      // Back-link to the order line this part came from (Order Assignment).
+      // This object is a whitelist — every save round-trips through it, so
+      // dropping these would strip the stamp off every item the first time
+      // anyone touched a bubble, permanently downgrading the link to a guess.
+      order_key: String(it.order_key ?? ""),
+      order_line_idx: Number.isInteger(it.order_line_idx) ? it.order_line_idx : null,
       // Returns requisition association. Empty = unassigned (sits in the
       // warehouse's Unassigned Returns group); set = belongs to that slip.
       return_slip_id: String(it.return_slip_id ?? ""),
@@ -172,4 +178,23 @@ export function mergeItems(prev, incoming) {
   }
   // Anything left in byUid was deleted on disk → drop it
   return result;
+}
+
+// A cheap fingerprint of everything that actually shows up on a printed
+// invoice: which items, at what quantity/price, plus notes and print-only
+// extra lines. Used both to STAMP what was printed (App.jsx's print-confirm
+// handler) and to CHECK whether the bubble has drifted since (Sales Order
+// view's "printed" vs "changed since print" badge) — one function so the two
+// can never disagree about what counts as a change. Not a real hash: string
+// equality is all that's needed, and a plain sorted string is easier to eyeball
+// in devtools than a hash would be.
+export function computeBubblePrintSignature(notes, items, extraLines) {
+  const itemPart = (items || [])
+    .map((it) => `${it.uid}:${it.quantity}:${it.allocated_for ?? ""}:${it.cost ?? ""}`)
+    .sort()
+    .join("|");
+  const extraPart = (extraLines || [])
+    .map((l) => `${l.description ?? ""}:${l.quantity ?? ""}:${l.unitPrice ?? ""}:${l.taxable ?? ""}:${l.partLineCode ?? ""}`)
+    .join("|");
+  return `${notes || ""}::${itemPart}::${extraPart}`;
 }

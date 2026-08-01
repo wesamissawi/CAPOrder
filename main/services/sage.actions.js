@@ -317,7 +317,7 @@ const createSageActions = (deps) => {
     });
   }
 
-  function runSageSalesInvoice(items, customerCode, notes, paymentType) {
+  function runSageSalesInvoice(items, customerCode, notes, paymentType, options = {}) {
     return new Promise((resolve) => {
       if (!fs.existsSync(SAGE_SALES_SCRIPT)) {
         console.error('[sage-sales] AHK script not found', { path: SAGE_SALES_SCRIPT });
@@ -362,12 +362,23 @@ const createSageActions = (deps) => {
         return resolve({ ok: false, code: 'no-items', error: 'No items to send.' });
       }
 
+      // The obfuscated grand-total line — three random digits, the undiscounted
+      // tax-in total with '-' and 'x' standing in for the separators, then three
+      // more random digits (e.g. 424-207x80028 for $207.80). Only meaningful
+      // when a discount was actually applied, since it records what the full
+      // price WOULD have been.
+      //
+      // `includeGrandTotal` is the Cash Sales checkbox. Turning it off sends an
+      // empty string, and the AHK still tabs past the field so everything after
+      // it stays in position.
+      const includeGrandTotal = options?.includeGrandTotal !== false;
       const hasDiscount = itemsForAhk.some(
         (it) => it.discounted_price > 0 && it.discounted_price !== it.price
       );
-      const priceTotal = hasDiscount
-        ? itemsForAhk.reduce((sum, it) => sum + it.quantity * it.price, 0)
-        : null;
+      const priceTotal =
+        includeGrandTotal && hasDiscount
+          ? itemsForAhk.reduce((sum, it) => sum + it.quantity * it.price, 0)
+          : null;
       const grandTotal = (() => {
         if (priceTotal === null) return '';
         const [intPart, decPart] = (priceTotal * 1.13).toFixed(2).split('.');
@@ -402,14 +413,22 @@ const createSageActions = (deps) => {
         logPrefix: 'sage-sales',
         timeoutMs: typeof getSageAhkTimeoutMs === 'function' ? getSageAhkTimeoutMs() : 5 * 60 * 1000,
       }).then((res) => {
-        const testComplete = (res.stdout || '').includes('TEST_MODE_COMPLETE');
+        const stdout = res.stdout || '';
+        const testComplete = stdout.includes('TEST_MODE_COMPLETE');
+        // The script reads the invoice number off the Sage form and reports it
+        // on its last line before finishing. Absent or blank is normal (an
+        // aborted run, or a form that didn't have it) — the caller records an
+        // empty number and leaves the field editable rather than guessing.
+        const invoiceMatch = /^SAGE_INVOICE_NUMBER=(.*)$/m.exec(stdout);
+        const sageInvoiceNumber = invoiceMatch ? invoiceMatch[1].trim() : '';
         console.log('[sage-sales] AHK finished', {
           ok: res.ok,
           testComplete,
-          stdout: (res.stdout || '').trim(),
+          sageInvoiceNumber,
+          stdout: stdout.trim(),
           stderr: (res.stderr || '').trim(),
         });
-        resolve({ ...res, testComplete });
+        resolve({ ...res, testComplete, sageInvoiceNumber });
       }).finally(() => {
         safeUnlink(tempPath);
       });

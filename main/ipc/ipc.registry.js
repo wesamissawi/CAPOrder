@@ -2,11 +2,14 @@ const { registerItemsIpc } = require('./items.ipc');
 const { registerOrdersIpc } = require('./orders.ipc');
 const { registerVendorIpc } = require('./vendor.ipc');
 const { registerPaymentsIpc } = require('./payments.ipc');
+const { registerCloverIpc } = require('./clover.ipc');
 const { registerStockFlowIpc } = require('./stockflow.ipc');
 const { registerSettingsIpc } = require('./settings.ipc');
 const { registerUpdatesIpc } = require('./updates.ipc');
 const { registerBubbleLocksIpc } = require('./bubbleLocks.ipc');
 const { registerRulesIpc } = require('./rules.ipc');
+const { registerOrderAssignmentIpc } = require('./orderAssignment.ipc');
+const { registerSageRunsIpc } = require('./sageRuns.ipc');
 
 function registerAllIpc(ipcMain, deps) {
   registerItemsIpc(ipcMain, {
@@ -109,6 +112,19 @@ function registerAllIpc(ipcMain, deps) {
     getPaymentsFile: deps.getPaymentsFile,
   });
 
+  registerCloverIpc(ipcMain, {
+    openCloverSession: deps.openCloverSession,
+    scrapeCloverPayments: deps.scrapeCloverPayments,
+    closeCloverSession: deps.closeCloverSession,
+    getCloverStatus: deps.getCloverStatus,
+    getCloverDebugDir: deps.getCloverDebugDir,
+    readPayments: deps.readPayments,
+    writePayments: deps.writePayments,
+    readCloverLedger: deps.readCloverLedger,
+    writeCloverLedger: deps.writeCloverLedger,
+    getCloverLedgerFile: deps.getCloverLedgerFile,
+  });
+
   registerStockFlowIpc(ipcMain, {
     readSharedBubbleData: deps.readSharedBubbleData,
     getSharedBubbleDataPath: deps.getSharedBubbleDataPath,
@@ -120,6 +136,14 @@ function registerAllIpc(ipcMain, deps) {
     fs: deps.fs,
     searchArchiveEntries: deps.searchArchiveEntries,
     normalizeSharedBubblePayload: deps.normalizeSharedBubblePayload,
+    // "Find part anywhere" reaches across every store, so it needs the readers
+    // the other IPC groups own rather than just the archive's.
+    locatePart: deps.locatePart,
+    readItems: deps.readItems,
+    readHistory: deps.readHistory,
+    readOrders: deps.readOrders,
+    readOrdersArchive: deps.readOrdersArchive,
+    readOrderAssignments: deps.readOrderAssignments,
   });
 
   registerSettingsIpc(ipcMain, {
@@ -168,6 +192,30 @@ function registerAllIpc(ipcMain, deps) {
   });
 
   registerRulesIpc(ipcMain);
+
+  registerOrderAssignmentIpc(ipcMain, {
+    readOrders: deps.readOrders,
+    readOrdersArchive: deps.readOrdersArchive,
+    readItems: deps.readItems,
+    writeItems: deps.writeItems,
+    writeOrdersArchive: deps.writeOrdersArchive,
+    readOrderAssignments: deps.readOrderAssignments,
+    writeOrderAssignments: deps.writeOrderAssignments,
+    getOrderAssignmentsFile: deps.getOrderAssignmentsFile,
+    makeOutstandingFromLine: deps.makeOutstandingFromLine,
+    patchOrderOnDisk: deps.patchOrderOnDisk,
+    randomUUID: deps.randomUUID,
+    // Only for the destination list: a bubble with a payment attached is a
+    // settled cash sale, not somewhere to send more parts.
+    readSharedBubbleData: deps.readSharedBubbleData,
+  });
+
+  registerSageRunsIpc(ipcMain, {
+    readSageSalesRuns: deps.readSageSalesRuns,
+    writeSageSalesRuns: deps.writeSageSalesRuns,
+    getSageSalesRunsFile: deps.getSageSalesRunsFile,
+    randomUUID: deps.randomUUID,
+  });
 }
 
 module.exports = { registerAllIpc };

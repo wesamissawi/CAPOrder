@@ -78,6 +78,28 @@ if WinExist("Sage 50 - Confirmation") {
 ; MsgBox, 64, Step 4 - After Ctrl+Z, Form refreshed. Tabbing to Edit1 and entering customer code...
 
 tabTo("Edit1", 200)
+
+; --- Capture the Sage invoice number before anything is typed ---
+; It sits 9 tabs past the Edit1 anchor. Grabbed here, straight after the Ctrl+Z
+; that refreshes the form, so it's the number this invoice will actually get.
+; ControlGetText reads the field directly rather than copying it, so the user's
+; clipboard is left alone. Reported at the very end of the run (see the
+; FileAppend below) so the app only records it once the entry actually
+; completed.
+;
+; The trip back reverses the 9 tabs rather than wrapping forward around the
+; whole form. tabTo's 4th parameter is `shift`, so this shift-tabs until it
+; lands back on Edit1 — self-correcting if the count above is ever off by one,
+; where a bare SendTab back would just stop somewhere wrong. (SendTab itself
+; only goes forward; it takes no shift argument.)
+sageInvoiceNumber := ""
+SendTab(9, 200)
+ControlGetFocus, invoiceCtrl, A
+ControlGetText, sageInvoiceNumber, %invoiceCtrl%, A
+sageInvoiceNumber := Trim(sageInvoiceNumber)
+tabTo("Edit1", 200, "DonkeyKongCountry", true)
+Sleep, 300
+
 Send, %customerCode%
 Sleep, 2000
 
@@ -106,13 +128,19 @@ if (bubbleNotes != "") {
         i++
     }
 }
+; The obfuscated grand-total line. The app decides whether to send one (see the
+; "Grand total line" checkbox in Cash Sales); when it doesn't, this field is
+; still TABBED PAST rather than skipped. That matters: everything after it —
+; the payment type, then the whole line-item block — is positioned by counting
+; tabs, so skipping the tab entirely used to shunt the payment type into this
+; field instead of its own.
+Send, {Tab}
+Sleep, 200
 if (grandTotal != "") {
-    Send, {Tab}
-    Sleep, 200
     Send, % grandTotal
     Sleep, 100
-    noteTabsUsed++
 }
+noteTabsUsed++
 if (paymentType != "") {
     Send, {Tab}
     Sleep, 200
@@ -224,6 +252,11 @@ Loop, 4 {
 }
 
 ; MsgBox, 64, Step 9 - TEST MODE COMPLETE, Cursor should now be on the Print & Process button.`nNot pressing it (test mode).
+
+; Reported last so the app only records an invoice number for a run that got
+; all the way here. Empty is reported too — the app shows the field blank and
+; editable rather than silently inventing a number.
+FileAppend, SAGE_INVOICE_NUMBER=%sageInvoiceNumber%`n, *
 
 FileAppend, TEST_MODE_COMPLETE`n, *
 

@@ -5,12 +5,14 @@ import InvoicePreview from "./components/InvoicePreview";
 import AssignInvoiceModal from "./components/AssignInvoiceModal";
 import QtyConfirmModal from "./components/QtyConfirmModal";
 import DashboardView from "./views/DashboardView";
-import StockFlowView from "./views/StockFlowView";
 import OrderManagementView from "./views/OrderManagementView";
+import OrderAssignmentView from "./views/OrderAssignmentView";
+import SalesOrderView from "./views/SalesOrderView";
+import CashSalesView from "./views/CashSalesView";
 import EpicorView from "./views/EpicorView";
 import PaymentManagementView from "./views/PaymentManagementView";
+import SageRunsView from "./views/SageRunsView";
 import ReturnsManagementView from "./views/ReturnsManagementView";
-import ManageStockView from "./views/ManageStockView";
 import ArchiveSearchView from "./views/ArchiveSearchView";
 import SettingsView from "./views/SettingsView";
 import RulesView from "./views/RulesView";
@@ -23,6 +25,7 @@ import {
   uniqueName,
   makeUid,
   nextRev,
+  computeBubblePrintSignature,
 } from "./utils/inventory";
 import { isOrderSageLocked, orderKeyMatches } from "./utils/sageLock";
 
@@ -250,7 +253,6 @@ function epicorDateToSageDate(raw) {
   return `${dd}${mm}${yy}`;
 }
 const DELETE_DESTINATIONS = ["NEW STOCK", "SHELF", "CASH SALES", "RETURNS"];
-const CASH_SALE_DELETE_DESTINATIONS = ["CashPad"];
 
 const ACCOUNTING_PATHS = {
   OUTSTANDING: "OUTSTANDING",
@@ -263,16 +265,16 @@ const ACCOUNTING_PATHS = {
 
 const VIEWS = [
   { id: "dashboard", label: "Dashboard" },
-  { id: "stock-flow", label: "Stock Flow" },
-  { id: "sage-ar-queue", label: "Sage AR Queue" },
   { id: "cash-sale-flow", label: "Cash Sales" },
-  { id: "manage-stock", label: "Manage Stock" },
   { id: "returns-management", label: "Returns Management" },
   { id: "order-management", label: "Order Management" },
+  { id: "order-assignment", label: "Order Assignment" },
+  { id: "sales-orders", label: "Sales Orders" },
   { id: "epicor", label: "Epicor" },
   { id: "archive-search", label: "Archive" },
   { id: "settings", label: "Settings" },
   { id: "payment-management", label: "Payments" },
+  { id: "sage-runs", label: "Sage Runs" },
   { id: "rules", label: "Rules" },
 ];
 
@@ -313,13 +315,10 @@ function ViewTabs({ currentView, onSelect, badges }) {
 export default function App() {
   const [bubbles, setBubbles] = useState(DEFAULT_BUBBLES);
   const [items, setItems] = useState([]);
-  const [expanded, setExpanded] = useState({});
-  // newBubbleName now lives inside StockFlowView's CreateBubbleCard so typing
-  // the new-bubble name doesn't re-render App (and the whole bubble workspace).
-  const [bubblePositions, setBubblePositions] = useState({});
-  const [bubbleSizes, setBubbleSizes] = useState({});
-  const [bubbleZOrder, setBubbleZOrder] = useState([]);
-  const [activeBubbleKey, setActiveBubbleKey] = useState(null);
+  // Leftovers from the removed drag-and-drop bubble workspace. Nothing reads
+  // them for layout any more, but the create/delete/rename paths still keep
+  // them tidy and they're still round-tripped through ui_state.json, so a
+  // machine that hasn't updated yet doesn't lose its saved workspace.
   const [uiStateReady, setUiStateReady] = useState(false);
   const [currentView, setCurrentView] = useState("order-management");
   const [returnsFilterEnabled, setReturnsFilterEnabled] = useState(false);
@@ -358,6 +357,9 @@ export default function App() {
   const [paymentsLoading, setPaymentsLoading] = useState(false);
   const [paymentsError, setPaymentsError] = useState("");
   const [cashPadMarkup, setCashPadMarkup] = useState("30");
+  // Whether Send to Sage types the obfuscated grand-total line into the notes
+  // block. Defaults on — that's what it did before the toggle existed.
+  const [sageGrandTotalLine, setSageGrandTotalLine] = useState(true);
   const [fillCashPadResult, setFillCashPadResult] = useState(null);
   const [sageWatchError, setSageWatchError] = useState(""); // purchase-order (locked) errors
   const [sageInvoiceError, setSageInvoiceError] = useState(""); // invoice (local) errors
@@ -480,22 +482,12 @@ export default function App() {
   const [returnSlips, setReturnSlips] = useState([]);
   const ordersLastSavedRef = useRef("");
 
-  const [editingItemUid, setEditingItemUid] = useState(null);
-  const [editingDraft, setEditingDraft] = useState(null);
   const [printBubbleId, setPrintBubbleId] = useState(null);
   const [printGeneratedAt, setPrintGeneratedAt] = useState(null);
 
-  const editingItemUidRef = useRef(null);
   const pendingItemsRefreshRef = useRef(false);
   const printPreviewRef = useRef(null);
   const workspaceRef = useRef(null);
-  const bubbleDragRef = useRef(null);
-  const bubbleResizeRef = useRef(null);
-  const prevBodyUserSelectRef = useRef("");
-  useEffect(() => {
-    editingItemUidRef.current = editingItemUid;
-  }, [editingItemUid]);
-
   // Load the qty-discrepancy threshold/tax rate once so Order Management can
   // decide whether to show "Confirm Quantities" without SettingsView being
   // open. SettingsView owns editing these; this just needs the read.
@@ -515,7 +507,6 @@ export default function App() {
 
 
   // Drag state (items only)
-  const draggedItemUidRef = useRef(null);
 
   // Save / watch bookkeeping.
   // Initialize to the serialized initial state ("[]") so the idle autosave can
@@ -529,6 +520,17 @@ export default function App() {
   // deleted on disk unless its uid is sent in this list. The ledger also keeps
   // incoming file updates from resurrecting a just-deleted item.
   const deletedUidsRef = useRef(new Set());
+  // Uids that have been ARCHIVED — gone from the active queue for good, with a
+  // copy filed in the Archive. Separate from deletedUidsRef because that one is
+  // cleared as soon as the write is confirmed, and it also doubles as the
+  // "deletions to send with the next save": leaving uids in it forever would
+  // make autosave write on every tick. This set is never cleared and never
+  // sent — it only stops a file-watcher event that was already in flight (and
+  // so read the file BEFORE the archive write landed) from re-adding the parts.
+  // That resurrection is what used to leave an empty ghost card behind: the
+  // parts came back for one tick, ensureBubblesForItems rebuilt the bubble from
+  // them, and the next event took the parts away again.
+  const archivedUidsRef = useRef(new Set());
 
   function markItemsDeleted(uids) {
     (uids || []).forEach((u) => { if (u) deletedUidsRef.current.add(u); });
@@ -536,9 +538,14 @@ export default function App() {
   function confirmItemsDeleted(uids) {
     (uids || []).forEach((u) => deletedUidsRef.current.delete(u));
   }
+  function markItemsArchived(uids) {
+    (uids || []).forEach((u) => { if (u) archivedUidsRef.current.add(u); });
+  }
   function filterPendingDeleted(list) {
-    if (!deletedUidsRef.current.size) return list;
-    return (list || []).filter((it) => !deletedUidsRef.current.has(it?.uid));
+    if (!deletedUidsRef.current.size && !archivedUidsRef.current.size) return list;
+    return (list || []).filter(
+      (it) => !deletedUidsRef.current.has(it?.uid) && !archivedUidsRef.current.has(it?.uid)
+    );
   }
 
   // "User is editing any field" flag
@@ -599,13 +606,6 @@ export default function App() {
     //   });
     // });
     const off = api.onItemsUpdated((arr) => {
-      // If a modal edit is open, ignore external changes
-      if (editingItemUidRef.current) {
-        console.log("[ipc] items:updated ignored (modal editing)");
-        pendingItemsRefreshRef.current = true;
-        return;
-      }
-
       if (isEditingAnythingRef.current) {
         console.log("[ipc] items:updated ignored (user is editing)");
         pendingItemsRefreshRef.current = true;
@@ -724,16 +724,6 @@ export default function App() {
     return () => clearTimeout(id);
   }, [items]);
 
-
-  useEffect(() => {
-    if (!editingItemUid) return;
-    const timer = setTimeout(() => {
-      alert("Edit timed out after 20 seconds. Changes were not saved.");
-      handleCancelEdit();
-    }, 20000);
-    return () => clearTimeout(timer);
-  }, [editingItemUid]);
-
   // === Helpers ===
   function updateItemByKey(uid, patch) {
     setItems((prev) =>
@@ -750,10 +740,6 @@ export default function App() {
         return next;
       })
     );
-  }
-
-  function toggleExpand(uid) {
-    setExpanded((p) => ({ ...p, [uid]: !p[uid] }));
   }
 
   function persistSharedBubbleSnapshot(bubbleId, overrides = {}) {
@@ -778,6 +764,15 @@ export default function App() {
     if (Array.isArray(nextPaymentIds)) {
       payload.paymentIds = nextPaymentIds;
     }
+    // Sales Order view fields (delivered/paid checkboxes, print tracking) —
+    // same pattern as paymentIds above: only sent when this call is actually
+    // the one changing them, otherwise carried forward from what's cached
+    // locally so an unrelated save (e.g. a notes edit) doesn't blank them out.
+    ["createdAt", "delivered", "paid", "printedSignature", "printedAt", "sageInvoiceNumber", "sageSentAt", "sageRunId"].forEach((key) => {
+      const has = Object.prototype.hasOwnProperty.call(overrides, key);
+      const val = has ? overrides[key] : meta[key];
+      if (val !== undefined) payload[key] = val;
+    });
     api
       .writeSharedBubbleData(payload)
       .catch((e) => console.warn("[shared-bubble] write failed", e));
@@ -799,6 +794,9 @@ export default function App() {
     const deleteNames = new Set();
     const extras = {};
     const paymentAssignments = {};
+    // Sales Order view fields (delivered/paid + print tracking), keyed the
+    // same way paymentAssignments is — by bubble id.
+    const salesOrderMeta = {};
     const createdIds = [];
     const sharedLowerNames = new Set(entries.map((e) => norm(e.name || e.id)));
     const itemsLowerNames = new Set((items || []).map((it) => norm(it.allocated_to)));
@@ -860,6 +858,18 @@ export default function App() {
           paymentAssignments[id] = entry.paymentIds.filter(Boolean);
           if (entry.name) paymentAssignments[entry.name] = entry.paymentIds.filter(Boolean);
         }
+        {
+          const som = {};
+          if (typeof entry.createdAt === "string") som.createdAt = entry.createdAt;
+          if (typeof entry.delivered === "boolean") som.delivered = entry.delivered;
+          if (typeof entry.paid === "boolean") som.paid = entry.paid;
+          if (typeof entry.printedSignature === "string") som.printedSignature = entry.printedSignature;
+          if (typeof entry.printedAt === "string") som.printedAt = entry.printedAt;
+          if (typeof entry.sageInvoiceNumber === "string") som.sageInvoiceNumber = entry.sageInvoiceNumber;
+          if (typeof entry.sageSentAt === "string") som.sageSentAt = entry.sageSentAt;
+          if (typeof entry.sageRunId === "string") som.sageRunId = entry.sageRunId;
+          if (Object.keys(som).length) salesOrderMeta[id] = som;
+        }
         if (existingIdx !== undefined) {
           const merged = {
             ...next[existingIdx],
@@ -913,7 +923,13 @@ export default function App() {
       return merged;
     });
 
-    if (createdIds.length || deleteIds.size || keptIds.size || Object.keys(paymentAssignments).length) {
+    if (
+      createdIds.length ||
+      deleteIds.size ||
+      keptIds.size ||
+      Object.keys(paymentAssignments).length ||
+      Object.keys(salesOrderMeta).length
+    ) {
       setBubbleMeta((prev) => {
         const next = { ...prev };
         createdIds.forEach((id) => {
@@ -927,30 +943,35 @@ export default function App() {
           if (!next[id]) next[id] = {};
           next[id] = { ...next[id], paymentIds: paymentAssignments[id] };
         });
+        Object.keys(salesOrderMeta).forEach((id) => {
+          if (!next[id]) next[id] = {};
+          next[id] = { ...next[id], ...salesOrderMeta[id] };
+        });
         return next;
       });
     }
   }
 
 
-  async function addBubble(position, nameInput = "") {
+  async function addBubble(nameInput = "") {
     const baseRaw = (nameInput || "").trim() || "New Bubble";
     const base = baseRaw.toUpperCase();
     const names = new Set(bubbles.map((b) => (b.name || "").toUpperCase()));
     const finalName = uniqueName(base, names);
     const id = makeUid();
     const nb = { id, name: finalName, notes: "" };
-    if (position && typeof position.x === "number" && typeof position.y === "number") {
-      setBubblePositions((prev) => ({
-        ...prev,
-        [id]: { x: position.x, y: position.y },
-        [finalName]: { x: position.x, y: position.y },
-      }));
-    }
+    // The order's own clock. Sales Orders bands cards by this into
+    // Urgent/Regular/Stale, so it's stamped once at creation and never touched
+    // again — moving parts around must not make an old order look fresh.
+    const createdAt = new Date().toISOString();
     setBubbles((p) => [...p, nb]);
     setBubbleMeta((prev) => ({
       ...prev,
-      [id]: { ...(prev[id] || {}), accountingPath: visibleAccountingPath || ACCOUNTING_PATHS.OUTSTANDING },
+      [id]: {
+        ...(prev[id] || {}),
+        createdAt,
+        accountingPath: visibleAccountingPath || ACCOUNTING_PATHS.OUTSTANDING,
+      },
     }));
     if (api?.writeSharedBubbleData) {
       api
@@ -959,6 +980,7 @@ export default function App() {
           name: finalName,
           notes: "",
           extraLines: [],
+          createdAt,
         })
         .catch((e) => console.warn("[shared-bubble] write failed (new bubble)", e));
     }
@@ -1026,24 +1048,43 @@ export default function App() {
     });
     return map;
   }, [items]);
-  const archivableBubbleIds = useMemo(() => {
-    const set = new Set();
-    bubbles.forEach((b) => {
-      const path = bubbleAccountingPathByName.get(b.name);
-      if (path === ACCOUNTING_PATHS.SAGE_AR || path === ACCOUNTING_PATHS.CASH_SALE) {
-        set.add(b.id);
-      }
-    });
-    return set;
-  }, [bubbles, bubbleAccountingPathByName]);
   const visibleAccountingPath = useMemo(() => {
-    if (currentView === "stock-flow") return ACCOUNTING_PATHS.OUTSTANDING;
-    if (currentView === "sage-ar-queue") return ACCOUNTING_PATHS.SAGE_AR;
     if (currentView === "cash-sale-flow") return ACCOUNTING_PATHS.CASH_SALE;
     return null;
   }, [currentView]);
+  // Which bubbles Cash Sales owns.
+  //
+  // The accounting path is read off a bubble's ITEMS, and parts that arrive via
+  // "Send to Cash Pad" were historically never stamped CASH_SALE — so an
+  // Auto-fill bubble like "MASTERCARD $250.00" could read as OUTSTANDING. That
+  // made it invisible in BOTH views: Cash Sales dropped it on the path, and
+  // Sales Orders dropped it for having a payment assigned. An assigned payment
+  // is therefore treated as decisive here, exactly as Sales Orders treats it,
+  // so the two views stay strict complements with nothing falling between them.
+  // (Newly filled bubbles now get the stamp too — see handleFillFromCashPad —
+  // this also heals the ones already in that state.)
+  const cashSaleBubbleNames = useMemo(() => {
+    const names = new Set();
+    bubbles.forEach((b) => {
+      const meta = bubbleMeta[b.id] || bubbleMeta[b.name] || {};
+      if ((meta.paymentIds || []).filter(Boolean).length) {
+        names.add(b.name);
+        return;
+      }
+      const path =
+        bubbleAccountingPathByName.get(b.name) ||
+        meta.accountingPath ||
+        ACCOUNTING_PATHS.OUTSTANDING;
+      if (path === ACCOUNTING_PATHS.CASH_SALE) names.add(b.name);
+    });
+    return names;
+  }, [bubbles, bubbleMeta, bubbleAccountingPathByName]);
+
   const bubblesForView = useMemo(() => {
     if (!visibleAccountingPath) return bubbles;
+    if (visibleAccountingPath === ACCOUNTING_PATHS.CASH_SALE) {
+      return bubbles.filter((b) => cashSaleBubbleNames.has(b.name));
+    }
     return bubbles.filter((b) => {
       const path =
         bubbleAccountingPathByName.get(b.name) ||
@@ -1051,17 +1092,32 @@ export default function App() {
         ACCOUNTING_PATHS.OUTSTANDING;
       return path === visibleAccountingPath;
     });
-  }, [bubbles, bubbleAccountingPathByName, bubbleMeta, visibleAccountingPath]);
+  }, [bubbles, bubbleAccountingPathByName, bubbleMeta, visibleAccountingPath, cashSaleBubbleNames]);
+
   const filteredItemsForView = useMemo(() => {
     if (!visibleAccountingPath) return filteredItems;
     return filteredItems.filter((it) => {
       const path = it.accountingPath || ACCOUNTING_PATHS.OUTSTANDING;
-      return path === visibleAccountingPath;
+      if (path === visibleAccountingPath) return true;
+      // Keep the parts sitting in a cash-sale bubble whose own path lags behind,
+      // or the card above would render with nothing in it.
+      return (
+        visibleAccountingPath === ACCOUNTING_PATHS.CASH_SALE &&
+        cashSaleBubbleNames.has((it.allocated_to || "").trim())
+      );
     });
-  }, [filteredItems, visibleAccountingPath]);
+  }, [filteredItems, visibleAccountingPath, cashSaleBubbleNames]);
   const itemsByBubbleForView = useMemo(
     () => groupItemsByBubble(filteredItemsForView, bubblesForView),
     [filteredItemsForView, bubblesForView]
+  );
+  // Deliberately off the UNFILTERED list: CashPad is a staging pool that holds
+  // parts folded in from Sales Orders, which are still on the OUTSTANDING path.
+  // Reading it out of itemsByBubbleForView would come back empty in Cash Sales,
+  // where that map is narrowed to CASH_SALE.
+  const cashPadItems = useMemo(
+    () => filteredItems.filter((it) => (it.allocated_to || "").trim().toUpperCase() === "CASHPAD"),
+    [filteredItems]
   );
   const UNSPECIFIED_WAREHOUSE = "Unspecified Warehouse";
   const returnsView = useMemo(() => {
@@ -1100,21 +1156,6 @@ export default function App() {
         const res = await api.readUIState();
         if (cancelled) return;
         const state = res?.state || {};
-        if (state.bubblePositions) {
-          setBubblePositions((prev) => ({
-            ...prev,
-            ...state.bubblePositions,
-          }));
-        }
-        if (state.bubbleSizes) {
-          setBubbleSizes((prev) => ({
-            ...prev,
-            ...state.bubbleSizes,
-          }));
-        }
-        if (Array.isArray(state.bubbleZOrder)) {
-          setBubbleZOrder(state.bubbleZOrder);
-        }
         // Back-compat: the old single `sageIntegrationEnabled` flag drove both flows.
         if (typeof state.sagePoEnabled === "boolean") {
           setSagePoEnabled(state.sagePoEnabled);
@@ -1134,6 +1175,9 @@ export default function App() {
           typeof state.printExtraLinesByBubble === "object"
         ) {
           setPrintExtraLinesByBubble(state.printExtraLinesByBubble);
+        }
+        if (typeof state.sageGrandTotalLine === "boolean") {
+          setSageGrandTotalLine(state.sageGrandTotalLine);
         }
         if (typeof state.ordersTodayOnly === "boolean") {
           setOrdersTodayOnly(state.ordersTodayOnly);
@@ -1245,27 +1289,23 @@ export default function App() {
     if (!uiStateReady || !api?.writeUIState) return;
     api
         .writeUIState({
-          bubblePositions,
-          bubbleSizes,
-          bubbleZOrder,
           sagePoEnabled,
           sageInvoiceEnabled,
           archiveCleanupDays,
           printExtraLinesByBubble,
           ordersTodayOnly,
+          sageGrandTotalLine,
           bubbleMeta,
           returnSlips,
         })
       .catch((e) => console.warn("[ui-state] write failed", e));
   }, [
-    bubblePositions,
-      bubbleSizes,
-      bubbleZOrder,
       sagePoEnabled,
       sageInvoiceEnabled,
       archiveCleanupDays,
       printExtraLinesByBubble,
       ordersTodayOnly,
+      sageGrandTotalLine,
       bubbleMeta,
       returnSlips,
       uiStateReady,
@@ -1275,14 +1315,12 @@ export default function App() {
     if (!uiStateReady || !api?.writeUIState) return;
       api
         .writeUIState({
-          bubblePositions,
-          bubbleSizes,
-          bubbleZOrder,
           sagePoEnabled,
           sageInvoiceEnabled,
           archiveCleanupDays,
           printExtraLinesByBubble,
           ordersTodayOnly,
+          sageGrandTotalLine,
           bubbleMeta: nextBubbleMeta || bubbleMeta,
           returnSlips,
         })
@@ -1300,42 +1338,6 @@ export default function App() {
         }
       });
       return changed ? next : prev;
-    });
-    setBubblePositions((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      bubbles.forEach((b, index) => {
-        const key = b.name || b.id;
-        if (!next[key]) {
-          const col = index % 3;
-          const row = Math.floor(index / 3);
-          next[key] = {
-            x: col * 360,
-            y: row * 360,
-          };
-          changed = true;
-        }
-      });
-      return changed ? next : prev;
-    });
-    setBubbleSizes((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      bubbles.forEach((b) => {
-        const key = b.name || b.id;
-        if (!next[key]) {
-          next[key] = 360;
-          changed = true;
-        }
-      });
-      return changed ? next : prev;
-    });
-    setBubbleZOrder((prev) => {
-      const keys = bubbles.map((b) => b.name || b.id);
-      const filtered = prev.filter((k) => keys.includes(k));
-      const missing = keys.filter((k) => !filtered.includes(k));
-      const next = filtered.concat(missing);
-      return JSON.stringify(next) === JSON.stringify(prev) ? prev : next;
     });
   }, [bubbles]);
   const printBubble = useMemo(
@@ -1359,161 +1361,20 @@ export default function App() {
     return map;
   }, [bubbles, bubbleMeta]);
 
-  useEffect(() => {
-    function handlePointerMove(e) {
-      const point = "touches" in e ? e.touches[0] : e;
-      if (!point) return;
-      const drag = bubbleDragRef.current;
-      const resize = bubbleResizeRef.current;
-      if (!drag && !resize) return;
-      if (!workspaceRef.current) return;
-      e.preventDefault();
-      if (drag) {
-        const rect = workspaceRef.current.getBoundingClientRect();
-        const x = Math.max(0, point.clientX - rect.left - drag.offsetX);
-        const y = Math.max(0, point.clientY - rect.top - drag.offsetY);
-        setBubblePositions((prev) => ({
-          ...prev,
-          [drag.key]: { x, y },
-        }));
-      } else if (resize) {
-        const delta = point.clientX - resize.startX;
-        const width = Math.max(280, Math.min(900, resize.startWidth + delta));
-        setBubbleSizes((prev) => ({
-          ...prev,
-          [resize.key]: width,
-        }));
-      }
-    }
-
-    function endDrag() {
-      if (!bubbleDragRef.current && !bubbleResizeRef.current) return;
-      bubbleDragRef.current = null;
-      bubbleResizeRef.current = null;
-      document.body.style.userSelect = prevBodyUserSelectRef.current || "";
-    }
-
-    window.addEventListener("mousemove", handlePointerMove);
-    window.addEventListener("mouseup", endDrag);
-    window.addEventListener("blur", endDrag);
-    window.addEventListener("touchmove", handlePointerMove, { passive: false });
-    window.addEventListener("touchend", endDrag);
-    window.addEventListener("touchcancel", endDrag);
-    return () => {
-      window.removeEventListener("mousemove", handlePointerMove);
-      window.removeEventListener("mouseup", endDrag);
-      window.removeEventListener("blur", endDrag);
-      window.removeEventListener("touchmove", handlePointerMove);
-      window.removeEventListener("touchend", endDrag);
-      window.removeEventListener("touchcancel", endDrag);
-    };
-  }, []);
-
-  // Drag & drop
-  function onDragStartItem(uid) {
-    console.log("[drag] start item", uid);
-    draggedItemUidRef.current = uid;
-  }
-
-  function onDropOnBubble(targetBubbleName) {
-    const uid = draggedItemUidRef.current;
-    console.log("[drop] on bubble", targetBubbleName, "item uid:", uid);
-    draggedItemUidRef.current = null;
-    if (!uid) return;
-    updateItemByKey(uid, { allocated_to: targetBubbleName });
-  }
-
-  function handleSplitItem(uid, splitQuantity, destinationBubbleName) {
-    setItems((prev) => {
-      const idx = prev.findIndex((it) => it.uid === uid);
-      if (idx === -1) return prev;
-      const item = prev[idx];
-      const currentQty = Number(item.quantity) || 0;
-      const qtyToMove = Math.floor(Number(splitQuantity));
-      if (!qtyToMove || qtyToMove <= 0 || qtyToMove >= currentQty) {
-        return prev;
-      }
-      const remainder = currentQty - qtyToMove;
-      const targetBubble = destinationBubbleName || item.allocated_to;
-      const newItem = {
-        ...item,
-        uid: makeUid(),
-        quantity: qtyToMove,
-        allocated_to: targetBubble,
-        last_moved_at: new Date().toISOString(),
-        rev: nextRev(item),
-      };
-      const next = [...prev];
-      next[idx] = { ...item, quantity: remainder, rev: nextRev(item) };
-      next.splice(idx + 1, 0, newItem);
-      ensureBubblesForItems(next, setBubbles);
-      return next;
+  // The same data inverted — paymentId -> the sale currently holding it — so
+  // Payment Management can badge a payment as already spent without needing its
+  // own copy of the bubble state. Only covers OPEN sales; archived ones come
+  // from api.getArchivedPaymentUsage(), since archiving clears the live link.
+  const saleNameByPaymentId = useMemo(() => {
+    const map = {};
+    bubbles.forEach((b) => {
+      const meta = bubbleMeta[b.id] || bubbleMeta[b.name] || {};
+      (Array.isArray(meta.paymentIds) ? meta.paymentIds : []).forEach((pid) => {
+        if (pid && !map[pid]) map[pid] = b.name;
+      });
     });
-  }
-
-  function handleConsolidateBubbleItems(bubbleName) {
-    if (!bubbleName) return;
-    // Computed from current state (not inside the updater) so the merged-away
-    // uids can be recorded as explicit deletions for the next save.
-    const prev = items;
-    const groupedByItem = new Map();
-    for (const item of prev) {
-      if (item.allocated_to !== bubbleName) continue;
-      const key = item.itemcode || item.reference_num || item.uid;
-      if (!groupedByItem.has(key)) {
-        groupedByItem.set(key, []);
-      }
-      groupedByItem.get(key).push(item);
-    }
-
-    let changed = false;
-    const replacements = new Map();
-    const removedUids = [];
-
-    groupedByItem.forEach((itemsForKey) => {
-      if (itemsForKey.length < 2) return;
-      changed = true;
-      const totalQuantity = itemsForKey.reduce(
-        (sum, curr) => sum + (Number(curr.quantity) || 0),
-        0
-      );
-      const totalCost = itemsForKey.reduce(
-        (sum, curr) => sum + (Number(curr.cost) || 0) * (Number(curr.quantity) || 0),
-        0
-      );
-      const highestPrice = itemsForKey.reduce(
-        (max, curr) => Math.max(max, Number(curr.allocated_for) || 0),
-        0
-      );
-      const reference = itemsForKey[0];
-      const mergedItem = {
-        ...reference,
-        uid: reference.uid,
-        quantity: totalQuantity,
-        cost: totalQuantity ? (totalCost / totalQuantity).toFixed(2) : reference.cost,
-        allocated_for: String(highestPrice || ""),
-      };
-      replacements.set(reference.uid, mergedItem);
-      for (let i = 1; i < itemsForKey.length; i++) {
-        replacements.set(itemsForKey[i].uid, null);
-        removedUids.push(itemsForKey[i].uid);
-      }
-    });
-
-    if (!changed) return;
-
-    const next = prev
-      .map((item) => {
-        if (!replacements.has(item.uid)) return item;
-        const replacement = replacements.get(item.uid);
-        if (replacement === null) return null;
-        return replacement;
-      })
-      .filter(Boolean);
-
-    markItemsDeleted(removedUids); // autosave will carry these deletions
-    setItems(next);
-  }
+    return map;
+  }, [bubbles, bubbleMeta]);
 
   function handleDeleteBubble(bubbleId, fallbackTargetName) {
     const bubble = bubbles.find((b) => b.id === bubbleId);
@@ -1529,12 +1390,26 @@ export default function App() {
       : (bubblePath === ACCOUNTING_PATHS.CASH_SALE && validTargets.includes("CASH SALES"))
         ? "CASH SALES"
         : validTargets[0] || "NEW STOCK";
+    // Landing in CashPad or CASH SALES puts the part on the cash-sale path —
+    // the same rule handleMoveArchiveItemToBubble applies. Any other
+    // destination leaves the path alone.
+    const fallbackUpper = String(fallback || "").trim().toUpperCase();
+    const fallbackPath =
+      fallbackUpper === "CASHPAD" || fallbackUpper === "CASH SALES"
+        ? ACCOUNTING_PATHS.CASH_SALE
+        : null;
     let updatedItemsSnapshot = null;
     setItems((prev) => {
       const nowIso = new Date().toISOString();
       const next = prev.map((it) =>
         it.allocated_to === bubble.name
-            ? { ...it, allocated_to: fallback, last_moved_at: nowIso, rev: nextRev(it) }
+            ? {
+                ...it,
+                allocated_to: fallback,
+                ...(fallbackPath ? { accountingPath: fallbackPath } : {}),
+                last_moved_at: nowIso,
+                rev: nextRev(it),
+              }
           : it
       );
       updatedItemsSnapshot = next;
@@ -1550,25 +1425,10 @@ export default function App() {
     delete cleanedBubbleMeta[bubbleId];
     if (bubble.name) delete cleanedBubbleMeta[bubble.name];
 
-    const cleanedPositions = { ...bubblePositions };
-    delete cleanedPositions[bubbleId];
-    if (bubble.name) delete cleanedPositions[bubble.name];
-
-    const cleanedSizes = { ...bubbleSizes };
-    delete cleanedSizes[bubbleId];
-    if (bubble.name) delete cleanedSizes[bubble.name];
-
-    const cleanedZOrder = bubbleZOrder.filter(
-      (key) => key !== bubbleId && key !== bubble.name
-    );
-
     const cleanedPrintExtras = { ...printExtraLinesByBubble };
     delete cleanedPrintExtras[bubbleId];
 
     setBubbleMeta(cleanedBubbleMeta);
-    setBubblePositions(cleanedPositions);
-    setBubbleSizes(cleanedSizes);
-    setBubbleZOrder(cleanedZOrder);
     setPrintExtraLinesByBubble(cleanedPrintExtras);
 
     persistUIState(cleanedBubbleMeta);
@@ -1580,31 +1440,6 @@ export default function App() {
     }
     _releaseBubbleLockOnDelete(bubbleId);
     markSharedBubbleDeleted(bubble);
-  }
-
-  function handleStartBubbleMove(bubbleKey, clientX, clientY) {
-    if (!workspaceRef.current) return;
-    const rect = workspaceRef.current.getBoundingClientRect();
-    const current = bubblePositions[bubbleKey] || { x: 0, y: 0 };
-    prevBodyUserSelectRef.current = document.body.style.userSelect;
-    document.body.style.userSelect = "none";
-    handleActivateBubble(bubbleKey);
-    bubbleDragRef.current = {
-      key: bubbleKey,
-      offsetX: clientX - rect.left - current.x,
-      offsetY: clientY - rect.top - current.y,
-    };
-  }
-
-  function handleStartBubbleResize(bubbleKey, clientX) {
-    prevBodyUserSelectRef.current = document.body.style.userSelect;
-    document.body.style.userSelect = "none";
-    handleActivateBubble(bubbleKey);
-    bubbleResizeRef.current = {
-      key: bubbleKey,
-      startX: clientX,
-      startWidth: bubbleSizes[bubbleKey] || 360,
-    };
   }
 
   function handleReturnItemToNewStock(uid) {
@@ -1831,49 +1666,6 @@ export default function App() {
       .catch((e) => console.error("[archive-move] writeItems failed", e));
   }
 
-  function handleActivateBubble(bubbleKey) {
-    setActiveBubbleKey(bubbleKey);
-    setBubbleZOrder((prev) => {
-      const keys = bubbles.map((b) => b.name || b.id);
-      const filtered = prev.filter((k) => keys.includes(k) && k !== bubbleKey);
-      return [...filtered, bubbleKey];
-    });
-  }
-
-  function handleMoveBubbleAccounting(bubbleId, targetPath) {
-    if (!bubbleId || !targetPath) return;
-    const bubble = bubbles.find((b) => b.id === bubbleId);
-    const nameKey = bubble?.name;
-    const now = new Date().toISOString();
-    const meta = bubbleMeta[bubbleId] || bubbleMeta[nameKey] || {};
-    const nextMeta = {
-      ...meta,
-      accountingPath: targetPath,
-    };
-    if (targetPath === ACCOUNTING_PATHS.SAGE_AR) {
-      nextMeta.queuedForSageAt = now;
-    } else if (targetPath === ACCOUNTING_PATHS.CASH_SALE) {
-      nextMeta.movedToCashSalesAt = now;
-    }
-    const nextBubbleMeta = {
-      ...bubbleMeta,
-      ...(nameKey ? { [nameKey]: nextMeta } : {}),
-      [bubbleId]: nextMeta,
-    };
-    setBubbleMeta(nextBubbleMeta);
-    persistUIState(nextBubbleMeta);
-    if (bubble?.name) {
-      const updatedItems = items.map((it) =>
-        it.allocated_to === bubble.name
-          ? { ...it, accountingPath: targetPath, last_moved_at: now, rev: nextRev(it) }
-          : it
-      );
-      setItems(updatedItems);
-      lastSavedRef.current = JSON.stringify(updatedItems);
-      api.writeItems(updatedItems);
-    }
-  }
-
   function handleUpdateBubblePayments(bubbleId, paymentIds) {
     if (!bubbleId) return;
     const bubble = bubbles.find((b) => b.id === bubbleId);
@@ -1892,6 +1684,191 @@ export default function App() {
     setBubbleMeta(nextBubbleMeta);
     persistUIState(nextBubbleMeta);
     persistSharedBubbleSnapshot(bubbleId, { paymentIds: cleanIds });
+  }
+
+  // Sales Order view's Delivered/Paid checkboxes — one flag at a time, same
+  // dual-write (local bubbleMeta + cross-machine shared file) as every other
+  // per-bubble field.
+  function handleSetBubbleFlag(bubbleId, key, value) {
+    if (!bubbleId) return;
+    const bubble = bubbles.find((b) => b.id === bubbleId);
+    const nameKey = bubble?.name;
+    const meta = bubbleMeta[bubbleId] || bubbleMeta[nameKey] || {};
+    const nextMeta = { ...meta, [key]: value };
+    const nextBubbleMeta = {
+      ...bubbleMeta,
+      ...(nameKey ? { [nameKey]: nextMeta } : {}),
+      [bubbleId]: nextMeta,
+    };
+    setBubbleMeta(nextBubbleMeta);
+    persistUIState(nextBubbleMeta);
+    persistSharedBubbleSnapshot(bubbleId, { [key]: value });
+  }
+
+  // Shared by every view that offers "Send to Sage Sales" (Cash Sales and
+  // Sales Orders) — one place for the failure alert so they can't drift into
+  // different error-handling behavior.
+  async function handleSageSalesInvoice(bubbleName, customerCode, notes, paymentType) {
+    // Flush unsaved item state to disk FIRST.
+    //
+    // items:sage-sales-invoice reads the items back off DISK in the main
+    // process — it can't see React state. Price edits (Match payment, CAP add,
+    // a typed discount) only call updateItemByKey, which sets state and leaves
+    // persistence to the 10s idle autosave, and that timer RESTARTS on every
+    // change. So sending to Sage within 10s of pricing a card sent Sage the
+    // previous prices, and doing it again "worked" only because the autosave
+    // had landed in between. Writing here makes what's on screen and what the
+    // AHK types the same thing by construction.
+    const pending = JSON.stringify(items);
+    if (pending !== lastSavedRef.current) {
+      try {
+        const flushed = await api.writeItems(items);
+        if (flushed?.ok === false) throw new Error(flushed.error || "Unknown error");
+        // Keeps the autosave from immediately rewriting the same snapshot.
+        lastSavedRef.current = pending;
+      } catch (e) {
+        lastSavedRef.current = "";
+        alert(
+          "The latest prices could not be saved before sending to Sage:\n\n" +
+            (e?.message || String(e)) +
+            "\n\nNothing was sent — Sage would have been given the old prices. Try again in a moment."
+        );
+        return { ok: false, error: e?.message || "Failed to save prices before sending." };
+      }
+    }
+
+    const res = await api.sageSalesInvoice(bubbleName, customerCode, notes || "", paymentType || "", {
+      includeGrandTotal: sageGrandTotalLine,
+    });
+    if (!res?.ok) {
+      console.error("[sage-sales] invoice failed", res);
+      alert(res?.error || "Sage Sales Invoice failed. Check the console for details.");
+      return res;
+    }
+
+    // Everything below is bookkeeping about a run that already happened in
+    // Sage. None of it may throw far enough to make a successful entry look
+    // like a failure, so each step reports and carries on.
+    const invoiceNumber = String(res.sageInvoiceNumber || "").trim();
+    const nowIso = new Date().toISOString();
+    const bubble = bubbles.find((b) => b.name === bubbleName);
+    const saleItems = items.filter((it) => it.allocated_to === bubbleName);
+    const meta = bubble ? bubbleMeta[bubble.id] || bubbleMeta[bubble.name] || {} : {};
+    const assignedPayments = (meta.paymentIds || [])
+      .map((id) => (payments || []).find((p) => p?.id === id))
+      .filter(Boolean);
+
+    // 1. Trace it on every part in the sale. Sending to Sage moves nothing
+    //    between bubbles or queues, so writeItems can't infer the event —
+    //    hence the explicit historyEvent. Only the sale's own items are sent
+    //    (writeItems upserts by uid and keeps everything else), which is also
+    //    what stops the event being logged against the whole store.
+    if (saleItems.length) {
+      const stampedSaleItems = saleItems.map((it) => ({
+        ...it,
+        sage_invoice_number: invoiceNumber,
+        sage_sent_at: nowIso,
+        rev: nextRev(it),
+      }));
+      const byUid = new Map(stampedSaleItems.map((it) => [it.uid, it]));
+      const nextItems = items.map((it) => byUid.get(it.uid) || it);
+      setItems(nextItems);
+      lastSavedRef.current = JSON.stringify(nextItems);
+      try {
+        const wrote = await api.writeItems(stampedSaleItems, [], {
+          historyEvent: {
+            event: "sent_to_sage",
+            extra: { sage_invoice_number: invoiceNumber, sale: bubbleName },
+          },
+        });
+        if (wrote?.ok === false) throw new Error(wrote.error || "Unknown error");
+      } catch (e) {
+        lastSavedRef.current = "";
+        console.error("[sage-sales] failed to stamp items", e);
+      }
+    }
+
+    // 2. Log the run itself — the record that outlives the sale once it's
+    //    archived and its bubble is gone.
+    const subtotal = saleItems.reduce((sum, it) => {
+      const unit =
+        it.discounted_price !== undefined && it.discounted_price !== null && it.discounted_price !== ""
+          ? Number(it.discounted_price) || 0
+          : Number(it.allocated_for) || 0;
+      return sum + (Number(it.quantity) || 0) * unit;
+    }, 0);
+
+    let runId = "";
+    try {
+      const logged = await api.appendSageRun({
+        saleName: bubbleName,
+        customerCode: customerCode || "",
+        sageInvoiceNumber: invoiceNumber,
+        notes: notes || "",
+        itemCount: saleItems.length,
+        payments: assignedPayments.map((p) => ({
+          id: p.id,
+          amount: Number(p.amount) || 0,
+          date: p.date || "",
+          time: p.time || "",
+          note: p.note || "",
+          type: p.type || "",
+        })),
+        saleTotal: Number((subtotal * 1.13).toFixed(2)),
+      });
+      if (logged?.ok) runId = logged.run?.id || "";
+      else console.error("[sage-sales] failed to log the run", logged);
+    } catch (e) {
+      console.error("[sage-sales] failed to log the run", e);
+    }
+
+    // 3. Put the invoice number on the sale card, where it can be corrected or
+    //    cleared. `sageRunId` is what ties an edit there back to the log row.
+    if (bubble) {
+      const nextMeta = {
+        ...meta,
+        sageInvoiceNumber: invoiceNumber,
+        sageSentAt: nowIso,
+        sageRunId: runId,
+      };
+      const nextBubbleMeta = {
+        ...bubbleMeta,
+        [bubble.id]: nextMeta,
+        ...(bubble.name ? { [bubble.name]: nextMeta } : {}),
+      };
+      setBubbleMeta(nextBubbleMeta);
+      persistUIState(nextBubbleMeta);
+      persistSharedBubbleSnapshot(bubble.id, {
+        sageInvoiceNumber: invoiceNumber,
+        sageSentAt: nowIso,
+        sageRunId: runId,
+      });
+    }
+
+    return { ...res, sageInvoiceNumber: invoiceNumber };
+  }
+
+  // Correcting or clearing the Sage invoice number on a sale card. Writes both
+  // places it lives: the card (bubbleMeta + the shared file) and the run log
+  // row the report prints from, so the two can't drift.
+  async function handleSetSaleInvoiceNumber(bubbleId, value) {
+    const bubble = bubbles.find((b) => b.id === bubbleId);
+    if (!bubble) return;
+    const next = String(value ?? "").trim();
+    const meta = bubbleMeta[bubbleId] || bubbleMeta[bubble.name] || {};
+    const nextMeta = { ...meta, sageInvoiceNumber: next };
+    const nextBubbleMeta = {
+      ...bubbleMeta,
+      [bubbleId]: nextMeta,
+      ...(bubble.name ? { [bubble.name]: nextMeta } : {}),
+    };
+    setBubbleMeta(nextBubbleMeta);
+    persistUIState(nextBubbleMeta);
+    persistSharedBubbleSnapshot(bubbleId, { sageInvoiceNumber: next });
+    if (meta.sageRunId) {
+      const res = await api.setSageRunInvoice({ id: meta.sageRunId, sageInvoiceNumber: next });
+      if (res?.ok === false) console.warn("[sage-sales] run log not updated", res.error);
+    }
   }
 
   async function handleDeletePayment(paymentId, bubbleId) {
@@ -1918,17 +1895,56 @@ export default function App() {
     const markup = Math.max(0, parseFloat(cashPadMarkup) || 0) / 100;
     const toAmt = (v) => parseFloat((v ?? '').toString().replace(/[^0-9.-]/g, '')) || 0;
 
-    // Only unassigned payments
+    // Only payments that are genuinely still free to spend.
+    //
+    // Three ways money can already be accounted for, and all three have to be
+    // excluded or Auto-fill invents a second sale for takings that were banked
+    // once:
+    //   1. attached to a sale that's open right now;
+    //   2. flagged recordedInSage — archiving a sale CLEARS its attachment and
+    //      sets this instead, so without it every invoiced payment looks free
+    //      again the moment its sale is filed away;
+    //   3. named by an archived sale in the bubble archive — the same case as
+    //      (2) for sales archived before that flag existed.
     const assignedIds = new Set(
       Object.values(bubbleMeta).flatMap((m) => m.paymentIds || [])
     );
-    const unassigned = (payments || []).filter((p) => p?.id && !assignedIds.has(p.id));
+
+    let archivedIds = new Set();
+    try {
+      const usage = await api.getArchivedPaymentUsage?.();
+      if (usage?.ok) archivedIds = new Set(Object.keys(usage.usage || {}));
+    } catch (e) {
+      // Best effort. The recordedInSage flag still covers everything archived
+      // since it was introduced, so a failed lookup narrows the check rather
+      // than disabling it.
+      console.warn('[cashpad-fill] archived payment lookup failed', e);
+    }
+
+    const spent = [];
+    const unassigned = [];
+    (payments || []).forEach((p) => {
+      if (!p?.id) return;
+      if (assignedIds.has(p.id)) return; // on an open sale — not "spent", just busy
+      if (p.recordedInSage === true) { spent.push(p); return; }
+      if (archivedIds.has(p.id)) { spent.push(p); return; }
+      unassigned.push(p);
+    });
+
     dbg('fill:payments', {
       assignedPaymentIds: Array.from(assignedIds),
+      skippedAlreadyInSage: spent.map((p) => ({ id: p.id, type: p.type, amount: p.amount })),
       unassignedCount: unassigned.length,
       unassigned: unassigned.map((p) => ({ id: p.id, type: p.type, amount: p.amount })),
     });
-    if (!unassigned.length) { alert('No unassigned payments found.'); return; }
+    if (!unassigned.length) {
+      alert(
+        spent.length
+          ? `No payments left to fill.\n\n${spent.length} payment${spent.length === 1 ? " is" : "s are"} already recorded in Sage and won't be reused.`
+          : 'No unassigned payments found.'
+      );
+      return;
+    }
 
     // CASHPAD items only
     const cashpadItems = items.filter(
@@ -1940,37 +1956,92 @@ export default function App() {
     });
     if (!cashpadItems.length) { alert('CashPad is empty.'); return; }
 
-    // Effective price: cost × (1 + markup) × (1 + tax), sort largest first
+    // Every part is priced the same way here, off cost: cost × (1 + markup),
+    // then × (1 + tax) for what the customer actually hands over. A price
+    // already sitting on the part is deliberately NOT used as the basis — the
+    // fit below and the discount written back afterwards have to agree, or a
+    // card's total won't land on the payment it was chosen for. The SELLING
+    // price (allocated_for) is never touched; only discounted_price, which is
+    // the cash-sale price by definition.
+    const unitPriceFor = (it) => toAmt(it.cost) * (1 + markup);
+    // What one CashPad row adds to a card's tax-in total — its "line total".
+    const lineTotalFor = (it) => unitPriceFor(it) * (Number(it.quantity) || 1) * (1 + TAX);
+
     const priced = cashpadItems
-      .map((it) => ({ ...it, _eff: toAmt(it.cost) * (Number(it.quantity) || 1) * (1 + markup) * (1 + TAX) }))
-      .sort((a, b) => b._eff - a._eff);
+      .map((it) => ({ ...it, _eff: lineTotalFor(it) }))
+      // A row with no cost recorded prices to nothing, so it would "fit" every
+      // payment for free and pad cards with parts that move no money.
+      .filter((it) => it._eff > 0);
+    dbg('fill:priced', {
+      count: priced.length,
+      skippedNoCost: cashpadItems.length - priced.length,
+    });
+    if (!priced.length) {
+      alert('Nothing in CashPad has a cost recorded, so no line totals could be worked out.');
+      return;
+    }
 
-    // Payments largest first
-    const sortedPayments = [...unassigned].sort((a, b) => toAmt(b.amount) - toAmt(a.amount));
+    // Payments oldest first — the earliest payment gets first pick of the
+    // CashPad pool, so stock clears in the order the money actually came in.
+    // Same date/createdAt fallback the Payment Management list sorts by.
+    const paymentTime = (p) => {
+      const t = new Date(p?.date || p?.createdAt || 0).getTime();
+      return Number.isFinite(t) ? t : 0;
+    };
+    const sortedPayments = [...unassigned].sort((a, b) => {
+      const diff = paymentTime(a) - paymentTime(b);
+      if (diff) return diff;
+      // Same day: fall back to when the payment was recorded, then largest first.
+      const ca = new Date(a?.createdAt || 0).getTime() || 0;
+      const cb = new Date(b?.createdAt || 0).getTime() || 0;
+      if (ca !== cb) return ca - cb;
+      return toAmt(b.amount) - toAmt(a.amount);
+    });
 
-    // Greedy largest-first fill
+    // Best fit, one part at a time.
+    //
+    // For each payment: of everything still in CashPad whose line total fits
+    // under what's left of the payment, take the part that leaves the SMALLEST
+    // delta (delta = payment − the card's running total). Then look again with
+    // the reduced budget, and stop when nothing fits.
+    //
+    // Taking the largest that fits IS minimizing the delta — the delta shrinks
+    // by exactly the line total added — so each step is one scan of the pool
+    // rather than a search over combinations. That also makes the multi-part
+    // case fall out for free: every part after the first is chosen against the
+    // remaining budget, so it's the running sum being fitted to the payment,
+    // not each part on its own.
     const pool = [...priced];
     const assignments = [];
     for (const payment of sortedPayments) {
       const target = toAmt(payment.amount);
       const chosen = [];
       let spent = 0;
-      const takenIdx = [];
-      for (let i = 0; i < pool.length; i++) {
-        if (spent + pool[i]._eff <= target + 0.005) {
-          chosen.push(pool[i]);
-          takenIdx.push(i);
-          spent += pool[i]._eff;
+      for (;;) {
+        let bestIdx = -1;
+        let bestEff = 0;
+        for (let i = 0; i < pool.length; i++) {
+          const eff = pool[i]._eff;
+          // Half a cent of slack, so a line total that lands exactly on the
+          // payment isn't rejected by floating-point drift.
+          if (spent + eff > target + 0.005) continue;
+          if (eff <= bestEff) continue;
+          bestIdx = i;
+          bestEff = eff;
         }
+        if (bestIdx < 0) break;
+        chosen.push(pool[bestIdx]);
+        spent += bestEff;
+        pool.splice(bestIdx, 1);
       }
-      // Remove chosen from pool (reverse order to keep indices valid)
-      for (let i = takenIdx.length - 1; i >= 0; i--) pool.splice(takenIdx[i], 1);
       assignments.push({ payment, chosen });
       dbg('fill:assign', {
         paymentId: payment.id,
         target: target.toFixed(2),
         spent: spent.toFixed(2),
+        delta: (target - spent).toFixed(2),
         chosenUids: chosen.map((c) => c.uid),
+        chosenLineTotals: chosen.map((c) => c._eff.toFixed(2)),
         poolRemaining: pool.length,
       });
     }
@@ -2035,8 +2106,25 @@ export default function App() {
       const dest = itemToBubble.get(it.uid);
       if (!dest) return it;
       moved++;
-      const discounted_price = (toAmt(it.cost) * (1 + markup)).toFixed(2);
-      return { ...it, allocated_to: dest, last_moved_at: now, discounted_price, rev: nextRev(it) };
+      // Stamped CASH_SALE here because this IS the moment a part becomes one.
+      // Without it a part that reached CashPad via "Send to Cash Pad" (which
+      // leaves it on OUTSTANDING) kept that path inside its payment bubble, and
+      // the bubble then read as OUTSTANDING and vanished from Cash Sales.
+      const patch = {
+        ...it,
+        allocated_to: dest,
+        accountingPath: ACCOUNTING_PATHS.CASH_SALE,
+        last_moved_at: now,
+        rev: nextRev(it),
+      };
+      // The cash-sale price, per unit, on exactly the basis the fit above used
+      // — anything else and the card's total wouldn't add up to the payment it
+      // was chosen for. Written unconditionally: re-running with a different
+      // markup has to re-price, otherwise the second run's split and the prices
+      // on screen would describe different numbers. `allocated_for` (the
+      // selling price) is deliberately left alone.
+      patch.discounted_price = unitPriceFor(it).toFixed(2);
+      return patch;
     });
     dbg('fill:setItems', { movedInThisUpdate: moved, expected: itemsMoved, totalItems: updatedItems.length });
     setItems(updatedItems);
@@ -2077,141 +2165,226 @@ export default function App() {
       );
     }
 
-    dbg('fill:DONE', { bubblesCreated, itemsMoved });
+    dbg('fill:DONE', { bubblesCreated, itemsMoved, skipped: spent.length });
     setFillCashPadResult(
-      `Created ${bubblesCreated} bubble${bubblesCreated !== 1 ? 's' : ''}, moved ${itemsMoved} item${itemsMoved !== 1 ? 's' : ''}.`
+      `Created ${bubblesCreated} bubble${bubblesCreated !== 1 ? 's' : ''}, moved ${itemsMoved} item${itemsMoved !== 1 ? 's' : ''}.` +
+      // Said out loud rather than silently skipped, so a payment that doesn't
+      // show up is explained instead of looking like a bug.
+      (spent.length
+        ? ` Skipped ${spent.length} already in Sage.`
+        : '')
     );
     setTimeout(() => setFillCashPadResult(null), 5000);
   }
 
-  async function handleArchiveBubble(bubbleId) {
-    const bubble = bubbles.find((b) => b.id === bubbleId);
-    if (!bubble) return;
-    const bubbleItems = items.filter((it) => it.allocated_to === bubble.name);
-    const path = bubbleItems[0]?.accountingPath || ACCOUNTING_PATHS.OUTSTANDING;
-    if (path !== ACCOUNTING_PATHS.SAGE_AR && path !== ACCOUNTING_PATHS.CASH_SALE) {
-      alert("Archive is only available for Sage AR Queue or Cash Sales bubbles.");
+  // The undo for Auto-fill: pull every open cash sale's parts back into CashPad
+  // and drop the per-payment bubbles it created, so the split can be redone
+  // (e.g. after fixing a markup or a wrong payment amount).
+  //
+  // Deliberately NOT a loop over handleDeleteBubble. That reads `bubbles` and
+  // `bubbleMeta` out of the render closure and leaves persistence to the
+  // debounced autosave, so N calls in a row would each work from the same stale
+  // snapshot and only one bubble's cleanup would survive. This does the whole
+  // set in one pass and writes immediately, exactly as Auto-fill does.
+  async function handleReturnAllToCashPad() {
+    // Exactly the set Cash Sales displays — NOT a second, parallel rule. When
+    // this filtered on the accounting path alone it silently skipped any card
+    // the view showed on the strength of an assigned payment (a "MASTERCARD
+    // $250.00" whose parts still read OUTSTANDING), so a button labelled "all"
+    // quietly left some behind.
+    //
+    // Archived sales can't appear here at all: archiving removes their parts
+    // from `items` and their bubble from `bubbles`, so there is nothing left
+    // for this to match. It only ever sees what's currently on screen.
+    const targets = bubbles.filter((b) => {
+      const name = (b.name || "").trim();
+      if (!name || DEFAULT_BUBBLE_NAMES.has(name)) return false;
+      // CashPad is the destination, not a sale to empty.
+      if (name.toUpperCase() === "CASHPAD") return false;
+      return cashSaleBubbleNames.has(b.name);
+    });
+
+    if (!targets.length) {
+      setFillCashPadResult("No cash sales to send back.");
+      setTimeout(() => setFillCashPadResult(null), 5000);
       return;
     }
-    const confirmed =
-      typeof window === "undefined"
-        ? true
-        : window.confirm(
-            `Archive "${bubble.name}" and ${bubbleItems.length} item(s)? They will be removed from active views and saved to the archive.`
-          );
+
+    // Matched case-insensitively, the same way groupItemsByBubble puts parts
+    // onto cards. Comparing raw strings here would move a subset of what the
+    // card visibly contains if a part's allocated_to differed only in case.
+    const targetNames = new Set(targets.map((b) => (b.name || "").trim().toUpperCase()));
+    const targetIds = new Set(targets.map((b) => b.id));
+    const isTargetItem = (it) => targetNames.has((it.allocated_to || "").trim().toUpperCase());
+    const moving = items.filter(isTargetItem);
+
+    const confirmed = window.confirm(
+      `Send all ${targets.length} cash sale${targets.length === 1 ? "" : "s"} back to CashPad?\n\n` +
+        `${moving.length} part${moving.length === 1 ? "" : "s"} move into CashPad and these sales stop existing — ` +
+        `their notes and payment assignments go away. The payments themselves are untouched, so ` +
+        `"Fill Payments" can rebuild the split.`
+    );
     if (!confirmed) return;
-    try {
-      const res = await api.archiveBubble({
-        bubble,
-        meta: bubbleMeta[bubbleId] || bubbleMeta[bubble.name] || {},
-        items: bubbleItems,
-      });
-      if (!res?.ok) throw new Error(res?.error || "Failed to archive bubble.");
-      const archivedAt = res.archivedAt || new Date().toISOString();
-      const remainingItems = items.filter((it) => it.allocated_to !== bubble.name);
-      const removedUids = bubbleItems.map((it) => it.uid);
-      markItemsDeleted(removedUids);
-      setItems(remainingItems);
-      lastSavedRef.current = JSON.stringify(remainingItems);
-      // These items are being archived (sold), not deleted — tag the removal so
-      // the lifecycle trace records "Archived (sold)".
-      const writeRes = await api.writeItems(remainingItems, removedUids, {
-        deleteReason: "archived",
-      });
-      if (writeRes?.ok === false) {
-        throw new Error(writeRes.error || "Failed to remove archived items from active files.");
-      }
-      confirmItemsDeleted(removedUids);
-      const paymentMeta = bubbleMeta[bubbleId] || bubbleMeta[bubble.name] || {};
-      if (Array.isArray(paymentMeta.paymentIds) && paymentMeta.paymentIds.length) {
-        handleUpdateBubblePayments(bubbleId, []);
-      }
-      setBubbles((prev) => prev.filter((b) => b.id !== bubbleId));
 
-      const cleanedBubbleMeta = { ...bubbleMeta };
-      delete cleanedBubbleMeta[bubbleId];
-      if (bubble.name) delete cleanedBubbleMeta[bubble.name];
+    const nowIso = new Date().toISOString();
+    const updatedItems = items.map((it) =>
+      isTargetItem(it)
+        ? {
+            ...it,
+            allocated_to: "CASHPAD",
+            // Same rule handleMoveArchiveItemToBubble applies: sitting in
+            // CashPad means the part is on the cash-sale path.
+            accountingPath: ACCOUNTING_PATHS.CASH_SALE,
+            last_moved_at: nowIso,
+            rev: nextRev(it),
+          }
+        : it
+    );
 
-      const cleanedPositions = { ...bubblePositions };
-      delete cleanedPositions[bubbleId];
-      if (bubble.name) delete cleanedPositions[bubble.name];
+    setItems(updatedItems);
+    lastSavedRef.current = JSON.stringify(updatedItems);
+    // Creates the CASHPAD bubble if this is the first thing to land there;
+    // the filter below then removes the emptied sales.
+    ensureBubblesForItems(updatedItems, setBubbles);
+    setBubbles((prev) => prev.filter((b) => !targetIds.has(b.id)));
 
-      const cleanedSizes = { ...bubbleSizes };
-      delete cleanedSizes[bubbleId];
-      if (bubble.name) delete cleanedSizes[bubble.name];
+    const cleanedBubbleMeta = { ...bubbleMeta };
+    const cleanedPrintExtras = { ...printExtraLinesByBubble };
+    targets.forEach((b) => {
+      delete cleanedBubbleMeta[b.id];
+      if (b.name) delete cleanedBubbleMeta[b.name];
+      delete cleanedPrintExtras[b.id];
+    });
+    setBubbleMeta(cleanedBubbleMeta);
+    setPrintExtraLinesByBubble(cleanedPrintExtras);
+    persistUIState(cleanedBubbleMeta);
 
-      const cleanedZOrder = bubbleZOrder.filter(
-        (key) => key !== bubbleId && key !== bubble.name
-      );
-
-      const cleanedPrintExtras = { ...printExtraLinesByBubble };
-      delete cleanedPrintExtras[bubbleId];
-
-      setBubbleMeta(cleanedBubbleMeta);
-      setBubblePositions(cleanedPositions);
-      setBubbleSizes(cleanedSizes);
-      setBubbleZOrder(cleanedZOrder);
-      setPrintExtraLinesByBubble(cleanedPrintExtras);
-      setActiveBubbleKey((prev) => (prev === bubbleId || prev === bubble.name ? null : prev));
-      persistUIState(cleanedBubbleMeta);
+    targets.forEach((b) => {
       if (api?.deleteSharedBubbleData) {
-        api.deleteSharedBubbleData(bubbleId).catch((e) => console.warn("[shared-bubble] delete failed", e));
-        if (bubble?.name) {
-          api.deleteSharedBubbleData(bubble.name).catch(() => {});
-        }
+        api.deleteSharedBubbleData(b.id).catch((e) =>
+          console.warn("[shared-bubble] delete failed", e)
+        );
+        if (b.name) api.deleteSharedBubbleData(b.name).catch(() => {});
       }
-      _releaseBubbleLockOnDelete(bubbleId);
-      markSharedBubbleDeleted(bubble);
+      _releaseBubbleLockOnDelete(b.id);
+      markSharedBubbleDeleted(b);
+    });
+
+    // Persist the moves right away rather than waiting on the idle autosave —
+    // an items:updated push from another machine in that window would re-read
+    // the stale file and undo all of this.
+    try {
+      const res = await api.writeItems(updatedItems);
+      if (res && res.ok === false) throw new Error(res.error || "Unknown error");
     } catch (e) {
-      console.error("[archive] failed", e);
-      alert(e?.message || "Failed to archive bubble.");
+      lastSavedRef.current = "";
+      alert(
+        "The parts were moved back on screen but could not be saved to the shared folder:\n\n" +
+          (e?.message || String(e)) +
+          "\n\nIt will retry automatically, but re-check after a few seconds."
+      );
     }
+
+    setFillCashPadResult(
+      `Sent ${moving.length} part${moving.length === 1 ? "" : "s"} back to CashPad from ${
+        targets.length
+      } sale${targets.length === 1 ? "" : "s"}.`
+    );
+    setTimeout(() => setFillCashPadResult(null), 5000);
   }
 
-  async function handleDeleteBubbleItems(bubbleId) {
+  // End of the line for a cash sale that's been through the workflow — it's
+  // been invoiced into Sage, returned, or otherwise dealt with. Nothing is
+  // destroyed: the sale and its parts are copied into archived_bubbles.json
+  // (searchable from the Archive tab) and the removal is tagged `archived`, so
+  // each part's lifecycle trail ends with "Archived" rather than "deleted".
+  // Shared by Cash Sales ("Archive Sale") and Sales Orders ("Delivered and
+  // Complete"). Both mean the same thing to the books — the sale is finished,
+  // so the parts leave the active queue as sold and the bubble stops existing.
+  // Only the wording of the confirm differs, hence `confirmMessage`.
+  async function handleArchiveCashSale(bubbleId, confirmMessage) {
     const bubble = bubbles.find((b) => b.id === bubbleId);
     if (!bubble) return;
     const bubbleItems = items.filter((it) => it.allocated_to === bubble.name);
     const confirmed = window.confirm(
-      `Permanently delete "${bubble.name}" and ${bubbleItems.length} item(s)? This cannot be undone.`
+      // An empty order has nothing to file, so don't promise an archive entry
+      // that would contain nothing — this is purely clearing the card away.
+      bubbleItems.length === 0
+        ? `Close "${bubble.name}"?\n\nIt has no parts left, so there's nothing to file in the Archive — this just removes the empty order.`
+        : confirmMessage ||
+          `Archive "${bubble.name}" and its ${bubbleItems.length} part(s)?\n\nThey leave Cash Sales and move to the Archive — searchable there, with each part's history kept intact.`
     );
     if (!confirmed) return;
     try {
-      const remainingItems = items.filter((it) => it.allocated_to !== bubble.name);
-      const removedUids = bubbleItems.map((it) => it.uid);
-      markItemsDeleted(removedUids);
-      setItems(remainingItems);
-      lastSavedRef.current = JSON.stringify(remainingItems);
-      const writeRes = await api.writeItems(remainingItems, removedUids);
-      if (writeRes?.ok === false) {
-        throw new Error(writeRes.error || "Failed to delete items.");
+      // Only write an archive entry when there is something to archive. An
+      // empty bubble would otherwise add a zero-item row to
+      // archived_bubbles.json that no search can ever return — noise that reads
+      // like a lost sale when you go looking for one.
+      if (bubbleItems.length) {
+        const res = await api.archiveBubble({
+          bubble,
+          meta: bubbleMeta[bubbleId] || bubbleMeta[bubble.name] || {},
+          items: bubbleItems,
+        });
+        if (!res?.ok) throw new Error(res?.error || "Failed to archive this sale.");
+        const remainingItems = items.filter((it) => it.allocated_to !== bubble.name);
+        const removedUids = bubbleItems.map((it) => it.uid);
+        markItemsDeleted(removedUids);
+        // Permanent, on top of the pending-delete tombstone above — these parts
+        // are in the Archive now and must never come back from a late watcher
+        // push and rebuild this bubble.
+        markItemsArchived(removedUids);
+        setItems(remainingItems);
+        lastSavedRef.current = JSON.stringify(remainingItems);
+        // Only clears the active queue files — the archive copy above is what
+        // persists. `archived` is what makes the history read "Archived (sold)".
+        const writeRes = await api.writeItems(remainingItems, removedUids, {
+          deleteReason: "archived",
+        });
+        if (writeRes?.ok === false) {
+          throw new Error(writeRes.error || "Failed to clear archived parts from the active files.");
+        }
+        confirmItemsDeleted(removedUids);
       }
-      confirmItemsDeleted(removedUids);
       const paymentMeta = bubbleMeta[bubbleId] || bubbleMeta[bubble.name] || {};
-      if (Array.isArray(paymentMeta.paymentIds) && paymentMeta.paymentIds.length) {
+      const assignedIds = Array.isArray(paymentMeta.paymentIds)
+        ? paymentMeta.paymentIds.filter(Boolean)
+        : [];
+      if (assignedIds.length) {
+        // Flagged rather than deleted. The money is now in Sage, so the payment
+        // has done its job — but it still has to be reconcilable against a bank
+        // deposit, and deleting it here would make that impossible. The Payments
+        // view shows these as Recorded and offers a purge when you're ready.
+        const idSet = new Set(assignedIds);
+        const recordedAt = new Date().toISOString();
+        const nextPayments = (payments || []).map((p) =>
+          p?.id && idSet.has(p.id)
+            ? {
+                ...p,
+                recordedInSage: true,
+                recordedAt,
+                recordedForSale: bubble.name || "",
+                sageInvoiceNumber: paymentMeta.sageInvoiceNumber || p.sageInvoiceNumber || "",
+              }
+            : p
+        );
+        try {
+          await api.writePayments(nextPayments);
+          setPayments(nextPayments);
+        } catch (e) {
+          // The sale still archives — the flag is bookkeeping, not the point.
+          console.error("[archive-cash-sale] failed to flag payments as recorded", e);
+        }
         handleUpdateBubblePayments(bubbleId, []);
       }
       setBubbles((prev) => prev.filter((b) => b.id !== bubbleId));
       const cleanedBubbleMeta = { ...bubbleMeta };
       delete cleanedBubbleMeta[bubbleId];
       if (bubble.name) delete cleanedBubbleMeta[bubble.name];
-      const cleanedPositions = { ...bubblePositions };
-      delete cleanedPositions[bubbleId];
-      if (bubble.name) delete cleanedPositions[bubble.name];
-      const cleanedSizes = { ...bubbleSizes };
-      delete cleanedSizes[bubbleId];
-      if (bubble.name) delete cleanedSizes[bubble.name];
-      const cleanedZOrder = bubbleZOrder.filter(
-        (key) => key !== bubbleId && key !== bubble.name
-      );
       const cleanedPrintExtras = { ...printExtraLinesByBubble };
       delete cleanedPrintExtras[bubbleId];
       setBubbleMeta(cleanedBubbleMeta);
-      setBubblePositions(cleanedPositions);
-      setBubbleSizes(cleanedSizes);
-      setBubbleZOrder(cleanedZOrder);
       setPrintExtraLinesByBubble(cleanedPrintExtras);
-      setActiveBubbleKey((prev) => (prev === bubbleId || prev === bubble.name ? null : prev));
       persistUIState(cleanedBubbleMeta);
       if (api?.deleteSharedBubbleData) {
         api.deleteSharedBubbleData(bubbleId).catch((e) => console.warn("[shared-bubble] delete failed", e));
@@ -2220,8 +2393,8 @@ export default function App() {
       _releaseBubbleLockOnDelete(bubbleId);
       markSharedBubbleDeleted(bubble);
     } catch (e) {
-      console.error("[delete-bubble] failed", e);
-      alert(e?.message || "Failed to delete bubble.");
+      console.error("[archive-cash-sale] failed", e);
+      alert(e?.message || "Failed to archive this sale.");
     }
   }
 
@@ -2287,7 +2460,29 @@ export default function App() {
       );
     }
     setPrintGeneratedAt(new Date());
-    persistSharedBubbleSnapshot(printBubble.id, { extraLines: printExtraLinesByBubble[printBubble.id] || [] });
+    // Stamp what got printed so the Sales Order view can tell "printed, still
+    // current" from "printed, but changed since" — computed from the exact
+    // items/notes/extras this print run used, not whatever's on screen later.
+    const printedExtraLines = printExtraLinesByBubble[printBubble.id] || [];
+    const printedSignature = computeBubblePrintSignature(printBubble.notes, printItems, printedExtraLines);
+    const printedAt = new Date().toISOString();
+    {
+      const nameKey = printBubble.name;
+      const meta = bubbleMeta[printBubble.id] || bubbleMeta[nameKey] || {};
+      const nextMeta = { ...meta, printedSignature, printedAt };
+      const nextBubbleMeta = {
+        ...bubbleMeta,
+        ...(nameKey ? { [nameKey]: nextMeta } : {}),
+        [printBubble.id]: nextMeta,
+      };
+      setBubbleMeta(nextBubbleMeta);
+      persistUIState(nextBubbleMeta);
+    }
+    persistSharedBubbleSnapshot(printBubble.id, {
+      extraLines: printedExtraLines,
+      printedSignature,
+      printedAt,
+    });
     setTimeout(() => {
       if (!printPreviewRef.current) return;
       const contents = printPreviewRef.current.innerHTML;
@@ -2334,74 +2529,6 @@ export default function App() {
   }
   function handleFieldBlur() {
     isEditingAnythingRef.current = false;
-  }
-
-  async function handleStartEdit(item) {
-    try {
-      const res = await api.lockItem(item.uid);
-      if (!res?.ok) {
-        if (res?.reason === "locked") {
-          alert("This item is currently being edited by another user.");
-        } else {
-          alert("Could not start editing this item.");
-        }
-        return;
-      }
-
-      // Lock acquired; open modal with a local draft
-      setEditingItemUid(item.uid);
-      setEditingDraft({ ...item }); // or pick only fields you want editable
-    } catch (e) {
-      console.error("lockItem error", e);
-      alert("Error starting edit.");
-    }
-  }
-
-  async function handleSaveEdit() {
-    if (!editingItemUid || !editingDraft) return;
-    try {
-      const res = await api.applyEdit(editingItemUid, editingDraft);
-      if (!res?.ok) {
-        if (res?.reason === "lock-expired") {
-          alert("Your edit timed out (>20s). Please reopen the editor.");
-        } else {
-          alert("Could not save changes.");
-        }
-        // Close modal and let next fs.watch refresh bring us up-to-date
-        setEditingItemUid(null);
-        setEditingDraft(null);
-        return;
-      }
-
-      // Update local items so UI reflects immediately
-      setItems((prev) => {
-        const next = prev.map((it) =>
-          it.uid === editingItemUid ? res.item : it
-        );
-        lastSavedRef.current = JSON.stringify(next);
-        return next;
-      });
-
-      setEditingItemUid(null);
-      setEditingDraft(null);
-      await refreshItemsIfPending();
-    } catch (e) {
-      console.error("applyEdit error", e);
-      alert("Error saving changes.");
-    }
-  }
-
-  async function handleCancelEdit() {
-    if (editingItemUid) {
-      try {
-        await api.releaseLock(editingItemUid);
-      } catch (e) {
-        console.error("releaseLock error", e);
-      }
-    }
-    setEditingItemUid(null);
-    setEditingDraft(null);
-    await refreshItemsIfPending();
   }
 
   async function refreshItemsIfPending() {
@@ -2663,43 +2790,6 @@ export default function App() {
       qtyDiscrepancyAckDiff: Number(diff),
       qtyDiscrepancyAckAt: new Date().toISOString(),
     });
-  }
-
-  function handleRenameBubble(bubbleId, newName) {
-    const trimmed = newName.trim();
-    if (!trimmed) return;
-    const bubble = bubbles.find((b) => b.id === bubbleId);
-    if (!bubble) return;
-    const oldName = bubble.name;
-    if (trimmed === oldName) return;
-    if (DEFAULT_BUBBLE_NAMES.has(trimmed.toUpperCase())) return;
-    const taken = bubbles.some((b) => b.id !== bubbleId && (b.name || '').toUpperCase() === trimmed.toUpperCase());
-    if (taken) { alert(`A bubble named "${trimmed}" already exists.`); return; }
-
-    const renamedItems = items.map((it) =>
-      it.allocated_to === oldName ? { ...it, allocated_to: trimmed, rev: nextRev(it) } : it
-    );
-    lastSavedRef.current = JSON.stringify(renamedItems);
-    setItems(renamedItems);
-    setBubbles((prev) => prev.map((b) => b.id === bubbleId ? { ...b, name: trimmed } : b));
-    api.writeItems(renamedItems).catch((e) => console.error('[rename] writeItems failed', e));
-    setBubblePositions((prev) => {
-      if (!prev[oldName]) return prev;
-      const next = { ...prev, [trimmed]: prev[oldName] };
-      delete next[oldName];
-      return next;
-    });
-    setBubbleSizes((prev) => {
-      if (!prev[oldName]) return prev;
-      const next = { ...prev, [trimmed]: prev[oldName] };
-      delete next[oldName];
-      return next;
-    });
-    if (api?.writeSharedBubbleData) {
-      api.writeSharedBubbleData({ bubbleId, name: trimmed, notes: bubble.notes || '', extraLines: [] })
-        .catch(() => {});
-      api.deleteSharedBubbleData?.(oldName).catch(() => {});
-    }
   }
 
   async function handleBubblifyOrder(refKey) {
@@ -5464,44 +5554,6 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', release);
   }, [myEditingBubbleIds]);
 
-  async function handleRequestBubbleEdit(bubbleId, bubbleName) {
-    try {
-      const res = await api.claimBubbleLock(bubbleId, bubbleName);
-      if (res?.ok && res?.claimed) {
-        setBubbleLocks((prev) => ({
-          ...prev,
-          [bubbleId]: { owner: ownMachineId, bubbleName, lastActive: Date.now(), request: null },
-        }));
-        return;
-      }
-      if (!res?.ok && res?.requested) {
-        // Start 5-second countdown then force-claim
-        const timeoutId = setTimeout(async () => {
-          try {
-            const r = await api.claimBubbleLock(bubbleId, bubbleName, { force: true });
-            if (r?.ok) {
-              setBubbleLocks((prev) => ({
-                ...prev,
-                [bubbleId]: { owner: ownMachineId, bubbleName, lastActive: Date.now(), request: null },
-              }));
-            }
-          } catch {}
-          delete pendingRequestsRef.current[bubbleId];
-          setPendingRequestBubbles((prev) => { const n = new Set(prev); n.delete(bubbleId); return n; });
-        }, 5000);
-        pendingRequestsRef.current[bubbleId] = { startedAt: Date.now(), timeoutId };
-        setPendingRequestBubbles((prev) => new Set([...prev, bubbleId]));
-      }
-    } catch (e) {
-      console.error('[bubble-lock] claim error', e);
-    }
-  }
-
-  async function handleDoneBubbleEdit(bubbleId) {
-    try { await api.releaseBubbleLock(bubbleId); } catch {}
-    _clearBubbleLockLocally(bubbleId);
-  }
-
   // Called when a bubble is destroyed — force-removes the lock regardless of who owns it
   function _releaseBubbleLockOnDelete(bubbleId) {
     api.releaseBubbleLock?.(bubbleId, { force: true }).catch(() => {});
@@ -5516,11 +5568,6 @@ export default function App() {
       delete pending[bubbleId];
       setPendingRequestBubbles((prev) => { const n = new Set(prev); n.delete(bubbleId); return n; });
     }
-  }
-
-  async function handleRespondToBubbleRequest(bubbleId, allow) {
-    try { await api.respondToBubbleRequest(bubbleId, allow); } catch {}
-    // If we denied, we keep ownership; if we allowed, watcher will update our locks
   }
 
   useEffect(() => {
@@ -5635,10 +5682,6 @@ export default function App() {
   const viewBadges = { epicor: epicorNeedsAssignmentCount };
 
   const currentViewMeta = VIEWS.find((v) => v.id === currentView);
-  const isBubbleFlowView =
-    currentView === "stock-flow" ||
-    currentView === "sage-ar-queue" ||
-    currentView === "cash-sale-flow";
 
   return (
     <div className="min-h-screen w-full bg-gradient-to-br from-fuchsia-100 via-sky-100 to-emerald-100">
@@ -5683,11 +5726,10 @@ export default function App() {
             sageWatchError={sageWatchError}
             sageInvoiceError={sageInvoiceError}
           />
-        ) : isBubbleFlowView ? (
+        ) : currentView === "cash-sale-flow" ? (
           <>
-            {currentView === "cash-sale-flow" && (
-              <div className="px-4 pt-3 pb-1">
-                <div className="inline-flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm flex-wrap">
+            <div className="px-4 pt-3 pb-1">
+              <div className="inline-flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm flex-wrap">
                   <span className="text-sm font-medium text-slate-600 whitespace-nowrap">Auto-fill from CashPad</span>
                   <div className="flex items-center gap-1.5">
                     <label className="text-xs text-slate-500 whitespace-nowrap">Markup %</label>
@@ -5709,84 +5751,60 @@ export default function App() {
                   >
                     Fill Payments
                   </button>
+                  {/* Whether Send to Sage types the obfuscated grand-total line
+                      (e.g. 424-207x80028) into the notes block. Lives here
+                      rather than on each sale card because it's a standing
+                      preference for how you enter into Sage, not a per-sale
+                      decision — and it persists across restarts. Off still tabs
+                      past the field, so nothing after it shifts position. */}
+                  <label className="flex items-center gap-1.5 text-xs font-medium text-slate-600 whitespace-nowrap">
+                    <input
+                      type="checkbox"
+                      checked={sageGrandTotalLine}
+                      onChange={(e) => setSageGrandTotalLine(e.target.checked)}
+                    />
+                    Grand total line
+                  </label>
+
+                  {/* The undo, sat next to the action it reverses. Outlined
+                      rather than solid so the forward action stays the obvious
+                      one of the two. */}
+                  <button
+                    onClick={handleReturnAllToCashPad}
+                    className="rounded-xl border border-slate-300 bg-white px-4 py-1.5 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 whitespace-nowrap"
+                    title="Empty every cash sale back into CashPad and remove the per-payment bubbles, so the split can be redone"
+                  >
+                    Send All Back to CashPad
+                  </button>
                   {fillCashPadResult && (
                     <span className="text-sm text-emerald-700 font-medium">{fillCashPadResult}</span>
                   )}
-                </div>
               </div>
-            )}
-          <StockFlowView
-            handleFieldFocus={handleFieldFocus}
-            handleFieldBlur={handleFieldBlur}
-            addBubble={addBubble}
-            showCreateBubble={currentView === "stock-flow" || currentView === "cash-sale-flow"}
-            bubbles={bubblesForView}
-            bubblePositions={bubblePositions}
-            bubbleSizes={bubbleSizes}
-            bubbleZOrder={bubbleZOrder}
-            extraLinesByBubble={printExtraLinesByBubble}
-            activeBubbleKey={activeBubbleKey}
-            workspaceRef={workspaceRef}
-            printBubble={printBubble}
-            itemsByBubble={itemsByBubbleForView}
-            expanded={expanded}
-            toggleExpand={toggleExpand}
-            onDragStartItem={onDragStartItem}
-            onDropOnBubble={onDropOnBubble}
-            onUpdateItem={updateItemByKey}
-            onUpdateBubbleNotes={updateBubbleNotes}
-            onBubbleNotesBlur={handleBubbleNotesBlur}
-            onRequestPrint={handleOpenPrint}
-            onEditItem={handleStartEdit}
-            onSplitItem={handleSplitItem}
-            onConsolidateItems={handleConsolidateBubbleItems}
-            onDeleteBubble={handleDeleteBubble}
-            deleteTargets={currentView === "cash-sale-flow" ? CASH_SALE_DELETE_DESTINATIONS : DELETE_DESTINATIONS}
-            defaultBubbleNames={DEFAULT_BUBBLE_NAMES}
-            onStartBubbleMove={handleStartBubbleMove}
-            onStartBubbleResize={handleStartBubbleResize}
-            onActivateBubble={handleActivateBubble}
-            onMoveBubbleToSage={(bubbleId) =>
-              handleMoveBubbleAccounting(bubbleId, ACCOUNTING_PATHS.SAGE_AR)
-            }
-            onMoveBubbleToCashSales={(bubbleId) =>
-              handleMoveBubbleAccounting(bubbleId, ACCOUNTING_PATHS.CASH_SALE)
-            }
-            archivableBubbleIds={archivableBubbleIds}
-            onArchiveBubble={handleArchiveBubble}
-            onDeleteBubbleItems={currentView === "cash-sale-flow" ? handleDeleteBubbleItems : undefined}
-            onRenameBubble={handleRenameBubble}
-            bubbleLocks={bubbleLocks}
-            myEditingBubbleIds={myEditingBubbleIds}
-            pendingRequestBubbles={pendingRequestBubbles}
-            onRequestBubbleEdit={handleRequestBubbleEdit}
-            onDoneBubbleEdit={handleDoneBubbleEdit}
-            onRespondToBubbleRequest={handleRespondToBubbleRequest}
-            showCashSalesMetrics={currentView === "cash-sale-flow"}
-            payments={payments}
-            paymentsLoading={paymentsLoading}
-            paymentsError={paymentsError}
-            bubblePaymentAssignments={bubblePaymentAssignments}
-            onUpdateBubblePayments={handleUpdateBubblePayments}
-            onDeletePayment={handleDeletePayment}
-            showSageSalesAction={currentView === "sage-ar-queue" || currentView === "cash-sale-flow"}
-            defaultSageCustomerCode={currentView === "cash-sale-flow" ? "CAS202" : ""}
-            onSageSalesInvoice={async (bubbleName, customerCode, notes, paymentType) => {
-              const res = await api.sageSalesInvoice(bubbleName, customerCode, notes || "", paymentType || "");
-              if (!res?.ok) {
-                console.error("[sage-sales] invoice failed", res);
-                alert(res?.error || "Sage Sales Invoice failed. Check the console for details.");
-              }
-            }}
-          />
+            </div>
+            <CashSalesView
+              bubbles={bubblesForView}
+              itemsByBubble={itemsByBubbleForView}
+              bubbleMeta={bubbleMeta}
+              defaultBubbleNames={DEFAULT_BUBBLE_NAMES}
+              extraLinesByBubble={printExtraLinesByBubble}
+              addBubble={addBubble}
+              onUpdateBubbleNotes={updateBubbleNotes}
+              onBubbleNotesBlur={handleBubbleNotesBlur}
+              onRequestPrint={handleOpenPrint}
+              onSetBubbleFlag={handleSetBubbleFlag}
+              onUpdateItem={updateItemByKey}
+              onArchiveSale={handleArchiveCashSale}
+              onSageSalesInvoice={handleSageSalesInvoice}
+              onSetInvoiceNumber={handleSetSaleInvoiceNumber}
+              payments={payments}
+              paymentsLoading={paymentsLoading}
+              paymentsError={paymentsError}
+              bubblePaymentAssignments={bubblePaymentAssignments}
+              onUpdateBubblePayments={handleUpdateBubblePayments}
+              onDeletePayment={handleDeletePayment}
+              cashPadItems={cashPadItems}
+            />
           </>
-        ) : currentView === "manage-stock" ? (
-          <ManageStockView
-            items={items}
-            bubbles={bubbles}
-            onEditItem={handleStartEdit}
-            onUpdateItem={updateItemByKey}
-          />
         ) : currentView === "returns-management" ? (
           <ReturnsManagementView
             unassignedGroups={returnsView.unassignedGroups}
@@ -5801,6 +5819,38 @@ export default function App() {
             onCreditReceived={handleCreditReceived}
             onDeleteSlip={handleDeleteReturnSlip}
             onReturnToNewStock={handleReturnItemToNewStock}
+          />
+        ) : currentView === "order-assignment" ? (
+          <OrderAssignmentView />
+        ) : currentView === "sales-orders" ? (
+          <SalesOrderView
+            bubbles={bubblesForView}
+            itemsByBubble={itemsByBubbleForView}
+            bubbleMeta={bubbleMeta}
+            bubbleAccountingPathByName={bubbleAccountingPathByName}
+            defaultBubbleNames={DEFAULT_BUBBLE_NAMES}
+            extraLinesByBubble={printExtraLinesByBubble}
+            onUpdateBubbleNotes={updateBubbleNotes}
+            onBubbleNotesBlur={handleBubbleNotesBlur}
+            onRequestPrint={handleOpenPrint}
+            onSetBubbleFlag={handleSetBubbleFlag}
+            onUpdateItem={updateItemByKey}
+            // "Send to Cash Pad" folds the order's items into the CashPad
+            // staging bubble (allocated_to: "CashPad") that "Auto-fill from
+            // CashPad" scans — the order's own bubble identity (name, notes)
+            // goes away and its items land in CashPad. This is the ONLY route
+            // from an order into the cash-sale side; Cash Sales itself is now
+            // strictly for managing payments against what's already there.
+            onSendToCashPad={(bubbleId) => handleDeleteBubble(bubbleId, "CashPad")}
+            // "Send to Returns" is the same one-way move, pointed at RETURNS —
+            // the parts become unassigned returns stock that Returns Management
+            // can rake onto a requisition slip, and the order itself is gone.
+            onSendToReturns={(bubbleId) => handleDeleteBubble(bubbleId, "RETURNS")}
+            // "Delivered and Complete" — the accounting is finished, so the sale
+            // takes the same archive route Cash Sales uses (parts filed as sold,
+            // bubble removed), just with its own confirm wording.
+            onArchiveOrder={handleArchiveCashSale}
+            onSageSalesInvoice={handleSageSalesInvoice}
           />
         ) : currentView === "order-management" ? (
           <OrderManagementView
@@ -5993,10 +6043,15 @@ export default function App() {
           />
         ) : currentView === "settings" ? (
           <SettingsView />
+        ) : currentView === "sage-runs" ? (
+          <SageRunsView currentViewMeta={currentViewMeta} />
         ) : currentView === "rules" ? (
           <RulesView currentViewMeta={currentViewMeta} />
         ) : (
-          <PaymentManagementView currentViewMeta={currentViewMeta} />
+          <PaymentManagementView
+            currentViewMeta={currentViewMeta}
+            saleNameByPaymentId={saleNameByPaymentId}
+          />
         )}
       </div>
       {assignInvoiceModal && (
@@ -6174,82 +6229,6 @@ export default function App() {
           </div>
         </div>
       )}
-            {editingDraft && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-xl">
-            <h2 className="text-xl font-semibold text-slate-800 mb-4">
-              Edit Item
-            </h2>
-
-            <div className="space-y-3">
-              <div>
-                <label className="block text-sm text-slate-600 mb-1">
-                  Allocated For
-                </label>
-                <input
-                  className="w-full border rounded-xl px-3 py-2"
-                  value={editingDraft.allocated_for || ""}
-                  onChange={(e) =>
-                    setEditingDraft((d) => ({
-                      ...d,
-                      allocated_for: e.target.value,
-                    }))
-                  }
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm text-slate-600 mb-1">
-                  Allocated To (bubble)
-                </label>
-                <input
-                  className="w-full border rounded-xl px-3 py-2"
-                  value={editingDraft.allocated_to || ""}
-                  onChange={(e) =>
-                    setEditingDraft((d) => ({
-                      ...d,
-                      allocated_to: e.target.value,
-                    }))
-                  }
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm text-slate-600 mb-1">
-                  Notes
-                </label>
-                <textarea
-                  className="w-full border rounded-xl px-3 py-2"
-                  rows={3}
-                  value={editingDraft.notes1 || ""}
-                  onChange={(e) =>
-                    setEditingDraft((d) => ({
-                      ...d,
-                      notes1: e.target.value,
-                    }))
-                  }
-                />
-              </div>
-            </div>
-
-            <div className="mt-6 flex justify-end gap-3">
-              <button
-                onClick={handleCancelEdit}
-                className="px-4 py-2 rounded-xl border text-sm"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveEdit}
-                className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm"
-              >
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {creditMatch && (() => {
         const selectedSlip = waitingCreditSlips.find((s) => s.id === creditMatchSlipId) || null;
         const slipItems = selectedSlip?.items || [];

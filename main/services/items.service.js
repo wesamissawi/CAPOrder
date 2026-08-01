@@ -136,7 +136,13 @@ const createItemsService = (deps) => {
   // Deletions happen only for uids explicitly listed in `deletedUids`
   // (or, legacy, when replaceAll: true is passed — no caller does anymore).
   function writeItems(items, options = {}) {
-    const { replaceAll = false, deletedUids = [], deleteReason = 'deleted' } = options;
+    // historyEvent: { event, extra } — an event the CALLER knows about that the
+    // diff below can't infer. Sending a sale to Sage stamps an invoice number
+    // on each part without moving it between bubbles or queues, so nothing in
+    // the derived events fires; this is how that still reaches the lifecycle
+    // log. When set it replaces the derived event for the incoming items, so a
+    // move that also carries one traces as the caller's event, not two.
+    const { replaceAll = false, deletedUids = [], deleteReason = 'deleted', historyEvent = null } = options;
     // Removal isn't always a delete: archiving a sold bubble ('archived') or a
     // return slip whose credit came back ('credit_received') also remove items
     // from the active queues, but should trace as themselves, not 'deleted'.
@@ -191,7 +197,11 @@ const createItemsService = (deps) => {
       }
       // Trace the item's journey: first appearance, a queue change (Sage /
       // CashPad / back to stock), or a plain bubble move within the same queue.
-      if (!existing) {
+      if (historyEvent && historyEvent.event) {
+        historyEvents.push(
+          mkHistoryRecord(it, historyEvent.event, historyAt, historyEvent.extra || {})
+        );
+      } else if (!existing) {
         historyEvents.push(mkHistoryRecord(it, 'created', historyAt));
       } else {
         const fromPath = normPath(existing.accountingPath);
