@@ -1,6 +1,98 @@
 import React, { useState, useEffect, useRef } from "react";
 import Card from "../components/Card";
+import InvoicePreview from "../components/InvoicePreview";
 import api from "../api";
+
+// Snapshots are stored flattened (itemcode/description/quantity/price) rather
+// than as raw item records, so a stored copy stays readable on its own and
+// can't be confused with a live item. InvoicePreview still reads the live item
+// field names, so map back on the way in — the alternative, storing dead item
+// fields forever just to skip six lines here, ages badly.
+function snapshotItemsForPreview(snapshot) {
+  return (snapshot?.items || []).map((it, idx) => ({
+    uid: it.uid || `snap-${idx}`,
+    itemcode: it.itemcode,
+    notes1: it.description,
+    quantity: it.quantity,
+    allocated_for: it.price,
+  }));
+}
+
+// Replays a printed Sales Order exactly as it went out: the lines, prices,
+// letterhead and tax rate all come from the snapshot, never from today's items
+// or today's defaults. Read-only on purpose — this is a record, not a document
+// you can edit and reprint.
+function PrintedCopyModal({ snapshots, bubbleName, onClose }) {
+  const [index, setIndex] = useState(0);
+  const snapshot = snapshots?.[index] || null;
+  if (!snapshot) return null;
+
+  const doc = snapshot.document || {};
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 overflow-auto">
+      <div className="w-full max-w-4xl rounded-2xl bg-white shadow-2xl">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4">
+          <div>
+            <div className="text-lg font-semibold text-slate-800">
+              Printed copy — Sales Order {snapshot.salesOrderNumber || "—"}
+            </div>
+            <div className="text-xs text-slate-500">
+              {bubbleName ? `${bubbleName} · ` : ""}
+              Printed {formatWhen(snapshot.printedAt) || snapshot.printedAt || "unknown"}
+              {snapshots.length > 1 ? ` · version ${snapshot.version ?? index + 1}` : ""}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {snapshots.length > 1 && (
+              <select
+                className="rounded-lg border border-slate-200 px-2 py-1 text-xs"
+                value={index}
+                onChange={(e) => setIndex(Number(e.target.value))}
+              >
+                {snapshots.map((s, i) => (
+                  <option key={s.id || i} value={i}>
+                    v{s.version ?? i + 1} — {formatWhen(s.printedAt) || s.printedAt}
+                  </option>
+                ))}
+              </select>
+            )}
+            <button
+              onClick={onClose}
+              className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-semibold text-slate-600 hover:bg-slate-50"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+
+        {snapshots.length > 1 && index > 0 && (
+          <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">
+            This order was printed more than once. Earlier versions are still listed above —
+            the customer may be holding any of them.
+          </div>
+        )}
+
+        <div className="p-4">
+          <InvoicePreview
+            bubbleName={snapshot.bubbleName}
+            bubbleNotes={snapshot.notes}
+            items={snapshotItemsForPreview(snapshot)}
+            extraLines={snapshot.extraLines || []}
+            generatedDate={snapshot.printedAt ? new Date(snapshot.printedAt) : new Date()}
+            salesOrderNumber={snapshot.salesOrderNumber}
+            documentTitle={doc.title || undefined}
+            companyName={doc.companyName || undefined}
+            companyAddress={doc.companyAddress || undefined}
+            companyContact={doc.companyContact || undefined}
+            taxLabel={doc.taxLabel || undefined}
+            taxRate={typeof doc.taxRate === "number" ? doc.taxRate : undefined}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function formatDate(raw) {
   if (!raw) return null;
@@ -649,9 +741,17 @@ export default function ArchiveSearchView({
   itemHistory = [],
 }) {
   const [tab, setTab] = useState("purchases");
+  const [printedCopy, setPrintedCopy] = useState(null);
 
   return (
     <div className="space-y-4">
+      {printedCopy && (
+        <PrintedCopyModal
+          snapshots={printedCopy.snapshots}
+          bubbleName={printedCopy.bubbleName}
+          onClose={() => setPrintedCopy(null)}
+        />
+      )}
       <div className="flex gap-2">
         <button
           onClick={() => setTab("purchases")}
@@ -750,11 +850,26 @@ export default function ArchiveSearchView({
                   </div>
                   <div className="text-xs text-slate-500">
                     Archived at: {res.archivedAt || "unknown"}
+                    {res.salesOrderNumber ? ` · Sales Order ${res.salesOrderNumber}` : ""}
                   </div>
                 </div>
-                <span className="text-xs px-3 py-1 rounded-full bg-slate-100 text-slate-600 border">
-                  {res.items?.length ?? 0} matching item(s)
-                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  {(res.prints || []).length > 0 && (
+                    <button
+                      onClick={() =>
+                        setPrintedCopy({ snapshots: res.prints, bubbleName: res.bubbleName })
+                      }
+                      className="rounded-lg border border-indigo-300 bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+                      title="Show this order exactly as it was printed for the customer"
+                    >
+                      View printed copy
+                      {res.prints.length > 1 ? ` (${res.prints.length})` : ""}
+                    </button>
+                  )}
+                  <span className="text-xs px-3 py-1 rounded-full bg-slate-100 text-slate-600 border">
+                    {res.items?.length ?? 0} matching item(s)
+                  </span>
+                </div>
               </div>
               <div className="space-y-2">
                 {(res.items || []).map((it, idx) => (
@@ -780,6 +895,29 @@ export default function ArchiveSearchView({
                       {it.reference_num ? `Ref: ${it.reference_num} · ` : ""}
                       {it.allocated_for ? `Price: ${it.allocated_for}` : ""}
                     </div>
+                    {/* The price the customer's paper actually showed. Called
+                        out separately, and highlighted when it disagrees with
+                        the archived price, because a line repriced after the
+                        print is exactly the case worth noticing. */}
+                    {it.printed_price != null && (
+                      <div
+                        className={`mt-1 inline-flex flex-wrap items-center gap-x-2 rounded-lg border px-2 py-1 text-xs ${
+                          Number(it.allocated_for) !== Number(it.printed_price)
+                            ? "border-amber-300 bg-amber-50 text-amber-800"
+                            : "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        }`}
+                      >
+                        <span className="font-semibold">
+                          Printed at ${Number(it.printed_price).toFixed(2)}
+                        </span>
+                        {it.printed_quantity != null && <span>Qty {it.printed_quantity}</span>}
+                        {it.printed_sales_order && <span>SO {it.printed_sales_order}</span>}
+                        {it.printed_at && <span>{formatWhen(it.printed_at) || it.printed_at}</span>}
+                        {Number(it.allocated_for) !== Number(it.printed_price) && (
+                          <span className="font-semibold">— repriced after printing</span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

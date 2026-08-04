@@ -8,7 +8,7 @@
 // Order Assignment, which is self-contained via its own IPC).
 // Editing a note or hitting Print here calls the SAME App.jsx handlers those
 // views use, so nothing here is a separate source of truth.
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import Card from "../components/Card";
 import DraftInput from "../components/DraftInput";
 import api from "../api";
@@ -16,6 +16,7 @@ import { computeBubblePrintSignature } from "../utils/inventory";
 import {
   CardTotals,
   CashPadPanel,
+  EMPTY_ARRAY,
   ItemRow,
   MOVE_TARGETS,
   computeCardTotals,
@@ -26,6 +27,32 @@ import {
 // Holding areas rather than customer orders. CASHPAD has its own docked panel
 // and RETURNS has its own view, so only these two need a home here.
 const POOL_NAMES = ["NEW STOCK", "SHELF"];
+
+// Stand-ins for a pool that has no bubble of its own yet. Built once so the
+// pool card keeps the same `bubble` object across renders.
+const POOL_FALLBACK_BUBBLES = Object.fromEntries(
+  POOL_NAMES.map((name) => [name, { id: `pool-${name}`, name, notes: "" }])
+);
+
+// Shared fallbacks and fixed option lists. These are the props every card and
+// row receives, so they have to be stable identities — a `{}` or `[...]` built
+// inside render is a new object each time, which alone would make the
+// React.memo on OrderCard/ItemRow never bail out.
+const EMPTY_META = {};
+const ORDER_MOVE_TARGETS = ["NEW STOCK", "CASHPAD", "RETURNS"];
+const POOL_MOVE_TARGETS = ["CASHPAD", "RETURNS"];
+
+// What each destination actually means for the part, spelled out in the
+// confirm — "Remove" used to mean New Stock silently, and the whole point of
+// the picker is that where it lands is now a decision.
+const MOVE_BLURB = {
+  "NEW STOCK":
+    "It goes back to New Stock as unallocated stock, and is no longer assigned to this order — Order Assignment will show it as unassigned again.",
+  RETURNS:
+    "It moves into RETURNS as unassigned returns stock — Returns Management can put it on a requisition slip — and it is no longer assigned to this order.",
+  CASHPAD:
+    'It moves into CashPad on the cash-sale path, where "Auto-fill from CashPad" can match it to a payment.',
+};
 
 const ACCOUNTING_META = {
   OUTSTANDING: { label: "Stock Flow", cls: "bg-indigo-50 text-indigo-700 border-indigo-200" },
@@ -101,6 +128,41 @@ function ageLabel(ageMs) {
   return hours < 1 ? "Just now" : `${hours}h old`;
 }
 
+// The Sage customer code is typed one character at a time into state, so it
+// lives in its own component: keeping it on OrderCard meant every character
+// re-rendered the card's notes box and its whole part list.
+function SageSendRow({ bubbleName, bubbleNotes, itemCount, onSageSalesInvoice }) {
+  const [sageCode, setSageCode] = useState("");
+  const [sageSending, setSageSending] = useState(false);
+
+  return (
+    <>
+      {/* Same rule BubbleColumn's own Sage-sales button uses: nothing sends
+          until a customer code is actually typed in. */}
+      <input
+        value={sageCode}
+        onChange={(e) => setSageCode(e.target.value)}
+        placeholder="Sage customer code"
+        className="w-36 rounded-lg border border-slate-200 px-2 py-1 text-xs"
+      />
+      <button
+        disabled={!sageCode.trim() || sageSending || itemCount === 0}
+        onClick={async () => {
+          setSageSending(true);
+          try {
+            await onSageSalesInvoice(bubbleName, sageCode.trim(), bubbleNotes || "", "");
+          } finally {
+            setSageSending(false);
+          }
+        }}
+        className="rounded-lg border border-violet-300 bg-white px-2.5 py-1 text-xs font-semibold text-violet-700 hover:bg-violet-50 disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        {sageSending ? "Sending…" : "Send to Sage"}
+      </button>
+    </>
+  );
+}
+
 function OrderCard({
   bubble,
   items,
@@ -126,14 +188,19 @@ function OrderCard({
   ageMs = null,
   isPool = false,
 }) {
-  const [sageCode, setSageCode] = useState("");
-  const [sageSending, setSageSending] = useState(false);
   // The CashPad / Sage controls are the rarely-used half of the card — they
   // stay folded away so the row you see by default is just the three decisions
   // an order normally ends in.
   const [actionsOpen, setActionsOpen] = useState(false);
   const acct = ACCOUNTING_META[accountingPath] || ACCOUNTING_META.OUTSTANDING;
   const { subtotal, tax, total } = computeCardTotals(items, extraLines);
+  // One function object shared by every row in this card, so the memoized rows
+  // only re-render when their own item changes.
+  const handleRowMove = useCallback(
+    (item, target) => onMoveItem(item, bubble.name, target),
+    [onMoveItem, bubble.name]
+  );
+  const handleToggle = useCallback(() => onToggle(bubble.id), [onToggle, bubble.id]);
 
   const currentSignature = computeBubblePrintSignature(bubble.notes, items, extraLines);
   const printedSignature = meta?.printedSignature || "";
@@ -152,7 +219,7 @@ function OrderCard({
 
   return (
     <Card className={`relative hover:z-20 h-full flex flex-col ${band?.cardCls || ""}`}>
-      <button onClick={onToggle} className="w-full flex items-start justify-between gap-2 text-left">
+      <button onClick={handleToggle} className="w-full flex items-start justify-between gap-2 text-left">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 min-w-0">
             <span className="text-slate-400 text-xs">{expanded ? "▾" : "▸"}</span>
@@ -257,28 +324,12 @@ function OrderCard({
 
             <span className="flex-1" />
 
-            {/* Same rule BubbleColumn's own Sage-sales button uses: nothing sends
-                until a customer code is actually typed in. */}
-            <input
-              value={sageCode}
-              onChange={(e) => setSageCode(e.target.value)}
-              placeholder="Sage customer code"
-              className="w-36 rounded-lg border border-slate-200 px-2 py-1 text-xs"
+            <SageSendRow
+              bubbleName={bubble.name}
+              bubbleNotes={bubble.notes}
+              itemCount={items.length}
+              onSageSalesInvoice={onSageSalesInvoice}
             />
-            <button
-              disabled={!sageCode.trim() || sageSending || items.length === 0}
-              onClick={async () => {
-                setSageSending(true);
-                try {
-                  await onSageSalesInvoice(bubble.name, sageCode.trim(), bubble.notes || "", "");
-                } finally {
-                  setSageSending(false);
-                }
-              }}
-              className="rounded-lg border border-violet-300 bg-white px-2.5 py-1 text-xs font-semibold text-violet-700 hover:bg-violet-50 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {sageSending ? "Sending…" : "Send to Sage"}
-            </button>
 
             {/* The two ways an order actually ends. Separated from the routing
                 controls above because both delete the order outright. */}
@@ -352,17 +403,15 @@ function OrderCard({
                   arrivalMap[String(it.order_key || "").toUpperCase()] ??
                     arrivalMap[String(it.reference_num || "").toUpperCase()]
                 )}
-                history={historyByUid.get(it.uid) || []}
-                onSavePrice={(next) => onSavePrice(it.uid, next)}
+                history={historyByUid.get(it.uid) || EMPTY_ARRAY}
+                onSavePrice={onSavePrice}
                 // A part leaving an order goes back on the shelf, onto a cash
                 // sale, or back to the warehouse. A part sitting in a pool has
                 // already left the order — from there the useful moves are onto
                 // a sale or out as a return.
                 moveLabel={isPool ? "Move" : "Remove"}
-                moveTargets={
-                  isPool ? ["CASHPAD", "RETURNS"] : ["NEW STOCK", "CASHPAD", "RETURNS"]
-                }
-                onMove={(target) => onMoveItem(it, bubble.name, target)}
+                moveTargets={isPool ? POOL_MOVE_TARGETS : ORDER_MOVE_TARGETS}
+                onMove={handleRowMove}
               />
             ))}
           </div>
@@ -376,6 +425,12 @@ function OrderCard({
     </Card>
   );
 }
+
+// Every prop this card takes is either a primitive, a value straight out of
+// state, or one of the stable callbacks/constants above — so a keystroke that
+// only re-orders or re-filters the grid leaves untouched cards alone instead of
+// re-running their totals, print signature and every row inside them.
+const MemoOrderCard = React.memo(OrderCard);
 
 export default function SalesOrderView({
   bubbles,
@@ -403,6 +458,11 @@ export default function SalesOrderView({
   // looking for a part, not the day's work.
   const [poolsOpen, setPoolsOpen] = useState(false);
   const [search, setSearch] = useState("");
+  // The input stays on `search` so it never drops a character, while the grid
+  // rebuilds off `deferredSearch` at a lower priority. Without this, every
+  // keystroke re-derived, re-banded and re-sorted the whole order list before
+  // the character could paint.
+  const deferredSearch = useDeferredValue(search);
   const [arrivalMap, setArrivalMap] = useState({});
   const [arrivalLoading, setArrivalLoading] = useState(false);
   const [error, setError] = useState("");
@@ -421,7 +481,37 @@ export default function SalesOrderView({
     return () => clearInterval(t);
   }, []);
 
-  const loadArrivalMap = async () => {
+  // App.jsx hands several of these callbacks down as inline arrows, so their
+  // identity changes on every App render. Reading them through a ref lets the
+  // wrappers below stay stable for the life of the view, which is what the
+  // memoized cards compare against — without it a background items push would
+  // re-render every card even though nothing about them changed.
+  const handlersRef = useRef(null);
+  handlersRef.current = {
+    onUpdateBubbleNotes,
+    onBubbleNotesBlur,
+    onRequestPrint,
+    onSetBubbleFlag,
+    onUpdateItem,
+    onSendToCashPad,
+    onSendToReturns,
+    onArchiveOrder,
+    onSageSalesInvoice,
+  };
+  const stableUpdateBubbleNotes = useCallback((id, notes) => handlersRef.current.onUpdateBubbleNotes(id, notes), []);
+  const stableNotesCommit = useCallback((id, notes) => handlersRef.current.onBubbleNotesBlur(id, notes), []);
+  const stableRequestPrint = useCallback((bubble) => handlersRef.current.onRequestPrint(bubble), []);
+  const stableSetFlag = useCallback((id, flag, value) => handlersRef.current.onSetBubbleFlag(id, flag, value), []);
+  const stableSendToCashPad = useCallback((id) => handlersRef.current.onSendToCashPad(id), []);
+  const stableSendToReturns = useCallback((id) => handlersRef.current.onSendToReturns(id), []);
+  const stableArchiveOrder = useCallback((id, message) => handlersRef.current.onArchiveOrder(id, message), []);
+  const stableSageSalesInvoice = useCallback(
+    (name, code, notes, paymentType) =>
+      handlersRef.current.onSageSalesInvoice(name, code, notes, paymentType),
+    []
+  );
+
+  const loadArrivalMap = useCallback(async () => {
     setArrivalLoading(true);
     try {
       const res = await api.getOrderArrivalMap();
@@ -429,14 +519,14 @@ export default function SalesOrderView({
     } finally {
       setArrivalLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadArrivalMap();
-  }, []);
+  }, [loadArrivalMap]);
 
   const orders = useMemo(() => {
-    const needle = search.trim().toLowerCase();
+    const needle = deferredSearch.trim().toLowerCase();
     return bubbles
       .filter((b) => !defaultBubbleNames.has(b.name))
       // CashPad is a staging pool "Send to Cash Pad" folds orders INTO — same
@@ -446,10 +536,10 @@ export default function SalesOrderView({
       .filter((b) => !needle || b.name.toLowerCase().includes(needle))
       .map((b) => ({
         bubble: b,
-        items: itemsByBubble.get(b.name) || [],
+        items: itemsByBubble.get(b.name) || EMPTY_ARRAY,
         accountingPath: bubbleAccountingPathByName.get(b.name) || bubbleMeta[b.id]?.accountingPath || "OUTSTANDING",
-        meta: bubbleMeta[b.id] || bubbleMeta[b.name] || {},
-        extraLines: extraLinesByBubble?.[b.id] || [],
+        meta: bubbleMeta[b.id] || bubbleMeta[b.name] || EMPTY_META,
+        extraLines: extraLinesByBubble?.[b.id] || EMPTY_ARRAY,
       }))
       // Cash sales are already sold and paid for — Auto-fill from CashPad mints
       // one bubble per payment ("INTERAC $40.00"), which is a receipt, not an
@@ -472,7 +562,7 @@ export default function SalesOrderView({
       // next band sits at the top of its section. Unknown ages (no createdAt, no
       // parts) sort last within Regular rather than jumping the queue.
       .sort((a, b) => (b.ageMs ?? -1) - (a.ageMs ?? -1));
-  }, [bubbles, itemsByBubble, bubbleAccountingPathByName, bubbleMeta, defaultBubbleNames, extraLinesByBubble, search, nowMs]);
+  }, [bubbles, itemsByBubble, bubbleAccountingPathByName, bubbleMeta, defaultBubbleNames, extraLinesByBubble, deferredSearch, nowMs]);
 
   // Urgent → Regular → Stale, empty bands dropped so the page isn't mostly
   // headers on a quiet day.
@@ -489,56 +579,44 @@ export default function SalesOrderView({
   // here so New Stock and the Shelf are still browsable. RETURNS is left out on
   // purpose: Returns Management owns it and does far more than a list.
   const pools = useMemo(() => {
-    const needle = search.trim().toLowerCase();
+    const needle = deferredSearch.trim().toLowerCase();
     return POOL_NAMES.map((poolName) => {
       const bubble =
-        bubbles.find((b) => (b.name || "").trim().toUpperCase() === poolName) || {
-          id: `pool-${poolName}`,
-          name: poolName,
-          notes: "",
-        };
+        bubbles.find((b) => (b.name || "").trim().toUpperCase() === poolName) ||
+        POOL_FALLBACK_BUBBLES[poolName];
       return {
         bubble,
-        items: itemsByBubble.get(bubble.name) || [],
-        meta: bubbleMeta[bubble.id] || bubbleMeta[bubble.name] || {},
-        extraLines: extraLinesByBubble?.[bubble.id] || [],
+        items: itemsByBubble.get(bubble.name) || EMPTY_ARRAY,
+        meta: bubbleMeta[bubble.id] || bubbleMeta[bubble.name] || EMPTY_META,
+        extraLines: extraLinesByBubble?.[bubble.id] || EMPTY_ARRAY,
       };
     }).filter((p) => !needle || p.bubble.name.toLowerCase().includes(needle));
-  }, [bubbles, itemsByBubble, bubbleMeta, extraLinesByBubble, search]);
+  }, [bubbles, itemsByBubble, bubbleMeta, extraLinesByBubble, deferredSearch]);
 
   // CashPad is keyed by its exact bubble name — auto-created uppercase the
   // moment any item's allocated_to becomes "CASHPAD" (Send to Cash Pad, or the
   // existing delete-bubble-to-CashPad flow), same string `Auto-fill from
   // CashPad` already scans for.
-  const cashPadItems = itemsByBubble.get("CASHPAD") || [];
+  const cashPadItems = itemsByBubble.get("CASHPAD") || EMPTY_ARRAY;
 
-  const toggleOrder = (id) =>
+  const toggleOrder = useCallback((id) =>
     setCollapsedOrderIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
-    });
+    }), []);
+
+  const toggleCashPad = useCallback(() => setCashPadCollapsed((v) => !v), []);
 
   // Local-state update — same path BubbleColumn's own price field uses
   // (onUpdateItem = App.jsx's updateItemByKey), so it persists through the
   // app's normal debounced items save rather than a separate write.
-  const handleSavePrice = (uid, value) => {
-    onUpdateItem(uid, { allocated_for: value });
-  };
+  const handleSavePrice = useCallback((uid, value) => {
+    handlersRef.current.onUpdateItem(uid, { allocated_for: value });
+  }, []);
 
-  // What each destination actually means for the part, spelled out in the
-  // confirm — "Remove" used to mean New Stock silently, and the whole point of
-  // the picker is that where it lands is now a decision.
-  const MOVE_BLURB = {
-    "NEW STOCK": "It goes back to New Stock as unallocated stock, and is no longer assigned to this order — Order Assignment will show it as unassigned again.",
-    RETURNS:
-      "It moves into RETURNS as unassigned returns stock — Returns Management can put it on a requisition slip — and it is no longer assigned to this order.",
-    CASHPAD:
-      'It moves into CashPad on the cash-sale path, where "Auto-fill from CashPad" can match it to a payment.',
-  };
-
-  const handleMoveItem = async (item, fromName, destination) => {
+  const handleMoveItem = useCallback(async (item, fromName, destination) => {
     const label = MOVE_TARGETS[destination]?.label || destination;
     const ok = await api.confirm(
       `Send ${item.itemcode} from ${fromName} to ${label}?`,
@@ -557,7 +635,7 @@ export default function SalesOrderView({
         return next;
       });
     }
-  };
+  }, []);
 
   return (
     <div className="flex items-start gap-4 pb-24">
@@ -617,7 +695,7 @@ export default function SalesOrderView({
             </div>
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
               {rows.map(({ bubble, items, accountingPath, meta, extraLines, ageMs }) => (
-                <OrderCard
+                <MemoOrderCard
                   key={bubble.id}
                   bubble={bubble}
                   items={items}
@@ -629,18 +707,18 @@ export default function SalesOrderView({
                   band={band}
                   ageMs={ageMs}
                   expanded={!collapsedOrderIds.has(bubble.id)}
-                  onToggle={() => toggleOrder(bubble.id)}
-                  onUpdateBubbleNotes={onUpdateBubbleNotes}
-                  onNotesCommit={onBubbleNotesBlur}
-                  onRequestPrint={onRequestPrint}
-                  onSetFlag={onSetBubbleFlag}
+                  onToggle={toggleOrder}
+                  onUpdateBubbleNotes={stableUpdateBubbleNotes}
+                  onNotesCommit={stableNotesCommit}
+                  onRequestPrint={stableRequestPrint}
+                  onSetFlag={stableSetFlag}
                   onSavePrice={handleSavePrice}
                   onMoveItem={handleMoveItem}
                   removingUids={removingUids}
-                  onSendToCashPad={onSendToCashPad}
-                  onSendToReturns={onSendToReturns}
-                  onArchiveOrder={onArchiveOrder}
-                  onSageSalesInvoice={onSageSalesInvoice}
+                  onSendToCashPad={stableSendToCashPad}
+                  onSendToReturns={stableSendToReturns}
+                  onArchiveOrder={stableArchiveOrder}
+                  onSageSalesInvoice={stableSageSalesInvoice}
                 />
               ))}
             </div>
@@ -663,7 +741,7 @@ export default function SalesOrderView({
         {poolsOpen && (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
             {pools.map(({ bubble, items, meta, extraLines }) => (
-              <OrderCard
+              <MemoOrderCard
                 key={bubble.id}
                 isPool
                 bubble={bubble}
@@ -674,11 +752,11 @@ export default function SalesOrderView({
                 arrivalMap={arrivalMap}
                 historyByUid={historyByUid}
                 expanded={!collapsedOrderIds.has(bubble.id)}
-                onToggle={() => toggleOrder(bubble.id)}
-                onUpdateBubbleNotes={onUpdateBubbleNotes}
-                onNotesCommit={onBubbleNotesBlur}
-                onRequestPrint={onRequestPrint}
-                onSetFlag={onSetBubbleFlag}
+                onToggle={toggleOrder}
+                onUpdateBubbleNotes={stableUpdateBubbleNotes}
+                onNotesCommit={stableNotesCommit}
+                onRequestPrint={stableRequestPrint}
+                onSetFlag={stableSetFlag}
                 onSavePrice={handleSavePrice}
                 onMoveItem={handleMoveItem}
                 removingUids={removingUids}
@@ -696,7 +774,7 @@ export default function SalesOrderView({
         onSavePrice={handleSavePrice}
         onMoveItem={handleMoveItem}
         collapsed={cashPadCollapsed}
-        onToggleCollapse={() => setCashPadCollapsed((v) => !v)}
+        onToggleCollapse={toggleCashPad}
       />
     </div>
   );

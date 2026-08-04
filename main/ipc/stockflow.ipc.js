@@ -4,6 +4,7 @@ const registerStockFlowIpc = (ipcMain, deps) => {
     getSharedBubbleDataPath,
     writeSharedBubbleData,
     deleteSharedBubbleData,
+    nextSalesOrderNumber,
     readArchivedEntries,
     writeArchivedEntries,
     getArchiveFile,
@@ -16,6 +17,9 @@ const registerStockFlowIpc = (ipcMain, deps) => {
     readOrders,
     readOrdersArchive,
     readOrderAssignments,
+    appendPrintSnapshot,
+    findPrintSnapshots,
+    getPrintsFile,
   } = deps;
 
   ipcMain.handle('bubble-shared:read', () => {
@@ -46,11 +50,55 @@ const registerStockFlowIpc = (ipcMain, deps) => {
     }
   });
 
+  // Draws the next Sales Order number off the shared counter. Called only when
+  // a preview is actually printed, so cancelling a preview leaves no gap in the
+  // sequence.
+  ipcMain.handle('sales-order:next', () => {
+    try {
+      return nextSalesOrderNumber();
+    } catch (e) {
+      console.error('[sales-order:next]', e);
+      return { ok: false, error: e?.message || 'Failed to assign a sales order number.' };
+    }
+  });
+
+  // Records one printed copy of a Sales Order. Called on every print, including
+  // reprints — each append is a new version, never an overwrite.
+  ipcMain.handle('sales-order-prints:append', (_evt, payload) => {
+    try {
+      return appendPrintSnapshot(payload || {});
+    } catch (e) {
+      console.error('[sales-order-prints:append]', e);
+      return { ok: false, error: e?.message || 'Failed to record the printed sales order.' };
+    }
+  });
+
+  ipcMain.handle('sales-order-prints:find', (_evt, query) => {
+    try {
+      return { ok: true, snapshots: findPrintSnapshots(query || {}), path: getPrintsFile() };
+    } catch (e) {
+      console.error('[sales-order-prints:find]', e);
+      return { ok: false, error: e?.message || 'Failed to read printed sales orders.' };
+    }
+  });
+
   ipcMain.handle('archive:save-bubble', (_evt, payload) => {
     try {
       const { bubble, meta, items } = payload || {};
       if (!bubble || !bubble.id) return { ok: false, error: 'Missing bubble info' };
       const archivedAt = new Date().toISOString();
+      // Copy the printed versions INTO the archive entry so an archived order
+      // is self-contained and stays readable even if the JSONL is ever moved,
+      // rotated, or lost. Best-effort: never block an archive over it.
+      let prints = [];
+      try {
+        prints = findPrintSnapshots({ bubbleId: bubble.id });
+        if (!prints.length && bubble.name) {
+          prints = findPrintSnapshots({ bubbleName: bubble.name });
+        }
+      } catch (e) {
+        console.warn('[archive:save-bubble] print snapshot lookup failed', e?.message || e);
+      }
       const entry = {
         id: bubble.id,
         bubble: { ...bubble },
@@ -58,6 +106,7 @@ const registerStockFlowIpc = (ipcMain, deps) => {
         accountingPath: 'ARCHIVED',
         archivedAt,
         items: Array.isArray(items) ? items : [],
+        prints,
       };
       const existing = readArchivedEntries();
       existing.push(entry);

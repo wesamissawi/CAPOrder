@@ -1,7 +1,7 @@
 ﻿// src/App.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import api from "./api";
-import InvoicePreview from "./components/InvoicePreview";
+import InvoicePreview, { INVOICE_DOCUMENT_DEFAULTS } from "./components/InvoicePreview";
 import AssignInvoiceModal from "./components/AssignInvoiceModal";
 import QtyConfirmModal from "./components/QtyConfirmModal";
 import DashboardView from "./views/DashboardView";
@@ -263,50 +263,73 @@ const ACCOUNTING_PATHS = {
 
 
 
-const VIEWS = [
-  { id: "dashboard", label: "Dashboard" },
-  { id: "cash-sale-flow", label: "Cash Sales" },
-  { id: "returns-management", label: "Returns Management" },
-  { id: "order-management", label: "Order Management" },
-  { id: "order-assignment", label: "Order Assignment" },
-  { id: "sales-orders", label: "Sales Orders" },
-  { id: "epicor", label: "Epicor" },
-  { id: "archive-search", label: "Archive" },
-  { id: "settings", label: "Settings" },
-  { id: "payment-management", label: "Payments" },
-  { id: "sage-runs", label: "Sage Runs" },
-  { id: "rules", label: "Rules" },
+// Tabs are grouped by workflow, and the groups render as clusters separated by
+// a divider so related views stay visually adjacent instead of reflowing into
+// one another. Order within each group is deliberate; the trailing group is the
+// catch-all for everything that isn't part of a specific flow.
+const VIEW_GROUPS = [
+  [
+    { id: "order-management", label: "Order Management" },
+    { id: "order-assignment", label: "Order Assignment" },
+    { id: "sales-orders", label: "Sales Orders" },
+  ],
+  [
+    { id: "cash-sale-flow", label: "Cash Sales" },
+    { id: "payment-management", label: "Payments" },
+    { id: "sage-runs", label: "Sage Runs" },
+  ],
+  [
+    { id: "epicor", label: "Epicor" },
+    { id: "returns-management", label: "Returns Management" },
+  ],
+  [
+    { id: "dashboard", label: "Dashboard" },
+    { id: "archive-search", label: "Archive" },
+    { id: "settings", label: "Settings" },
+    { id: "rules", label: "Rules" },
+  ],
 ];
+
+const VIEWS = VIEW_GROUPS.flat();
 
 function ViewTabs({ currentView, onSelect, badges }) {
   return (
     <div className="w-full">
-      <div className="flex flex-wrap gap-2 justify-start items-stretch">
-        {VIEWS.map((view) => {
-          const badgeCount = badges?.[view.id] || 0;
-          const hasBadge = badgeCount > 0;
-          const isActive = currentView === view.id;
-          return (
-            <button
-              key={view.id}
-              onClick={() => onSelect(view.id)}
-              className={`relative h-11 min-w-[150px] px-4 rounded-full border text-sm font-semibold whitespace-nowrap transition ${
-                isActive
-                  ? "bg-indigo-600 text-white border-indigo-600 shadow"
-                  : hasBadge
-                  ? "bg-red-50 border-red-300 text-red-700 hover:bg-red-100"
-                  : "bg-white border-slate-200 text-slate-600 hover:text-indigo-600"
-              }`}
-            >
-              {view.label}
-              {hasBadge && (
-                <span className="absolute -top-1.5 -right-1.5 min-w-[20px] h-5 px-1 rounded-full bg-red-600 text-white text-[11px] font-bold flex items-center justify-center shadow">
-                  {badgeCount}
-                </span>
-              )}
-            </button>
-          );
-        })}
+      <div className="flex flex-wrap gap-x-3 gap-y-2 justify-start items-stretch">
+        {VIEW_GROUPS.map((group, groupIndex) => (
+          <React.Fragment key={groupIndex}>
+            {groupIndex > 0 && (
+              <div className="self-center h-7 w-px bg-slate-300/70" aria-hidden="true" />
+            )}
+            <div className="flex flex-wrap gap-2 justify-start items-stretch">
+              {group.map((view) => {
+                const badgeCount = badges?.[view.id] || 0;
+                const hasBadge = badgeCount > 0;
+                const isActive = currentView === view.id;
+                return (
+                  <button
+                    key={view.id}
+                    onClick={() => onSelect(view.id)}
+                    className={`relative h-11 min-w-[150px] px-4 rounded-full border text-sm font-semibold whitespace-nowrap transition ${
+                      isActive
+                        ? "bg-indigo-600 text-white border-indigo-600 shadow"
+                        : hasBadge
+                        ? "bg-red-50 border-red-300 text-red-700 hover:bg-red-100"
+                        : "bg-white border-slate-200 text-slate-600 hover:text-indigo-600"
+                    }`}
+                  >
+                    {view.label}
+                    {hasBadge && (
+                      <span className="absolute -top-1.5 -right-1.5 min-w-[20px] h-5 px-1 rounded-full bg-red-600 text-white text-[11px] font-bold flex items-center justify-center shadow">
+                        {badgeCount}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </React.Fragment>
+        ))}
       </div>
     </div>
   );
@@ -328,6 +351,17 @@ export default function App() {
   const [timeFilterHours, setTimeFilterHours] = useState(0);
   const [timeFilterDays, setTimeFilterDays] = useState(0);
   const [orders, setOrders] = useState([]);
+  // Always-current mirror of `orders`, kept because the vendor invoice fetches
+  // are long-running async handlers: by the time one comes back, the `orders`
+  // captured in its closure can be stale (the file watcher may have pushed a
+  // refresh mid-fetch), and reading state inside a setOrders updater is no help
+  // either — React may run that updater later, during render, which is exactly
+  // how the auto-save after a fetch used to be skipped. Building the patched
+  // list from this ref makes the save deterministic.
+  const ordersRef = useRef([]);
+  useEffect(() => {
+    ordersRef.current = orders;
+  }, [orders]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState(null);
   const [ordersInitialized, setOrdersInitialized] = useState(false);
@@ -768,7 +802,7 @@ export default function App() {
     // same pattern as paymentIds above: only sent when this call is actually
     // the one changing them, otherwise carried forward from what's cached
     // locally so an unrelated save (e.g. a notes edit) doesn't blank them out.
-    ["createdAt", "delivered", "paid", "printedSignature", "printedAt", "sageInvoiceNumber", "sageSentAt", "sageRunId"].forEach((key) => {
+    ["createdAt", "delivered", "paid", "printedSignature", "printedAt", "salesOrderNumber", "sageInvoiceNumber", "sageSentAt", "sageRunId"].forEach((key) => {
       const has = Object.prototype.hasOwnProperty.call(overrides, key);
       const val = has ? overrides[key] : meta[key];
       if (val !== undefined) payload[key] = val;
@@ -865,6 +899,7 @@ export default function App() {
           if (typeof entry.paid === "boolean") som.paid = entry.paid;
           if (typeof entry.printedSignature === "string") som.printedSignature = entry.printedSignature;
           if (typeof entry.printedAt === "string") som.printedAt = entry.printedAt;
+          if (typeof entry.salesOrderNumber === "string") som.salesOrderNumber = entry.salesOrderNumber;
           if (typeof entry.sageInvoiceNumber === "string") som.sageInvoiceNumber = entry.sageInvoiceNumber;
           if (typeof entry.sageSentAt === "string") som.sageSentAt = entry.sageSentAt;
           if (typeof entry.sageRunId === "string") som.sageRunId = entry.sageRunId;
@@ -1344,6 +1379,13 @@ export default function App() {
     () => bubbles.find((b) => b.id === printBubbleId) || null,
     [printBubbleId, bubbles]
   );
+  // Blank until this bubble has actually been printed once — the number is
+  // drawn from the shared counter at print time, not at preview time.
+  const printSalesOrderNumber = useMemo(() => {
+    if (!printBubble) return "";
+    const meta = bubbleMeta[printBubble.id] || bubbleMeta[printBubble.name] || {};
+    return meta.salesOrderNumber || "";
+  }, [printBubble, bubbleMeta]);
   const printItems = useMemo(() => {
     if (!printBubble) return [];
     return filteredItems.filter((it) => it.allocated_to === printBubble.name);
@@ -2449,9 +2491,29 @@ export default function App() {
     setPrintGeneratedAt(null);
   }
 
-  function handleConfirmPrint() {
+  async function handleConfirmPrint() {
     if (!printBubble || (printItems.length === 0 && printExtraLines.length === 0))
       return;
+    // The Sales Order number comes off a shared counter and is drawn here, not
+    // when the preview opens, so previewing and cancelling never burns a
+    // number. Once a bubble has one it keeps it — a reprint has to carry the
+    // same number as the copy already in the customer's hands.
+    let salesOrderNumber = printSalesOrderNumber;
+    if (!salesOrderNumber) {
+      try {
+        const res = await api?.nextSalesOrderNumber?.();
+        if (!res?.ok || !res.label) throw new Error(res?.error || "No number returned.");
+        salesOrderNumber = res.label;
+      } catch (e) {
+        console.error("[print] sales order number failed", e);
+        alert(
+          `Couldn't assign a Sales Order number, so nothing was printed.\n\n${
+            e?.message || e
+          }`
+        );
+        return;
+      }
+    }
     const todayStr = new Date().toLocaleDateString("en-CA");
     if (printItems.length) {
       const ids = new Set(printItems.map((it) => it.uid));
@@ -2469,7 +2531,7 @@ export default function App() {
     {
       const nameKey = printBubble.name;
       const meta = bubbleMeta[printBubble.id] || bubbleMeta[nameKey] || {};
-      const nextMeta = { ...meta, printedSignature, printedAt };
+      const nextMeta = { ...meta, printedSignature, printedAt, salesOrderNumber };
       const nextBubbleMeta = {
         ...bubbleMeta,
         ...(nameKey ? { [nameKey]: nextMeta } : {}),
@@ -2482,7 +2544,38 @@ export default function App() {
       extraLines: printedExtraLines,
       printedSignature,
       printedAt,
+      salesOrderNumber,
     });
+    // Freeze what this print actually said. `printedSignature` above only
+    // detects that the order changed afterwards; this is the copy that can be
+    // read back line by line when a customer questions a price months later.
+    // Awaited so a reprint gets the right version number, but never fatal — the
+    // paper is already going out, so a failed record is a warning, not an abort.
+    try {
+      const res = await api?.appendPrintSnapshot?.({
+        salesOrderNumber,
+        printedAt,
+        printedSignature,
+        bubbleId: printBubble.id,
+        bubbleName: printBubble.name,
+        notes: printBubble.notes || "",
+        items: printItems,
+        extraLines: printedExtraLines,
+        document: {
+          title: INVOICE_DOCUMENT_DEFAULTS.documentTitle,
+          companyName: INVOICE_DOCUMENT_DEFAULTS.companyName,
+          companyAddress: INVOICE_DOCUMENT_DEFAULTS.companyAddress,
+          companyContact: INVOICE_DOCUMENT_DEFAULTS.companyContact,
+          taxLabel: INVOICE_DOCUMENT_DEFAULTS.taxLabel,
+          taxRate: INVOICE_DOCUMENT_DEFAULTS.taxRate,
+        },
+      });
+      if (res?.ok === false) {
+        console.warn("[print] snapshot not recorded", res.error);
+      }
+    } catch (e) {
+      console.warn("[print] snapshot not recorded", e?.message || e);
+    }
     setTimeout(() => {
       if (!printPreviewRef.current) return;
       const contents = printPreviewRef.current.innerHTML;
@@ -2492,7 +2585,7 @@ export default function App() {
         <!doctype html>
         <html>
           <head>
-            <title>Invoice - ${printBubble.name}</title>
+            <title>Sales Order ${salesOrderNumber} - ${printBubble.name}</title>
             <style>
               body {
                 margin: 0;
@@ -2500,11 +2593,28 @@ export default function App() {
                 background: #e2e8f0;
                 font-family: 'Inter', 'Segoe UI', sans-serif;
               }
+              @page { size: letter; margin: 0.5in; }
               @media print {
                 body {
                   padding: 0;
                   background: white;
                 }
+                /* The sheet is sized for the screen preview (8.5x11 with its
+                   own margin baked in as padding). On paper the printer's own
+                   0.5in margin supplies that, so drop the padding and shrink to
+                   the printable area — otherwise the sheet overflows onto a
+                   second, near-empty page. */
+                .invoice-sheet {
+                  width: auto !important;
+                  min-height: 0 !important;
+                  height: 9.9in !important;
+                  padding: 0 !important;
+                  border-radius: 0 !important;
+                  box-shadow: none !important;
+                }
+                /* Keep the header/table fills — printers strip backgrounds by
+                   default, which would flatten the whole grid to plain white. */
+                * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
               }
               .page {
                 width: 8.5in;
@@ -3325,66 +3435,67 @@ export default function App() {
       // if they don't already have an invoice recorded (so a manually-verified
       // entry never gets silently overwritten by a re-scan).
       const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
-      let patchedOrders = null;
       let appliedCount = 0;
 
-      if (discoveries.length > 0) {
-        setOrders((prev) => {
-          const next = prev.map((o) => {
-            if (!o?.reference || (o.source_invoice || "").toString().trim()) return o;
-            const orderRef = String(o.reference).trim().toUpperCase();
-            const found = discoveries.find(
-              (d) => d.reference && String(d.reference).trim().toUpperCase() === orderRef
-            );
-            if (!found) return o;
-            appliedCount += 1;
-            const balanceDueNum = Number(found.balanceDue);
-            // Same mechanism as typing an invoice into the textbox: if the order
-            // was already entered in Sage (invoiceSageUpdate) and the new invoice
-            // differs from what Sage last synced, flag it so the red
-            // "Invoice differs from last Sage update / Update Invoice" UI appears.
-            const invoiceNeedsSync =
-              Boolean(o.invoiceSageUpdate) &&
-              String(found.invoiceNumber || "").trim() !== String(o.sage_reference_synced || "").trim();
-            return {
-              ...o,
-              source_invoice: found.invoiceNumber,
-              sage_reference: found.invoiceNumber,
-              hasInvoiceNum: true,
-              invoiceNeedsSync,
-              ...(Number.isFinite(balanceDueNum) ? { billed_total: balanceDueNum } : {}),
-              ...(found.imageFileName ? { epicorInvoiceImage: found.imageFileName } : {}),
-              environmentalFeeAlert: Boolean(found.hasEnvironmentalFee),
-              ...(found.environmentalFeeAmount ? { environmentalFeeAmount: found.environmentalFeeAmount } : {}),
-              lastUpdatedAt: new Date().toISOString(),
-              _localDirty: true,
-            };
-          });
-          patchedOrders = next;
-          return next;
-        });
-        // Dirty BEFORE attempting the save: if the write to orders.json fails
-        // (transient network-share error), this keeps the Save button live for a
-        // manual retry and stops the next full-orders refresh (watcher push or a
-        // crawler fetch) from silently discarding the never-persisted data.
-        setOrdersDirty(true);
-      }
+      // Build the patched list synchronously from the current orders (NOT as a
+      // side-effect inside a setOrders updater) so the disk write below always
+      // sees the real result. This is what makes the invoice # / billed total
+      // persist the moment Epicor answers, with no manual Save.
+      const patchedOrders = (ordersRef.current || []).map((o) => {
+        if (!o?.reference || (o.source_invoice || "").toString().trim()) return o;
+        const orderRef = String(o.reference).trim().toUpperCase();
+        const found = discoveries.find(
+          (d) => d.reference && String(d.reference).trim().toUpperCase() === orderRef
+        );
+        if (!found) return o;
+        appliedCount += 1;
+        const balanceDueNum = Number(found.balanceDue);
+        // Same mechanism as typing an invoice into the textbox: if the order
+        // was already entered in Sage (invoiceSageUpdate) and the new invoice
+        // differs from what Sage last synced, flag it so the red
+        // "Invoice differs from last Sage update / Update Invoice" UI appears.
+        const invoiceNeedsSync =
+          Boolean(o.invoiceSageUpdate) &&
+          String(found.invoiceNumber || "").trim() !== String(o.sage_reference_synced || "").trim();
+        return {
+          ...o,
+          source_invoice: found.invoiceNumber,
+          sage_reference: found.invoiceNumber,
+          hasInvoiceNum: true,
+          invoiceNeedsSync,
+          ...(Number.isFinite(balanceDueNum) ? { billed_total: balanceDueNum } : {}),
+          ...(found.imageFileName ? { epicorInvoiceImage: found.imageFileName } : {}),
+          environmentalFeeAlert: Boolean(found.hasEnvironmentalFee),
+          ...(found.environmentalFeeAmount ? { environmentalFeeAmount: found.environmentalFeeAmount } : {}),
+          lastUpdatedAt: new Date().toISOString(),
+          _localDirty: true,
+        };
+      });
 
       let saveFailed = false;
-      if (appliedCount > 0 && patchedOrders && api?.writeOrders) {
-        const normalized = normalizeOrdersForSave(patchedOrders);
-        try {
-          const saveRes = await api.writeOrders(normalized);
-          if (saveRes?.ok) {
-            adoptSavedOrders(normalized);
-            setOrdersDirty(false);
-          } else {
+      if (appliedCount > 0) {
+        // Show it, and mark dirty BEFORE attempting the save: if the write to
+        // orders.json fails (transient network-share error), this keeps the Save
+        // button live for a manual retry and stops the next full-orders refresh
+        // (watcher push or a crawler fetch) from silently discarding the
+        // never-persisted data.
+        setOrders(patchedOrders);
+        setOrdersDirty(true);
+        if (api?.writeOrders) {
+          const normalized = normalizeOrdersForSave(patchedOrders);
+          try {
+            const saveRes = await api.writeOrders(normalized);
+            if (saveRes?.ok) {
+              adoptSavedOrders(normalized);
+              setOrdersDirty(false);
+            } else {
+              saveFailed = true;
+              console.error("[vendor] failed to auto-save epicor matches", saveRes);
+            }
+          } catch (saveErr) {
             saveFailed = true;
-            console.error("[vendor] failed to auto-save epicor matches", saveRes);
+            console.error("[vendor] failed to auto-save epicor matches", saveErr);
           }
-        } catch (saveErr) {
-          saveFailed = true;
-          console.error("[vendor] failed to auto-save epicor matches", saveErr);
         }
       }
 
@@ -4546,46 +4657,45 @@ export default function App() {
             .filter((li) => String(li.partNumber || "").trim() || String(li.partDescription || "").trim())
         : null;
 
-      let patchedOrders = null;
-      setOrders((prev) => {
-        const next = prev.map((o) => {
-          if (!o?.reference || String(o.reference).trim().toUpperCase() !== String(reference).trim().toUpperCase()) {
-            return o;
-          }
-          // Same mechanism as the manual invoice textbox: flag for Sage re-sync
-          // if this order was already entered in Sage and the confirmed invoice
-          // differs from what Sage last synced.
-          const invoiceNeedsSync =
-            Boolean(o.invoiceSageUpdate) && nextInvoice !== String(o.sage_reference_synced || "").trim();
+      // Built synchronously from current orders (see runEpicorInvoiceFetch): the
+      // write below has to run against the real patched list, not whatever a
+      // deferred setOrders updater may or may not have produced by now.
+      const patchedOrders = (ordersRef.current || []).map((o) => {
+        if (!o?.reference || String(o.reference).trim().toUpperCase() !== String(reference).trim().toUpperCase()) {
+          return o;
+        }
+        // Same mechanism as the manual invoice textbox: flag for Sage re-sync
+        // if this order was already entered in Sage and the confirmed invoice
+        // differs from what Sage last synced.
+        const invoiceNeedsSync =
+          Boolean(o.invoiceSageUpdate) && nextInvoice !== String(o.sage_reference_synced || "").trim();
 
-          // Mark the total as human-verified if it matches what Sage already has
-          // (or there's no Sage total yet to conflict with) — otherwise leave the
-          // existing Reconcile Totals flow to surface the discrepancy.
-          const sageTotalNum = Number(o.sage_total_synced ?? o.sageTotalSynced);
-          const totalsMatch =
-            nextTotal !== null && (!Number.isFinite(sageTotalNum) || Math.abs(nextTotal - sageTotalNum) < 0.01);
+        // Mark the total as human-verified if it matches what Sage already has
+        // (or there's no Sage total yet to conflict with) — otherwise leave the
+        // existing Reconcile Totals flow to surface the discrepancy.
+        const sageTotalNum = Number(o.sage_total_synced ?? o.sageTotalSynced);
+        const totalsMatch =
+          nextTotal !== null && (!Number.isFinite(sageTotalNum) || Math.abs(nextTotal - sageTotalNum) < 0.01);
 
-          return {
-            ...o,
-            source_invoice: nextInvoice,
-            sage_reference: nextInvoice,
-            hasInvoiceNum: Boolean(nextInvoice),
-            invoiceNeedsSync,
-            ...(nextTotal !== null ? { billed_total: nextTotal, totalVerified: totalsMatch } : {}),
-            ...(nextLineItems ? { lineItems: nextLineItems } : {}),
-            lastUpdatedAt: new Date().toISOString(),
-            _localDirty: true,
-          };
-        });
-        patchedOrders = next;
-        return next;
+        return {
+          ...o,
+          source_invoice: nextInvoice,
+          sage_reference: nextInvoice,
+          hasInvoiceNum: Boolean(nextInvoice),
+          invoiceNeedsSync,
+          ...(nextTotal !== null ? { billed_total: nextTotal, totalVerified: totalsMatch } : {}),
+          ...(nextLineItems ? { lineItems: nextLineItems } : {}),
+          lastUpdatedAt: new Date().toISOString(),
+          _localDirty: true,
+        };
       });
+      setOrders(patchedOrders);
       // Dirty BEFORE attempting the save: if the write fails and the user closes
       // this modal, the corrected values stay protected (Save button live, and
       // external refreshes won't overwrite them) instead of silently vanishing.
       setOrdersDirty(true);
 
-      if (patchedOrders && api?.writeOrders) {
+      if (api?.writeOrders) {
         const normalized = normalizeOrdersForSave(patchedOrders);
         const saveRes = await api.writeOrders(normalized);
         if (!saveRes?.ok) throw new Error("Failed to save order. Your corrections are kept on screen — click Save to retry.");
@@ -4616,58 +4726,57 @@ export default function App() {
       const logMsg = Array.isArray(res.statusLog) && res.statusLog.length ? res.statusLog.join("\n") : "";
 
       const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
-      let patchedOrders = null;
       let appliedCount = 0;
 
-      if (discoveries.length > 0) {
-        setOrders((prev) => {
-          const next = prev.map((o) => {
-            if (!o?.reference || (o.source_invoice || "").toString().trim()) return o;
-            const orderRef = String(o.reference).trim().toUpperCase();
-            const found = discoveries.find(
-              (d) => d.reference && String(d.reference).trim().toUpperCase() === orderRef
-            );
-            if (!found) return o;
-            appliedCount += 1;
-            const totalNum = Number(found.total ?? found.balanceDue);
-            const invoiceNeedsSync =
-              Boolean(o.invoiceSageUpdate) &&
-              String(found.invoiceNumber || "").trim() !== String(o.sage_reference_synced || "").trim();
-            return {
-              ...o,
-              source_invoice: found.invoiceNumber,
-              sage_reference: found.invoiceNumber,
-              hasInvoiceNum: true,
-              invoiceNeedsSync,
-              ...(Number.isFinite(totalNum) ? { billed_total: totalNum } : {}),
-              ...(found.fileName ? { transbecInvoiceFile: found.fileName } : {}),
-              lastUpdatedAt: new Date().toISOString(),
-              _localDirty: true,
-            };
-          });
-          patchedOrders = next;
-          return next;
-        });
-        // Dirty BEFORE attempting the save — see handleFetchBestbuyInvoices for
-        // the full rationale (protects against silent data loss on save failure).
-        setOrdersDirty(true);
-      }
+      // Patched list built synchronously from current orders — see
+      // runEpicorInvoiceFetch for why this must not happen inside a setOrders
+      // updater: the save below depends on the result being ready right now.
+      const patchedOrders = (ordersRef.current || []).map((o) => {
+        if (!o?.reference || (o.source_invoice || "").toString().trim()) return o;
+        const orderRef = String(o.reference).trim().toUpperCase();
+        const found = discoveries.find(
+          (d) => d.reference && String(d.reference).trim().toUpperCase() === orderRef
+        );
+        if (!found) return o;
+        appliedCount += 1;
+        const totalNum = Number(found.total ?? found.balanceDue);
+        const invoiceNeedsSync =
+          Boolean(o.invoiceSageUpdate) &&
+          String(found.invoiceNumber || "").trim() !== String(o.sage_reference_synced || "").trim();
+        return {
+          ...o,
+          source_invoice: found.invoiceNumber,
+          sage_reference: found.invoiceNumber,
+          hasInvoiceNum: true,
+          invoiceNeedsSync,
+          ...(Number.isFinite(totalNum) ? { billed_total: totalNum } : {}),
+          ...(found.fileName ? { transbecInvoiceFile: found.fileName } : {}),
+          lastUpdatedAt: new Date().toISOString(),
+          _localDirty: true,
+        };
+      });
 
       let saveFailed = false;
-      if (appliedCount > 0 && patchedOrders && api?.writeOrders) {
-        const normalized = normalizeOrdersForSave(patchedOrders);
-        try {
-          const saveRes = await api.writeOrders(normalized);
-          if (saveRes?.ok) {
-            adoptSavedOrders(normalized);
-            setOrdersDirty(false);
-          } else {
+      if (appliedCount > 0) {
+        // Dirty BEFORE attempting the save — see handleFetchBestbuyInvoices for
+        // the full rationale (protects against silent data loss on save failure).
+        setOrders(patchedOrders);
+        setOrdersDirty(true);
+        if (api?.writeOrders) {
+          const normalized = normalizeOrdersForSave(patchedOrders);
+          try {
+            const saveRes = await api.writeOrders(normalized);
+            if (saveRes?.ok) {
+              adoptSavedOrders(normalized);
+              setOrdersDirty(false);
+            } else {
+              saveFailed = true;
+              console.error("[vendor] failed to auto-save transbec matches", saveRes);
+            }
+          } catch (saveErr) {
             saveFailed = true;
-            console.error("[vendor] failed to auto-save transbec matches", saveRes);
+            console.error("[vendor] failed to auto-save transbec matches", saveErr);
           }
-        } catch (saveErr) {
-          saveFailed = true;
-          console.error("[vendor] failed to auto-save transbec matches", saveErr);
         }
       }
 
@@ -4738,107 +4847,107 @@ export default function App() {
         }
       }
 
-      let patchedOrders = null;
       let appliedCount = 0;
       let appliedCreditCount = 0;
 
-      if (discoveries.length > 0 || creditDiscoveries.length > 0) {
-        setOrders((prev) => {
-          const next = prev.map((o) => {
-            if (!o?.reference || o.source !== "bestbuy") return o;
-            const keys = [o.reference, o.source_invoice, o.invoiceNum]
-              .map((v) => (v ? String(v).trim().toUpperCase() : ""))
-              .filter(Boolean);
+      // Patched list built synchronously from current orders — see
+      // runEpicorInvoiceFetch for why this must not happen inside a setOrders
+      // updater: the save below depends on the result being ready right now.
+      const patchedOrders = (ordersRef.current || []).map((o) => {
+        if (!o?.reference || o.source !== "bestbuy") return o;
+        const keys = [o.reference, o.source_invoice, o.invoiceNum]
+          .map((v) => (v ? String(v).trim().toUpperCase() : ""))
+          .filter(Boolean);
 
-            let patch = null;
+        let patch = null;
 
-            // Unlike World/Transbec, a BestBuy order usually already has an
-            // invoice number from the site scrape, so we can't skip on that.
-            // Skip only once the invoice PDF is actually attached.
-            if (!o.bestbuyInvoiceFile) {
-              // The order's reference is the packing slip when scraped before the
-              // warehouse invoiced it, and the invoice number after — so try both,
-              // and also match against an already-known invoice number.
-              const found = discoveries.find(
-                (d) =>
-                  (d.packingSlip && keys.includes(String(d.packingSlip).trim().toUpperCase())) ||
-                  (d.invoiceNumber && keys.includes(String(d.invoiceNumber).trim().toUpperCase()))
-              );
-              if (found) {
-                appliedCount += 1;
-                const totalNum = Number(found.total);
-                // Keep an invoice number that's already recorded (scraped or
-                // hand-corrected); only fill it in when there isn't one.
-                const existingInvoice = (o.source_invoice || "").toString().trim();
-                const nextInvoice = existingInvoice || found.invoiceNumber || "";
-                const invoiceNeedsSync =
-                  Boolean(o.invoiceSageUpdate) &&
-                  String(nextInvoice).trim() !== String(o.sage_reference_synced || "").trim();
-                patch = {
-                  ...(nextInvoice
-                    ? { source_invoice: nextInvoice, sage_reference: nextInvoice, hasInvoiceNum: true }
-                    : {}),
-                  invoiceNeedsSync,
-                  ...(Number.isFinite(totalNum) ? { billed_total: totalNum } : {}),
-                  ...(found.fileName ? { bestbuyInvoiceFile: found.fileName } : {}),
-                  environmentalFeeAlert: Boolean(found.hasEnvironmentalFee),
-                };
-              }
-            }
-
-            // A credit invoice fills the SAME invoice # / billed total fields as
-            // a regular one (a credit order carries no invoice number until the
-            // warehouse credits it): its real invoice number (from the PDF body,
-            // not the subject) goes in source_invoice, and its total goes in
-            // billed_total — as a POSITIVE amount, even though the PDF prints it
-            // as an accounting negative. bestbuyCreditFile is also kept so the
-            // credit PDF stays viewable/printable and the row is flagged as a
-            // credit. Skip once a credit PDF is already attached.
-            if (!o.bestbuyCreditFile) {
-              const foundCredit = creditDiscoveries.find(
-                (d) =>
-                  (d.packingSlip && keys.includes(String(d.packingSlip).trim().toUpperCase())) ||
-                  (d.invoiceNumber && keys.includes(String(d.invoiceNumber).trim().toUpperCase()))
-              );
-              if (foundCredit) {
-                appliedCreditCount += 1;
-                // Guard null explicitly: Number(null) is 0, which would wrongly
-                // record a $0.00 credit when the total failed to parse. Store the
-                // magnitude — billed_total is always positive.
-                const rawCreditTotal = foundCredit.total == null ? NaN : Number(foundCredit.total);
-                const creditTotalNum = Number.isFinite(rawCreditTotal) ? Math.abs(rawCreditTotal) : NaN;
-                const existingInvoice = (patch?.source_invoice || o.source_invoice || "").toString().trim();
-                const nextInvoice = existingInvoice || foundCredit.invoiceNumber || "";
-                const invoiceNeedsSync =
-                  Boolean(o.invoiceSageUpdate) &&
-                  String(nextInvoice).trim() !== String(o.sage_reference_synced || "").trim();
-                patch = {
-                  ...(patch || {}),
-                  ...(nextInvoice
-                    ? { source_invoice: nextInvoice, sage_reference: nextInvoice, hasInvoiceNum: true }
-                    : {}),
-                  invoiceNeedsSync,
-                  ...(Number.isFinite(creditTotalNum) ? { billed_total: creditTotalNum } : {}),
-                  ...(foundCredit.fileName ? { bestbuyCreditFile: foundCredit.fileName } : {}),
-                  // Uniform cross-vendor marker so the "Credit" order filter can
-                  // find every vendor's credits with one predicate — same flag
-                  // Transbec credit orders already set at creation.
-                  isCredit: true,
-                };
-              }
-            }
-
-            if (!patch) return o;
-            return {
-              ...o,
-              ...patch,
-              lastUpdatedAt: new Date().toISOString(),
-              _localDirty: true,
+        // Unlike World/Transbec, a BestBuy order usually already has an
+        // invoice number from the site scrape, so we can't skip on that.
+        // Skip only once the invoice PDF is actually attached.
+        if (!o.bestbuyInvoiceFile) {
+          // The order's reference is the packing slip when scraped before the
+          // warehouse invoiced it, and the invoice number after — so try both,
+          // and also match against an already-known invoice number.
+          const found = discoveries.find(
+            (d) =>
+              (d.packingSlip && keys.includes(String(d.packingSlip).trim().toUpperCase())) ||
+              (d.invoiceNumber && keys.includes(String(d.invoiceNumber).trim().toUpperCase()))
+          );
+          if (found) {
+            appliedCount += 1;
+            const totalNum = Number(found.total);
+            // Keep an invoice number that's already recorded (scraped or
+            // hand-corrected); only fill it in when there isn't one.
+            const existingInvoice = (o.source_invoice || "").toString().trim();
+            const nextInvoice = existingInvoice || found.invoiceNumber || "";
+            const invoiceNeedsSync =
+              Boolean(o.invoiceSageUpdate) &&
+              String(nextInvoice).trim() !== String(o.sage_reference_synced || "").trim();
+            patch = {
+              ...(nextInvoice
+                ? { source_invoice: nextInvoice, sage_reference: nextInvoice, hasInvoiceNum: true }
+                : {}),
+              invoiceNeedsSync,
+              ...(Number.isFinite(totalNum) ? { billed_total: totalNum } : {}),
+              ...(found.fileName ? { bestbuyInvoiceFile: found.fileName } : {}),
+              environmentalFeeAlert: Boolean(found.hasEnvironmentalFee),
             };
-          });
-          patchedOrders = next;
-          return next;
-        });
+          }
+        }
+
+        // A credit invoice fills the SAME invoice # / billed total fields as
+        // a regular one (a credit order carries no invoice number until the
+        // warehouse credits it): its real invoice number (from the PDF body,
+        // not the subject) goes in source_invoice, and its total goes in
+        // billed_total — as a POSITIVE amount, even though the PDF prints it
+        // as an accounting negative. bestbuyCreditFile is also kept so the
+        // credit PDF stays viewable/printable and the row is flagged as a
+        // credit. Skip once a credit PDF is already attached.
+        if (!o.bestbuyCreditFile) {
+          const foundCredit = creditDiscoveries.find(
+            (d) =>
+              (d.packingSlip && keys.includes(String(d.packingSlip).trim().toUpperCase())) ||
+              (d.invoiceNumber && keys.includes(String(d.invoiceNumber).trim().toUpperCase()))
+          );
+          if (foundCredit) {
+            appliedCreditCount += 1;
+            // Guard null explicitly: Number(null) is 0, which would wrongly
+            // record a $0.00 credit when the total failed to parse. Store the
+            // magnitude — billed_total is always positive.
+            const rawCreditTotal = foundCredit.total == null ? NaN : Number(foundCredit.total);
+            const creditTotalNum = Number.isFinite(rawCreditTotal) ? Math.abs(rawCreditTotal) : NaN;
+            const existingInvoice = (patch?.source_invoice || o.source_invoice || "").toString().trim();
+            const nextInvoice = existingInvoice || foundCredit.invoiceNumber || "";
+            const invoiceNeedsSync =
+              Boolean(o.invoiceSageUpdate) &&
+              String(nextInvoice).trim() !== String(o.sage_reference_synced || "").trim();
+            patch = {
+              ...(patch || {}),
+              ...(nextInvoice
+                ? { source_invoice: nextInvoice, sage_reference: nextInvoice, hasInvoiceNum: true }
+                : {}),
+              invoiceNeedsSync,
+              ...(Number.isFinite(creditTotalNum) ? { billed_total: creditTotalNum } : {}),
+              ...(foundCredit.fileName ? { bestbuyCreditFile: foundCredit.fileName } : {}),
+              // Uniform cross-vendor marker so the "Credit" order filter can
+              // find every vendor's credits with one predicate — same flag
+              // Transbec credit orders already set at creation.
+              isCredit: true,
+            };
+          }
+        }
+
+        if (!patch) return o;
+        return {
+          ...o,
+          ...patch,
+          lastUpdatedAt: new Date().toISOString(),
+          _localDirty: true,
+        };
+      });
+
+      let saveFailed = false;
+      if (appliedCount > 0 || appliedCreditCount > 0) {
         // Mark dirty the moment the in-memory patch is applied, BEFORE the save
         // below is even attempted. If the save fails (thrown error or {ok:false}
         // — e.g. a transient failure writing orders.json on the network share),
@@ -4846,24 +4955,23 @@ export default function App() {
         // the Save button for a manual retry, and it stops any later full-orders
         // refresh (the file watcher's push, or another vendor fetch) from
         // overwriting these never-persisted fields with stale disk contents.
+        setOrders(patchedOrders);
         setOrdersDirty(true);
-      }
-
-      let saveFailed = false;
-      if ((appliedCount > 0 || appliedCreditCount > 0) && patchedOrders && api?.writeOrders) {
-        const normalized = normalizeOrdersForSave(patchedOrders);
-        try {
-          const saveRes = await api.writeOrders(normalized);
-          if (saveRes?.ok) {
-            adoptSavedOrders(normalized);
-            setOrdersDirty(false);
-          } else {
+        if (api?.writeOrders) {
+          const normalized = normalizeOrdersForSave(patchedOrders);
+          try {
+            const saveRes = await api.writeOrders(normalized);
+            if (saveRes?.ok) {
+              adoptSavedOrders(normalized);
+              setOrdersDirty(false);
+            } else {
+              saveFailed = true;
+              console.error("[vendor] failed to auto-save bestbuy matches", saveRes);
+            }
+          } catch (saveErr) {
             saveFailed = true;
-            console.error("[vendor] failed to auto-save bestbuy matches", saveRes);
+            console.error("[vendor] failed to auto-save bestbuy matches", saveErr);
           }
-        } catch (saveErr) {
-          saveFailed = true;
-          console.error("[vendor] failed to auto-save bestbuy matches", saveErr);
         }
       }
 
@@ -4939,7 +5047,7 @@ export default function App() {
       // runs with the real result. This is what makes Gmail-sourced changes
       // persist immediately: the invoice #, total and file are saved to
       // orders.json right away, without waiting for a manual Save.
-      const patchedOrders = orders.map((o) => {
+      const patchedOrders = (ordersRef.current || []).map((o) => {
         if (!o?.reference || o.source !== "cbk") return o;
         // Skip once the invoice PDF is already attached (don't overwrite a
         // verified entry on a re-fetch).
@@ -5050,7 +5158,7 @@ export default function App() {
       const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
 
       let appliedCount = 0;
-      const patchedOrders = orders.map((o) => {
+      const patchedOrders = (ordersRef.current || []).map((o) => {
         if (!o?.reference || o.source !== "proforce" || !o.isCredit) return o;
         // Skip once the credit PDF is already attached (don't overwrite on a re-fetch).
         if (o.proforceCreditFile) return o;
@@ -6090,10 +6198,15 @@ export default function App() {
       )}
       {printBubble && (
         <div className="fixed inset-0 z-[5000] bg-slate-900/60 flex items-center justify-center px-4">
-          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-7xl p-6 flex flex-col gap-4">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-[95vw] p-6 flex flex-col gap-4 max-h-[95vh]">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-semibold text-slate-800">
-                Print Preview - {printBubble.name}
+                Sales Order Preview - {printBubble.name}
+                {printSalesOrderNumber && (
+                  <span className="ml-2 text-base font-bold text-indigo-700">
+                    {printSalesOrderNumber}
+                  </span>
+                )}
               </h2>
               <button
                 className="text-slate-500 hover:text-slate-700"
@@ -6215,7 +6328,7 @@ export default function App() {
               </div>
               <div
                 ref={printPreviewRef}
-                className="max-h-[80vh] overflow-auto rounded-2xl border border-slate-200 bg-slate-50 p-4"
+                className="max-h-[80vh] overflow-auto rounded-2xl border border-slate-200 bg-slate-50 p-4 flex justify-center"
               >
                 <InvoicePreview
                   bubbleName={printBubble.name}
@@ -6223,6 +6336,7 @@ export default function App() {
                   items={printItems}
                   extraLines={printExtraLines}
                   generatedDate={printGeneratedAt || new Date()}
+                  salesOrderNumber={printSalesOrderNumber}
                 />
               </div>
             </div>

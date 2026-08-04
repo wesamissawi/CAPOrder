@@ -5,9 +5,14 @@
 //
 // Nothing in here owns data: every mutation goes back out through a callback to
 // App.jsx's handlers, same as the views themselves.
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import Card from "./Card";
 import api from "../api";
+
+// Shared empty literals. A fresh `[]`/`{}` per render is a new identity, which
+// is enough on its own to defeat React.memo on every row below it — the rows
+// here are memoized, so the fallbacks have to be constants.
+export const EMPTY_ARRAY = [];
 
 export const money = (v) => {
   const n = Number(v);
@@ -178,7 +183,12 @@ export const MOVE_TARGETS = {
   },
 };
 
-export function ItemRow({
+// `onSavePrice(uid, value)`, `onSaveDiscount(uid, value)` and `onMove(item,
+// target)` hand the row's identity BACK to the caller rather than being closed
+// over per row. That lets a card pass the same function object to all of its
+// rows, which is what keeps the React.memo below from being a no-op — a
+// per-row `(next) => onSave(it.uid, next)` arrow is a new prop every render.
+function ItemRowImpl({
   item,
   arrived,
   busy,
@@ -189,12 +199,18 @@ export function ItemRow({
   // Destinations this row can be sent to. The button opens a picker rather than
   // moving straight away — "Remove" used to silently mean New Stock, which is
   // only ever right half the time.
-  moveTargets = [],
+  moveTargets = EMPTY_ARRAY,
   moveLabel = "Move",
   onMove,
 }) {
   const [showHistory, setShowHistory] = useState(false);
   const [picking, setPicking] = useState(false);
+  const uid = item.uid;
+  const handleSavePrice = useCallback((next) => onSavePrice?.(uid, next), [onSavePrice, uid]);
+  const handleSaveDiscount = useCallback(
+    (next) => onSaveDiscount?.(uid, next),
+    [onSaveDiscount, uid]
+  );
   const qty = toNum(item.quantity);
   const cost = toNum(item.cost);
   const sell = toNum(item.allocated_for);
@@ -258,7 +274,7 @@ export function ItemRow({
                 key={key}
                 onClick={() => {
                   setPicking(false);
-                  onMove(key);
+                  onMove(item, key);
                 }}
                 className={`rounded-md border px-2 py-0.5 text-[10px] font-bold ${t.cls}`}
               >
@@ -277,7 +293,7 @@ export function ItemRow({
       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
         <span>Qty {item.quantity}</span>
         <span>Cost {money(cost)}</span>
-        <PriceField label="Sell" value={item.allocated_for} onSave={onSavePrice} />
+        <PriceField label="Sell" value={item.allocated_for} onSave={handleSavePrice} />
         {showDiscount && (
           <PriceField
             label="Disc"
@@ -286,7 +302,7 @@ export function ItemRow({
                 ? item.discounted_price
                 : item.allocated_for
             }
-            onSave={onSaveDiscount}
+            onSave={handleSaveDiscount}
           />
         )}
         <button
@@ -312,12 +328,18 @@ export function ItemRow({
       )}
       {showHistory && (
         <div className="mt-1.5 border-t border-slate-100 pt-1.5">
-          <HistoryTrail records={history || []} />
+          <HistoryTrail records={history || EMPTY_ARRAY} />
         </div>
       )}
     </div>
   );
 }
+
+// A part row is the unit this page has the most of (New Stock alone runs to
+// hundreds), and nothing about a row changes when a sibling card is filtered,
+// re-sorted or re-priced. Memoizing here is what stops one keystroke in the
+// search box from reconciling every row on the page.
+export const ItemRow = React.memo(ItemRowImpl);
 
 // The CashPad sidebar — a vertical listing of whatever's currently sitting in
 // the CashPad staging bubble, docked to the right of the card grid so it's
@@ -325,9 +347,12 @@ export function ItemRow({
 // HORIZONTALLY (to a thin edge tab) rather than the vertical collapse the cards
 // use, since it's meant to sit there persistently. Shared by Sales Orders and
 // Cash Sales, which both dock it on the right.
-export function CashPadPanel({
+const EMPTY_ARRIVAL_MAP = {};
+const CASHPAD_MOVE_TARGETS = ["NEW STOCK", "RETURNS"];
+
+function CashPadPanelImpl({
   items,
-  arrivalMap = {},
+  arrivalMap = EMPTY_ARRIVAL_MAP,
   historyByUid,
   removingUids,
   onSavePrice,
@@ -336,6 +361,12 @@ export function CashPadPanel({
   onToggleCollapse,
 }) {
   const total = items.reduce((sum, it) => sum + toNum(it.quantity) * toNum(it.allocated_for), 0);
+  // One function object for the whole list rather than one per row — see the
+  // note on ItemRow.
+  const handleMove = useCallback(
+    (item, target) => onMoveItem(item, "CashPad", target),
+    [onMoveItem]
+  );
 
   if (collapsed) {
     return (
@@ -383,10 +414,10 @@ export function CashPadPanel({
                 arrivalMap[String(it.order_key || "").toUpperCase()] ??
                   arrivalMap[String(it.reference_num || "").toUpperCase()]
               )}
-              history={historyByUid.get(it.uid) || []}
-              onSavePrice={(next) => onSavePrice(it.uid, next)}
-              moveTargets={["NEW STOCK", "RETURNS"]}
-              onMove={(target) => onMoveItem(it, "CashPad", target)}
+              history={historyByUid.get(it.uid) || EMPTY_ARRAY}
+              onSavePrice={onSavePrice}
+              moveTargets={CASHPAD_MOVE_TARGETS}
+              onMove={handleMove}
             />
           ))}
         </div>
@@ -394,6 +425,8 @@ export function CashPadPanel({
     </div>
   );
 }
+
+export const CashPadPanel = React.memo(CashPadPanelImpl);
 
 // Subtotal / tax / total for one card. Extra print lines count toward the
 // subtotal and only taxable rows are taxed (items always are; an extra line

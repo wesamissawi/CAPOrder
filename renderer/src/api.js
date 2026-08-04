@@ -100,6 +100,8 @@ const fallbackApi = {
   unassignOrderLine: warnAsync("unassignOrderLine"),
   unassignOrderItem: warnAsync("unassignOrderItem"),
   archiveBubble: warnAsync("archiveBubble"),
+  appendPrintSnapshot: warnAsync("appendPrintSnapshot"),
+  findPrintSnapshots: warnAsync("findPrintSnapshots", async () => ({ ok: false, snapshots: [] })),
   searchArchive: warnAsync("searchArchive", async () => ({ ok: false, results: [] })),
   locatePart: warnAsync("locatePart", async () => ({
     ok: false,

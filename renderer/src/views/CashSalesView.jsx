@@ -7,7 +7,7 @@
 // cash-sales-only machinery that used to live in BubbleColumn is here now:
 // per-item discounted pricing, the bulk pricing tools, payment assignment, and
 // the profit/margin readout.
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import Card from "../components/Card";
 import DraftInput from "../components/DraftInput";
 import api from "../api";
@@ -15,6 +15,7 @@ import { computeBubblePrintSignature } from "../utils/inventory";
 import {
   CardTotals,
   CashPadPanel,
+  EMPTY_ARRAY,
   ItemRow,
   MOVE_TARGETS,
   computeCardTotals,
@@ -23,6 +24,10 @@ import {
   toNum,
   useItemHistoryByUid,
 } from "../components/orderCardKit";
+
+// Fixed option list — a literal here would be a new array on every render, and
+// ItemRow is memoized on its props.
+const SALE_MOVE_TARGETS = ["NEW STOCK", "CASHPAD", "RETURNS"];
 
 const formatPaymentLabel = (p) => {
   const date = p?.date || "No date";
@@ -258,6 +263,21 @@ function CashSaleCard({
   const [sageSending, setSageSending] = useState(false);
   const [activePricingLabel, setActivePricingLabel] = useState("");
 
+  // ItemRow is memoized and hands the row's identity back through these, so one
+  // function object serves the whole list instead of a fresh arrow per row.
+  const handleRowSavePrice = useCallback(
+    (uid, next) => onUpdateItem(uid, { allocated_for: next }),
+    [onUpdateItem]
+  );
+  const handleRowSaveDiscount = useCallback(
+    (uid, next) => onUpdateItem(uid, { discounted_price: next }),
+    [onUpdateItem]
+  );
+  const handleRowMove = useCallback(
+    (item, target) => onMoveItem(item, bubble.name, target),
+    [onMoveItem, bubble.name]
+  );
+
   // Cash sales price on the discounted figure, so the card total is what the
   // customer actually pays rather than the list price.
   const { subtotal, tax, total } = computeCardTotals(items, extraLines, effectivePrice);
@@ -382,16 +402,16 @@ function CashSaleCard({
                 key={it.uid}
                 item={it}
                 busy={removingUids.has(it.uid)}
-                history={historyByUid.get(it.uid) || []}
+                history={historyByUid.get(it.uid) || EMPTY_ARRAY}
                 showDiscount
-                onSavePrice={(next) => onUpdateItem(it.uid, { allocated_for: next })}
-                onSaveDiscount={(next) => onUpdateItem(it.uid, { discounted_price: next })}
+                onSavePrice={handleRowSavePrice}
+                onSaveDiscount={handleRowSaveDiscount}
                 moveLabel="Remove"
                 // CashPad is a real destination from here: it pulls the part out
                 // of this sale and back into the staging pool, which is how a
                 // mis-split sale gets re-matched to a payment.
-                moveTargets={["NEW STOCK", "CASHPAD", "RETURNS"]}
-                onMove={(target) => onMoveItem(it, bubble.name, target)}
+                moveTargets={SALE_MOVE_TARGETS}
+                onMove={handleRowMove}
               />
             ))}
           </div>

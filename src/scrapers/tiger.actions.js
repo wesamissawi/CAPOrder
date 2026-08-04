@@ -2,6 +2,12 @@ const fs = require("fs");
 
 const LOGIN_URL = "https://scarborough.tigeronlineorder.com/";
 const DEFAULT_BRANCH = "Brampton";
+// Tiger's order detail table has no line-code/brand column, so every scraped
+// line carried a blank partLineCode and reached Sage as the bare part number
+// ("CH3010345"). Tiger parts are all stocked under one CAP line code, so stamp
+// it here: resolveCapCode's default "<linecode> <partnumber>" then yields
+// "TIG CH3010345". See src/scrapers/capRules.js.
+const TIGER_LINE_CODE = "TIG";
 const BRANCH_HOSTS = {
   Scarborough: "scarborough.tigeronlineorder.com",
   Brampton: "brampton.tigeronlineorder.com",
@@ -182,7 +188,7 @@ async function fetchOrderDetail(context, origin, orderId) {
   }
 
   try {
-    const detail = await page.evaluate(() => {
+    const detail = await page.evaluate((lineCode) => {
       const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
       const money = (s) => {
         const n = parseFloat((s || "").replace(/[^0-9.-]/g, ""));
@@ -218,6 +224,7 @@ async function fetchOrderDetail(context, origin, orderId) {
           const priceRaw = norm(tds[6]?.innerText || "");
           const totalRaw = norm(tds[7]?.innerText || "");
           lineItems.push({
+            partLineCode: lineCode,
             partNumber,
             partDescription: [modelYear, description].filter(Boolean).join(" - "),
             quantity: qty,
@@ -236,7 +243,7 @@ async function fetchOrderDetail(context, origin, orderId) {
         lineItems,
         totals,
       };
-    });
+    }, TIGER_LINE_CODE);
 
     await page.close();
     return { ok: true, detail };

@@ -15,6 +15,9 @@ const {
   classifyDestination,
   isStagingDestination,
   orderKeyOf,
+  ledgerKeyCandidates,
+  resolveLedgerEntry,
+  normalizeLedgerKeys,
 } = require('../domain/orderAssignment.domain');
 
 const upper = (v) => String(v ?? '').trim().toUpperCase();
@@ -91,12 +94,26 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
   // Locate an order by key across both the active list and the archive, and
   // report which one it came from — assignment has to write the line's
   // addedToOutstanding flag back to whichever file actually holds it.
+  //
+  // Matches on ANY reference the order answers to, not just its current key:
+  // items stamped with order_key before the order picked up its invoice number
+  // still carry the old one (see ledgerKeyCandidates).
   function findOrder(orderKey) {
-    const active = (readOrders() || []).find((o) => orderKeyOf(o) === orderKey);
+    const matches = (o) => ledgerKeyCandidates(o).includes(orderKey);
+    const active = (readOrders() || []).find(matches);
     if (active) return { order: active, archived: false };
-    const archived = (readOrdersArchive() || []).find((o) => orderKeyOf(o) === orderKey);
+    const archived = (readOrdersArchive() || []).find(matches);
     if (archived) return { order: archived, archived: true };
     return { order: null, archived: false };
+  }
+
+  // Read the ledger with one order's stray keys already folded onto its
+  // canonical key, so every lookup and write below can just use that key.
+  // `moved` is returned so a handler that changes nothing else still persists
+  // the fold.
+  function readLedgerFor(orders) {
+    const { ledger, moved } = normalizeLedgerKeys(readOrderAssignments(), orders);
+    return { ledger, moved };
   }
 
   // Mark a line as materialised so archiving never adds it to NEW STOCK a
@@ -155,11 +172,21 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
       const includeCredits = opts?.includeCredits === true;
 
       const items = readItems();
-      const ledger = readOrderAssignments();
       const itemsByRef = indexItemsByReference(items);
 
-      const active = scope === 'archived' ? [] : readOrders() || [];
-      const archived = scope === 'active' ? [] : readOrdersArchive() || [];
+      const allActive = readOrders() || [];
+      const allArchived = readOrdersArchive() || [];
+
+      // Repair key drift here rather than in a one-shot migration script: the
+      // drift happens continuously (every order that later gains an invoice
+      // number), so it has to be healed continuously. The scan is over both
+      // order lists we already read, and the write only happens when something
+      // actually moved.
+      const { ledger, moved } = readLedgerFor([...allActive, ...allArchived]);
+      if (moved) writeOrderAssignments(ledger);
+
+      const active = scope === 'archived' ? [] : allActive;
+      const archived = scope === 'active' ? [] : allArchived;
 
       const cutoff = days > 0 ? Date.now() - days * 86400000 : 0;
 
@@ -181,7 +208,7 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
       const page = tagged.slice(0, limit);
 
       const built = page.map(({ order, archived: isArchived }) =>
-        buildOrderAssignment(order, itemsByRef, ledger[orderKeyOf(order)], { archived: isArchived })
+        buildOrderAssignment(order, itemsByRef, resolveLedgerEntry(ledger, order), { archived: isArchived })
       );
 
       const visible = includeResolved ? built : built.filter((o) => !o.resolved);
@@ -286,11 +313,16 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
   // flag — it never touches stock.
   ipcMain.handle('order-assignment:set-resolved', (_evt, payload = {}) => {
     try {
-      const orderKey = upper(payload?.orderKey);
-      if (!orderKey) return { ok: false, error: 'Missing order key.' };
+      const requestedKey = upper(payload?.orderKey);
+      if (!requestedKey) return { ok: false, error: 'Missing order key.' };
       const resolved = payload?.resolved !== false;
       const lineIdx = payload?.lineIdx;
-      const ledger = readOrderAssignments();
+      // Fold any stray keys first, then file the flag under the canonical one,
+      // so resolving a line can't leave the flag on a key the view stops
+      // reading the moment the order picks up its invoice number.
+      const { order } = findOrder(requestedKey);
+      const orderKey = order ? orderKeyOf(order) : requestedKey;
+      const { ledger } = readLedgerFor(order ? [order] : []);
       const entry = ledger[orderKey] || { resolved: false, lines: {} };
       entry.lines = entry.lines || {};
 
@@ -320,12 +352,12 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
   //      the NEW STOCK hop entirely (the agreed model).
   ipcMain.handle('order-assignment:assign', (_evt, payload = {}) => {
     try {
-      const orderKey = upper(payload?.orderKey);
+      const requestedKey = upper(payload?.orderKey);
       const lineIdx = Number(payload?.lineIdx);
       const destination = upper(payload?.destination);
       const wanted = Math.floor(Number(payload?.qty));
 
-      if (!orderKey) return { ok: false, error: 'Missing order key.' };
+      if (!requestedKey) return { ok: false, error: 'Missing order key.' };
       if (!Number.isInteger(lineIdx) || lineIdx < 0) return { ok: false, error: 'Missing line index.' };
       if (!destination) return { ok: false, error: 'Pick a destination first.' };
       if (isStagingDestination(destination)) {
@@ -333,13 +365,14 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
       }
       if (!Number.isInteger(wanted) || wanted <= 0) return { ok: false, error: 'Quantity must be a whole number above zero.' };
 
-      const { order, archived } = findOrder(orderKey);
-      if (!order) return { ok: false, error: `Order ${orderKey} not found.` };
+      const { order, archived } = findOrder(requestedKey);
+      if (!order) return { ok: false, error: `Order ${requestedKey} not found.` };
+      const orderKey = orderKeyOf(order);
       const line = (Array.isArray(order.lineItems) ? order.lineItems : [])[lineIdx];
       if (!line) return { ok: false, error: `Line ${lineIdx} not found on ${orderKey}.` };
 
       const items = readItems();
-      const ledger = readOrderAssignments();
+      const { ledger } = readLedgerFor([order]);
       const itemsByRef = indexItemsByReference(items);
 
       // Same matcher the view uses, so "2 of 4 assigned" and what this moves
@@ -451,18 +484,20 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
   // destroying stock.
   ipcMain.handle('order-assignment:unassign', (_evt, payload = {}) => {
     try {
-      const orderKey = upper(payload?.orderKey);
+      const requestedKey = upper(payload?.orderKey);
       const lineIdx = Number(payload?.lineIdx);
       const destination = upper(payload?.destination);
-      if (!orderKey || !Number.isInteger(lineIdx) || !destination) {
+      if (!requestedKey || !Number.isInteger(lineIdx) || !destination) {
         return { ok: false, error: 'Missing order, line or destination.' };
       }
 
-      const { order } = findOrder(orderKey);
-      if (!order) return { ok: false, error: `Order ${orderKey} not found.` };
+      const { order } = findOrder(requestedKey);
+      if (!order) return { ok: false, error: `Order ${requestedKey} not found.` };
+      const orderKey = orderKeyOf(order);
 
       const items = readItems();
-      const ledger = readOrderAssignments();
+      const { ledger, moved } = readLedgerFor([order]);
+      let ledgerDirty = moved > 0;
       const itemsByRef = indexItemsByReference(items);
       const { perLine } = linkOrderItems(order, candidateItemsFor(order, itemsByRef));
       const matched = (perLine[lineIdx] || []).filter((it) => upper(it.allocated_to) === destination);
@@ -494,9 +529,10 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
               .reduce((sum, a) => sum + (Number(a.qty) || 0), 0);
           }
           ledgerLine.assignments = kept;
-          writeOrderAssignments(ledger);
+          ledgerDirty = true;
         }
       }
+      if (ledgerDirty) writeOrderAssignments(ledger);
 
       if (!returned) return { ok: false, error: `Nothing assigned to ${destination} on this line.` };
       // So the renderer can drop these uids from its "touched this session" set
@@ -568,18 +604,24 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
       // item with no stamp was only ever matched by the read-side fallback
       // (reference + code), which recomputes straight from allocated_to on
       // every read — moving it is enough, there's no ledger entry to trim.
-      const orderKey = upper(item.order_key);
+      // The stamp holds whatever key the order had when the row was created,
+      // which is the OLD one for anything assigned before the invoice number
+      // landed — so resolve it back to an order before touching the ledger.
+      const stampedKey = upper(item.order_key);
       const lineIdx = Number(item.order_line_idx);
-      if (wasAllocated && orderKey && Number.isInteger(lineIdx)) {
-        const ledger = readOrderAssignments();
+      if (wasAllocated && stampedKey && Number.isInteger(lineIdx)) {
+        const { order } = findOrder(stampedKey);
+        const orderKey = order ? orderKeyOf(order) : stampedKey;
+        const { ledger, moved: movedKeys } = readLedgerFor(order ? [order] : []);
+        let touched = movedKeys > 0;
         const ledgerLine = ledger[orderKey]?.lines?.[String(lineIdx)];
         if (ledgerLine?.assignments?.length) {
-          let touched = false;
+          let trimmed = false;
           const nextAssignments = ledgerLine.assignments
             .map((a) => {
               const uids = Array.isArray(a?.itemUids) ? a.itemUids : a?.itemUid ? [a.itemUid] : [];
               if (!uids.includes(uid)) return a;
-              touched = true;
+              trimmed = true;
               const remaining = uids.filter((u) => u !== uid);
               if (!remaining.length) return null; // the whole record was this row
               // One assign call can span several rows (shrink-staged + spawn-new);
@@ -593,11 +635,12 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
               };
             })
             .filter(Boolean);
-          if (touched) {
+          if (trimmed) {
             ledgerLine.assignments = nextAssignments;
-            writeOrderAssignments(ledger);
+            touched = true;
           }
         }
+        if (touched) writeOrderAssignments(ledger);
       }
 
       return {
@@ -624,9 +667,10 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
       const cutoff = Date.parse(payload?.before);
       if (Number.isNaN(cutoff)) return { ok: false, error: 'Invalid cutoff date.' };
 
-      const ledger = readOrderAssignments();
-      let changed = 0;
-      [...(readOrders() || []), ...(readOrdersArchive() || [])].forEach((order) => {
+      const allOrders = [...(readOrders() || []), ...(readOrdersArchive() || [])];
+      const { ledger, moved } = readLedgerFor(allOrders);
+      let resolvedCount = 0;
+      allOrders.forEach((order) => {
         if (!order) return;
         const t = orderTimeMs(order);
         // An order with no usable date is left alone rather than swept up —
@@ -640,11 +684,11 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
         entry.resolvedReason = 'bulk-before-cutoff';
         entry.resolvedAt = new Date().toISOString();
         ledger[key] = entry;
-        changed += 1;
+        resolvedCount += 1;
       });
 
-      if (changed) writeOrderAssignments(ledger);
-      return { ok: true, resolved: changed };
+      if (resolvedCount || moved) writeOrderAssignments(ledger);
+      return { ok: true, resolved: resolvedCount };
     } catch (e) {
       console.error('[order-assignment:resolve-before]', e);
       return { ok: false, error: e?.message || 'Failed to bulk-resolve orders.' };

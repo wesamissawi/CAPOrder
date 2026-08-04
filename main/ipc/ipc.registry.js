@@ -130,6 +130,7 @@ function registerAllIpc(ipcMain, deps) {
     getSharedBubbleDataPath: deps.getSharedBubbleDataPath,
     writeSharedBubbleData: deps.writeSharedBubbleData,
     deleteSharedBubbleData: deps.deleteSharedBubbleData,
+    nextSalesOrderNumber: deps.nextSalesOrderNumber,
     readArchivedEntries: deps.readArchivedEntries,
     writeArchivedEntries: deps.writeArchivedEntries,
     getArchiveFile: deps.getArchiveFile,
@@ -144,6 +145,10 @@ function registerAllIpc(ipcMain, deps) {
     readOrders: deps.readOrders,
     readOrdersArchive: deps.readOrdersArchive,
     readOrderAssignments: deps.readOrderAssignments,
+    // Frozen copies of what each Sales Order actually printed.
+    appendPrintSnapshot: deps.appendPrintSnapshot,
+    findPrintSnapshots: deps.findPrintSnapshots,
+    getPrintsFile: deps.getPrintsFile,
   });
 
   registerSettingsIpc(ipcMain, {

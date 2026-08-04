@@ -15,6 +15,25 @@ function searchArchiveEntries(entries, query) {
       : true;
     if (!bubbleMatches && !term) continue;
 
+    // Printed copies of this order, newest first. `allocated_for` on the item
+    // below is the price at ARCHIVE time — if the line was repriced after the
+    // customer's copy went out, the two disagree, and the printed one is the
+    // one that settles an argument. Indexed by uid so each matched line can
+    // carry the price its own printed row showed.
+    const prints = Array.isArray(entry?.prints) ? entry.prints : [];
+    const printedByUid = new Map();
+    for (const snap of prints) {
+      for (const line of snap?.items || []) {
+        if (!line?.uid || printedByUid.has(line.uid)) continue;
+        printedByUid.set(line.uid, {
+          printed_price: line.price,
+          printed_quantity: line.quantity,
+          printed_at: snap?.printedAt || '',
+          printed_sales_order: snap?.salesOrderNumber || '',
+        });
+      }
+    }
+
     const items = Array.isArray(entry?.items) ? entry.items : [];
     const matchedItems = items
       .filter((it) => {
@@ -31,6 +50,7 @@ function searchArchiveEntries(entries, query) {
         allocated_for: it?.allocated_for,
         cost: it?.cost,
         reference_num: it?.reference_num,
+        ...(printedByUid.get(it?.uid) || {}),
       }));
 
     if (!matchedItems.length) continue;
@@ -38,7 +58,9 @@ function searchArchiveEntries(entries, query) {
       bubbleId: entry?.id || entry?.bubble?.id || '',
       bubbleName: bubbleName || 'Archived Bubble',
       archivedAt,
+      salesOrderNumber: entry?.meta?.salesOrderNumber || prints[0]?.salesOrderNumber || '',
       items: matchedItems,
+      prints,
     });
   }
 

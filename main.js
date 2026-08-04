@@ -20,6 +20,7 @@ const { searchArchiveEntries } = require('./main/domain/archive.domain');
 const { locatePart } = require('./main/domain/locate.domain');
 const { normalizeSharedBubblePayload } = require('./main/domain/sharedBubble.domain');
 const { createItemsService } = require('./main/services/items.service');
+const { createSalesOrderPrintsService } = require('./main/services/salesOrderPrints.service');
 const { createWatchersService } = require('./main/services/watchers.service');
 const { createVendorOrdersService } = require('./main/services/vendorOrders.service');
 const { createSageService } = require('./main/services/sage.service');
@@ -692,6 +693,18 @@ const itemsService = createItemsService({
   path,
 });
 const { readAllQueueItems, writeItems, readHistory } = itemsService;
+
+const salesOrderPrintsService = createSalesOrderPrintsService({
+  getQueueFile,
+  fs,
+  path,
+  randomUUID,
+});
+const {
+  appendPrintSnapshot,
+  findPrintSnapshots,
+  getPrintsFile,
+} = salesOrderPrintsService;
 
 function getOrdersFile() {
   const resolved = resolveBusinessPaths();
@@ -1820,6 +1833,89 @@ function writeJsonAtomic(filePath, jsonString) {
   }
 }
 
+// ---- sales order numbering ----
+// One sequence for the whole business: a printed Sales Order number has to be
+// unique no matter which machine printed it, so the counter lives in the shared
+// folder. Read-modify-write over SMB is not atomic, so the bump is guarded by
+// an exclusive-create lock file — two machines printing at the same moment must
+// never draw the same number.
+const SALES_ORDER_SEQ_FILE = 'sales_order_seq.json';
+const SALES_ORDER_SEQ_LOCK = 'sales_order_seq.lock';
+const SALES_ORDER_START = 1001;
+const SALES_ORDER_PREFIX = 'SO-';
+const SALES_ORDER_LOCK_STALE_MS = 15000;
+
+function getSalesOrderSeqFile() {
+  return path.join(getSharedDataDir(), SALES_ORDER_SEQ_FILE);
+}
+
+function formatSalesOrderNumber(n) {
+  return `${SALES_ORDER_PREFIX}${String(n).padStart(5, '0')}`;
+}
+
+function acquireSalesOrderSeqLock() {
+  const lockPath = path.join(getSharedDataDir(), SALES_ORDER_SEQ_LOCK);
+  ensureDir(path.dirname(lockPath));
+  for (let attempt = 0; attempt < 40; attempt++) {
+    try {
+      fs.writeFileSync(
+        lockPath,
+        JSON.stringify({ machineId: getMachineId(), at: Date.now() }),
+        { flag: 'wx' }
+      );
+      return lockPath;
+    } catch (e) {
+      if (e?.code !== 'EEXIST') throw e;
+      // A machine that died mid-bump must not block numbering forever.
+      try {
+        const st = fs.statSync(lockPath);
+        if (Date.now() - st.mtimeMs > SALES_ORDER_LOCK_STALE_MS) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch {}
+      sleepSync(50);
+    }
+  }
+  throw new Error('Sales order numbering is busy on another machine. Try again in a moment.');
+}
+
+function releaseSalesOrderSeqLock(lockPath) {
+  try { fs.unlinkSync(lockPath); } catch (e) { console.error('[sales-order-seq] unlock failed', e); }
+}
+
+// Throws rather than falling back to the start of the sequence: a counter file
+// that exists but can't be parsed would otherwise silently hand out numbers
+// that are already on printed paperwork.
+function readSalesOrderSeq() {
+  const f = getSalesOrderSeqFile();
+  if (!fs.existsSync(f)) return SALES_ORDER_START;
+  const parsed = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  const next = Number(parsed?.next);
+  if (!Number.isFinite(next) || next < SALES_ORDER_START) {
+    throw new Error(`Sales order counter at ${f} is unreadable (next=${parsed?.next}).`);
+  }
+  return Math.floor(next);
+}
+
+function nextSalesOrderNumber() {
+  const lockPath = acquireSalesOrderSeqLock();
+  try {
+    const next = readSalesOrderSeq();
+    writeJsonAtomic(
+      getSalesOrderSeqFile(),
+      JSON.stringify(
+        { next: next + 1, updatedAt: new Date().toISOString(), updatedBy: getMachineId() },
+        null,
+        2
+      )
+    );
+    return { ok: true, number: next, label: formatSalesOrderNumber(next) };
+  } finally {
+    releaseSalesOrderSeqLock(lockPath);
+  }
+}
+
 function getSharedBubbleDataPath() {
   const { sharedDir } = getSharedDirInfo();
   return path.join(sharedDir, SHARED_BUBBLE_FILE);
@@ -2230,6 +2326,9 @@ function registerAllIpc() {
     readItems,
     writeItems,
     readHistory,
+    appendPrintSnapshot,
+    findPrintSnapshots,
+    getPrintsFile,
     getDataFile,
     readConfig,
     writeConfig,
@@ -2319,6 +2418,7 @@ function registerAllIpc() {
     getSharedBubbleDataPath,
     writeSharedBubbleData,
     deleteSharedBubbleData,
+    nextSalesOrderNumber,
     readArchivedEntries,
     writeArchivedEntries,
     getArchiveFile,

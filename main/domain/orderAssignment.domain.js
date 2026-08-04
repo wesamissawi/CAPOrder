@@ -315,6 +315,107 @@ function candidateItemsFor(order, itemsByRef) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Ledger keys
+//
+// The ledger is filed under orderKeyOf(order) — `sage_reference || reference`.
+// That key is NOT stable. A World/Transbec order is created carrying only its
+// reference (OJ8059) and picks up sage_reference when the invoice number is
+// scraped at pickup (02KP4232). Every assignment recorded before that moment
+// stays filed under the OLD key, while the read path looks up the CURRENT one
+// and finds nothing.
+//
+// The symptom is silent and wrong in the worst direction: once the parts have
+// been archived out of the live store, the historical-credit fallback in
+// buildOrderAssignment is the only thing keeping the line "assigned", and it
+// never sees its entry — so a line that was handled weeks ago reads
+// "unassigned" again and invites someone to hand the part out twice.
+//
+// So reads resolve an entry across every reference the order answers to, and
+// normalizeLedgerKeys folds the strays onto the canonical key for good.
+function ledgerKeyCandidates(order) {
+  const keys = [];
+  const push = (v) => {
+    const k = upper(v);
+    if (k && !keys.includes(k)) keys.push(k);
+  };
+  push(orderKeyOf(order)); // canonical, always first
+  push(order?.sage_reference_synced);
+  push(order?.reference);
+  push(order?.source_invoice);
+  push(order?.__row);
+  return keys;
+}
+
+// Fold several entries for the same order into one. Only used when key drift
+// has split an order's history; a single entry is passed through untouched.
+function mergeLedgerEntries(entries) {
+  const list = (entries || []).filter(Boolean);
+  if (!list.length) return null;
+  if (list.length === 1) return list[0];
+
+  const out = { resolved: false, lines: {} };
+  const seen = new Set();
+  list.forEach((entry) => {
+    if (entry.resolved === true) {
+      out.resolved = true;
+      if (entry.resolvedReason && !out.resolvedReason) out.resolvedReason = entry.resolvedReason;
+      if (entry.resolvedAt && !out.resolvedAt) out.resolvedAt = entry.resolvedAt;
+    }
+    Object.entries(entry.lines || {}).forEach(([idx, line]) => {
+      if (!out.lines[idx]) out.lines[idx] = { resolved: false, assignments: [] };
+      const target = out.lines[idx];
+      if (line?.resolved === true) target.resolved = true;
+      (line?.assignments || []).forEach((a) => {
+        // The same assignment id under two keys is one event seen twice, not
+        // two assignments — crediting both would report "2 of 1 assigned".
+        if (a?.id) {
+          const dedupe = `${idx}:${a.id}`;
+          if (seen.has(dedupe)) return;
+          seen.add(dedupe);
+        }
+        target.assignments.push(a);
+      });
+    });
+  });
+  return out;
+}
+
+// The ledger entry for an order, gathered across every key it may be filed
+// under. Read path only — writes go to the canonical key.
+function resolveLedgerEntry(ledger, order) {
+  if (!ledger || !order) return null;
+  return mergeLedgerEntries(ledgerKeyCandidates(order).map((k) => ledger[k]));
+}
+
+// Move stray entries onto each order's canonical key. Returns a NEW ledger
+// object plus how many keys moved, so the caller can skip the write when
+// there's nothing to do. Self-healing: any read or write path can run it.
+function normalizeLedgerKeys(ledger, orders) {
+  if (!ledger || typeof ledger !== 'object') return { ledger: {}, moved: 0 };
+  const list = (orders || []).filter(Boolean);
+  // An alias that is some OTHER order's canonical key is that order's entry,
+  // not a stray copy of this one — never absorb it.
+  const canonicalKeys = new Set(list.map(orderKeyOf).filter(Boolean));
+
+  const next = { ...ledger };
+  let moved = 0;
+  list.forEach((order) => {
+    const canonical = orderKeyOf(order);
+    if (!canonical) return;
+    const aliases = ledgerKeyCandidates(order).filter(
+      (k) => k !== canonical && next[k] && !canonicalKeys.has(k)
+    );
+    if (!aliases.length) return;
+    next[canonical] = mergeLedgerEntries([next[canonical], ...aliases.map((k) => next[k])]);
+    aliases.forEach((k) => {
+      delete next[k];
+    });
+    moved += aliases.length;
+  });
+  return { ledger: next, moved };
+}
+
 const createOrderAssignmentDomain = () => ({
   orderKeyOf,
   lineKeyOf,
@@ -338,4 +439,8 @@ module.exports = {
   classifyDestination,
   isStagingDestination: (name) => STAGING_DESTINATIONS.has(upper(name)),
   STAGING_DESTINATIONS,
+  ledgerKeyCandidates,
+  mergeLedgerEntries,
+  resolveLedgerEntry,
+  normalizeLedgerKeys,
 };

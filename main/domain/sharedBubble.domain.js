@@ -20,6 +20,10 @@ function normalizeSharedBubblePayload(payload) {
   if (typeof payload?.paid === 'boolean') data.paid = payload.paid;
   if (typeof payload?.printedSignature === 'string') data.printedSignature = payload.printedSignature;
   if (typeof payload?.printedAt === 'string') data.printedAt = payload.printedAt;
+  // The Sales Order number printed on this bubble's paperwork. Shared so a
+  // reprint from any machine repeats the number the customer already has
+  // instead of drawing a second one off the counter.
+  if (typeof payload?.salesOrderNumber === 'string') data.salesOrderNumber = payload.salesOrderNumber;
   // Sage sales run — the invoice number shown on the sale card, when it was
   // sent, and the run-log row an edit here has to write through to.
   if (typeof payload?.sageInvoiceNumber === 'string') data.sageInvoiceNumber = payload.sageInvoiceNumber;
