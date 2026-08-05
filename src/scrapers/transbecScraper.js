@@ -94,7 +94,7 @@ async function getTransbecOrders(options = {}) {
       detailStored: false,
       pickedUp: false,
       hasInvoiceNum: false,
-      totalVerified: false,
+      totalVerified: true,
       enteredInSage: false,
       inStore: false,
       lineItems: [],

@@ -72,6 +72,7 @@ contextBridge.exposeInMainWorld('api', {
   getOrderArrivalMap: () => ipcRenderer.invoke('orders:get-arrival-map'),
   writeOrders: (orders) => ipcRenderer.invoke('orders:write', orders),
   triggerOrderSage: (refKey, kind) => ipcRenderer.invoke('sage:trigger-order', refKey, kind),
+  sendSageQueue: () => ipcRenderer.invoke('sage:send-queue'),
   releaseOrderSageLock: (refKey) => ipcRenderer.invoke('sage:release-order-lock', refKey),
   setSagePoActive: (enable) => ipcRenderer.invoke('sage:set-po-active', enable),
   setSageInvoiceActive: (enable) => ipcRenderer.invoke('sage:set-invoice-active', enable),

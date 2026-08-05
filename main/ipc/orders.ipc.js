@@ -205,16 +205,65 @@ const registerOrdersIpc = (ipcMain, deps) => {
         return { ok: false, error: 'This order is already entered in Sage.', order: target };
       }
       const now = Date.now();
-      const updated = patchOrderOnDisk(key, {
-        ...(kind === 'invoice' ? { sage_invoice_trigger: true } : { sage_trigger: true }),
-        sage_lock: { machineId: getMachineId?.() || null, stage: 'queued', kind, startedAt: now, heartbeatAt: now },
-      });
-      if (!updated) return { ok: false, error: 'Failed to lock the order.' };
-      scheduleSageProcessing();
+      // A purchase order goes into the WAITING ROOM (`sage_queued`), which the
+      // processor does not look at — only `sage_trigger` means "run this", and
+      // that is set later by sage:send-queue. Two fields rather than one gated
+      // processor because the queue has to be visible to every machine: it is
+      // ordinary replicated order data, so any machine can add to it and any
+      // machine can release it, while the machine holding the PO heartbeat
+      // lock does the actual typing.
+      //
+      // No sage_lock either: the lock blurs the card behind a spinner and
+      // refuses every edit, which is right for an order being entered right now
+      // and wrong for one that may sit in the queue for an hour. The processor
+      // stamps the real 'running' lock when it picks the order up.
+      //
+      // Invoice updates are unchanged — they still fire immediately and lock.
+      const updated = patchOrderOnDisk(
+        key,
+        kind === 'invoice'
+          ? {
+              sage_invoice_trigger: true,
+              sage_lock: { machineId: getMachineId?.() || null, stage: 'queued', kind, startedAt: now, heartbeatAt: now },
+            }
+          : { sage_queued: true, sage_lock: null }
+      );
+      if (!updated) return { ok: false, error: 'Failed to queue the order.' };
+      if (kind === 'invoice') scheduleSageProcessing();
       return { ok: true, order: updated };
     } catch (e) {
       console.error('[sage:trigger-order]', e);
       return { ok: false, error: e?.message || 'Failed to send the order to Sage.' };
+    }
+  });
+
+  // "Send to Sage": release the whole waiting room by promoting sage_queued to
+  // sage_trigger. Callable from ANY machine — the trigger is replicated order
+  // data, so whichever machine holds the PO lock sees it arrive and starts
+  // typing. scheduleSageProcessing() below only matters when this machine
+  // happens to be that machine; everywhere else the CRDT push does the work.
+  ipcMain.handle('sage:send-queue', () => {
+    try {
+      const list = readOrders() || [];
+      const targets = list.filter(
+        (o) => o?.sage_queued === true && o?.enteredInSage !== true && !isOrderSageLocked?.(o)
+      );
+      if (!targets.length) return { ok: true, sent: 0 };
+      let sent = 0;
+      targets.forEach((order) => {
+        // Same key normalizeOrderRef builds, and the one orderMatchesKey (via
+        // patchOrderOnDisk) resolves against.
+        const key = String(order?.sage_reference || order?.reference || order?.__row || '')
+          .trim()
+          .toUpperCase();
+        if (!key) return;
+        if (patchOrderOnDisk(key, { sage_trigger: true, sage_queued: false })) sent += 1;
+      });
+      scheduleSageProcessing();
+      return { ok: true, sent };
+    } catch (e) {
+      console.error('[sage:send-queue]', e);
+      return { ok: false, error: e?.message || 'Failed to send the Sage queue.' };
     }
   });
 
@@ -225,7 +274,11 @@ const registerOrdersIpc = (ipcMain, deps) => {
     try {
       const key = (refKey || '').toString().trim().toUpperCase();
       if (!key) return { ok: false, error: 'Missing order reference.' };
-      const updated = clearSageOrderLock(key, { sage_trigger: false, sage_invoice_trigger: false });
+      const updated = clearSageOrderLock(key, {
+        sage_trigger: false,
+        sage_queued: false,
+        sage_invoice_trigger: false,
+      });
       if (!updated) return { ok: false, error: 'Order not found.' };
       return { ok: true, order: updated };
     } catch (e) {

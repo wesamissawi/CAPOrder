@@ -86,6 +86,11 @@ function isOrderSageLocked(order) {
 // edits those by hand on the card, so they stay renderer-owned.
 const SAGE_OWNED_FIELDS = [
   "sage_trigger",
+  // The waiting room in front of sage_trigger. Owned here for the same reason
+  // the trigger is: it is only ever written by the dedicated Sage IPCs, so a
+  // renderer holding a copy from before the order was queued must not be able
+  // to un-queue it by saving an unrelated edit.
+  "sage_queued",
   "sage_invoice_trigger",
   "sage_lock",
   "journalEntry",

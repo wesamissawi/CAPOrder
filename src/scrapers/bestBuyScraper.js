@@ -31,7 +31,7 @@ function applyDefaults(order = {}) {
     detailStored: order.detailStored ?? true,
     pickedUp: order.pickedUp ?? false,
     hasInvoiceNum: order.hasInvoiceNum ?? true,
-    totalVerified: order.totalVerified ?? false,
+    totalVerified: order.totalVerified ?? true,
     enteredInSage: order.enteredInSage ?? false,
     inStore: order.inStore ?? false,
     ...(invoice ? { source_invoice: invoice } : {}),

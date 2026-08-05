@@ -53,25 +53,33 @@ function parseTransbecDate(txt) {
     nov: "11",
     dec: "12",
   };
-  if (!txt) return { iso: null, sageDate: "" };
+  if (!txt) return { iso: null, sageDate: "", raw: "" };
   const clean = String(txt).trim();
   const match = clean.match(
     /([A-Za-z\u00c0-\u017f]{3,})\.?\s*(\d{1,2}),\s*(\d{4})(?:\s*at\s*(\d{1,2}):(\d{2})\s*(AM|PM|EST|EDT)?)?/i
   );
-  if (!match) return { iso: null, sageDate: "" };
+  if (!match) return { iso: null, sageDate: "", raw: "" };
   const normalized = normalizeMonthToken(match[1]);
   const monthKey = monthMap[normalized.slice(0, 4)] ? normalized.slice(0, 4) : normalized.slice(0, 3);
   const month = monthMap[monthKey] || "";
   const day = match[2].padStart(2, "0");
   const year = match[3];
-  let hour = match[4] ? parseInt(match[4], 10) : 0;
-  const minute = match[5] ? parseInt(match[5], 10) : 0;
+  const hasTime = Boolean(match[4]);
+  let hour = hasTime ? parseInt(match[4], 10) : 0;
+  const minute = hasTime ? parseInt(match[5], 10) : 0;
   const ampm = (match[6] || "").toUpperCase();
   if (ampm === "PM" && hour < 12) hour += 12;
   if (ampm === "AM" && hour === 12) hour = 0;
-  if (!month) return { iso: null, sageDate: "" };
+  if (!month) return { iso: null, sageDate: "", raw: "" };
   const iso = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), hour, minute, 0)).toISOString();
-  return { iso, sageDate: `${day}${month}${year.slice(-2)}` };
+  // Standardized display string, matching the "MM/DD/YYYY HH:MM" convention
+  // the other vendors' raw date cells already come in (e.g. BestBuy) \u2014 the
+  // source text here is French ("ao\u00fbt 5, 2026 at 10:58 EST") and shouldn't
+  // be shown to the user as-is.
+  const raw = hasTime
+    ? `${month}/${day}/${year} ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`
+    : `${month}/${day}/${year}`;
+  return { iso, sageDate: `${day}${month}${year.slice(-2)}`, raw };
 }
 
 async function ensureEnglish(page) {
@@ -376,12 +384,13 @@ async function scrapeOrdersList(page, maxPages = 1) {
     const { orders: pageOrders } = await parseOrdersFromPage(page);
 
     for (const o of pageOrders) {
-      const { iso, sageDate } = o.dateTimestamp
+      const { iso, sageDate, raw } = o.dateTimestamp
         ? parseTransbecDate(o.dateTimestamp)
         : parseTransbecDate(o.orderDateRaw);
       orders.push({
         ...o,
         orderDate: iso,
+        orderDateRaw: raw || o.orderDateRaw,
         sageDate,
         source: "transbec",
       });

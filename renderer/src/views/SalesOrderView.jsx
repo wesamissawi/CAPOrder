@@ -115,6 +115,14 @@ const BANDS = [
   },
 ];
 
+const BAND_LABEL_BY_KEY = Object.fromEntries(BANDS.map((b) => [b.key, b.label]));
+
+// How long a card sits in its OLD section after Counter/Delivered changes
+// before it actually reflows — long enough to keep editing the same order
+// (prices, notes, items) without it vanishing out from under you, short
+// enough that it still lands where it belongs on its own.
+const BAND_HOLD_MS = 10_000;
+
 // An order's age in ms. `meta.createdAt` is the real answer, but it's only
 // stamped on bubbles that went through addBubble — plenty are minted
 // automatically the moment an item names a bubble that doesn't exist yet. The
@@ -214,6 +222,9 @@ function OrderCard({
   band,
   ageMs = null,
   isPool = false,
+  pendingMove = null,
+  onMoveNow,
+  onExtendHold,
 }) {
   // The CashPad / Sage controls are the rarely-used half of the card — they
   // stay folded away so the row you see by default is just the three decisions
@@ -329,6 +340,31 @@ function OrderCard({
           {everPrinted ? "Print Again" : "Print"}
         </button>
       </div>
+      )}
+
+      {/* Counter/Delivered saved instantly, but the card holds its OLD section
+          for a few seconds so ticking the box mid-edit doesn't yank the card
+          away — it lands in its new section on its own once the hold expires,
+          or right away via "Move now". */}
+      {pendingMove && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-800">
+          <span>
+            Moving to {BAND_LABEL_BY_KEY[pendingMove.targetBandKey] || pendingMove.targetBandKey} in{" "}
+            {pendingMove.secondsLeft}s…
+          </span>
+          <button
+            onClick={() => onMoveNow(bubble.id)}
+            className="rounded border border-amber-400 bg-white px-1.5 py-0.5 font-semibold text-amber-800 hover:bg-amber-100"
+          >
+            Move now
+          </button>
+          <button
+            onClick={() => onExtendHold(bubble.id)}
+            className="rounded border border-amber-400 bg-white px-1.5 py-0.5 font-semibold text-amber-800 hover:bg-amber-100"
+          >
+            Keep here +10s
+          </button>
+        </div>
       )}
 
       {!isPool && (
@@ -526,12 +562,76 @@ export default function SalesOrderView({
     return () => clearInterval(t);
   }, []);
 
+  // Orders whose Counter/Delivered flag just changed but are still holding
+  // their OLD section — keyed by bubble id, cleared (and the card released to
+  // reflow) once the hold expires, "Move now" is clicked, or the card is
+  // collapsed. The flag itself is already saved by the time an entry exists
+  // here; this only delays where the card is drawn.
+  const [pendingMoves, setPendingMoves] = useState({});
+  const pendingTimeouts = useRef({});
+  // A second, faster clock than `nowMs` — only ticking while there's
+  // something to count down, so the countdown pill can update every half
+  // second without putting the whole board on a 500ms re-render forever.
+  const [pendingTickMs, setPendingTickMs] = useState(() => Date.now());
+  const hasPendingMoves = Object.keys(pendingMoves).length > 0;
+  useEffect(() => {
+    if (!hasPendingMoves) return;
+    const t = setInterval(() => setPendingTickMs(Date.now()), 500);
+    return () => clearInterval(t);
+  }, [hasPendingMoves]);
+
+  const finalizePendingMove = useCallback((id) => {
+    clearTimeout(pendingTimeouts.current[id]);
+    delete pendingTimeouts.current[id];
+    setPendingMoves((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }, []);
+
+  const schedulePendingMove = useCallback(
+    (id, frozenBandKey, targetBandKey, ms = BAND_HOLD_MS) => {
+      clearTimeout(pendingTimeouts.current[id]);
+      pendingTimeouts.current[id] = setTimeout(() => finalizePendingMove(id), ms);
+      setPendingMoves((prev) => ({
+        ...prev,
+        [id]: { frozenBandKey, targetBandKey, moveAt: Date.now() + ms },
+      }));
+    },
+    [finalizePendingMove]
+  );
+
+  const extendPendingMove = useCallback((id) => {
+    clearTimeout(pendingTimeouts.current[id]);
+    pendingTimeouts.current[id] = setTimeout(() => finalizePendingMove(id), BAND_HOLD_MS);
+    setPendingMoves((prev) => {
+      if (!(id in prev)) return prev;
+      return { ...prev, [id]: { ...prev[id], moveAt: Date.now() + BAND_HOLD_MS } };
+    });
+  }, [finalizePendingMove]);
+
+  // Timers outlive the render that scheduled them — anything still pending
+  // when the view unmounts (navigated away, etc.) needs its timeout cleared
+  // too, or it fires into a component that's gone.
+  useEffect(() => {
+    const timeouts = pendingTimeouts.current;
+    return () => {
+      Object.values(timeouts).forEach(clearTimeout);
+    };
+  }, []);
+
   // App.jsx hands several of these callbacks down as inline arrows, so their
   // identity changes on every App render. Reading them through a ref lets the
   // wrappers below stay stable for the life of the view, which is what the
   // memoized cards compare against — without it a background items push would
   // re-render every card even though nothing about them changed.
   const handlersRef = useRef(null);
+  // Read by stableSetFlag to check whether a flag change actually crosses a
+  // band boundary — kept as a ref (not a useCallback dep) so `orders`
+  // recomputing on every clock tick doesn't churn every stable callback below.
+  const ordersRef = useRef([]);
   handlersRef.current = {
     onUpdateBubbleNotes,
     onBubbleNotesBlur,
@@ -548,8 +648,28 @@ export default function SalesOrderView({
   const stableRequestPrint = useCallback((bubble) => handlersRef.current.onRequestPrint(bubble), []);
   // `flag` is either a key ("paid") or a whole patch ({ counter, delivered }) —
   // App.jsx accepts both, and the patch form is what keeps Counter/Delivered
-  // from clobbering each other.
-  const stableSetFlag = useCallback((id, flag, value) => handlersRef.current.onSetBubbleFlag(id, flag, value), []);
+  // from clobbering each other. Only a patch touching counter/delivered can
+  // move an order between bands, so that's the only case checked against
+  // `ordersRef` for a hold; anything else just passes through.
+  const stableSetFlag = useCallback(
+    (id, flag, value) => {
+      if (flag && typeof flag === "object" && ("counter" in flag || "delivered" in flag)) {
+        const entry = ordersRef.current.find((o) => o.bubble.id === id);
+        if (entry) {
+          const targetBandKey = bandKeyFor(entry.ageMs, { ...entry.meta, ...flag });
+          if (targetBandKey !== entry.bandKey) {
+            schedulePendingMove(id, entry.bandKey, targetBandKey);
+          } else {
+            // Toggled back to where it already sits (e.g. re-checked before the
+            // hold ran out) — nothing left to hold for.
+            finalizePendingMove(id);
+          }
+        }
+      }
+      handlersRef.current.onSetBubbleFlag(id, flag, value);
+    },
+    [schedulePendingMove, finalizePendingMove]
+  );
   const stableSendToCashPad = useCallback((id) => handlersRef.current.onSendToCashPad(id), []);
   const stableSendToReturns = useCallback((id) => handlersRef.current.onSendToReturns(id), []);
   const stableArchiveOrder = useCallback((id, message) => handlersRef.current.onArchiveOrder(id, message), []);
@@ -604,13 +724,37 @@ export default function SalesOrderView({
       )
       .map((o) => {
         const ageMs = resolveOrderAgeMs(o.meta, o.items, nowMs);
-        return { ...o, ageMs, bandKey: bandKeyFor(ageMs, o.meta) };
+        const trueBandKey = bandKeyFor(ageMs, o.meta);
+        // A hold in progress keeps the card in its OLD section (`bandKey`
+        // below) even though `trueBandKey` — what onSetFlag already saved —
+        // has moved on.
+        const pending = pendingMoves[o.bubble.id];
+        const bandKey = pending ? pending.frozenBandKey : trueBandKey;
+        const pendingMove = pending
+          ? {
+              targetBandKey: pending.targetBandKey,
+              secondsLeft: Math.max(0, Math.ceil((pending.moveAt - pendingTickMs) / 1000)),
+            }
+          : null;
+        return { ...o, ageMs, bandKey, pendingMove };
       })
       // Oldest first inside each band, so the order closest to slipping into the
       // next band sits at the top of its section. Unknown ages (no createdAt, no
       // parts) sort last within Regular rather than jumping the queue.
       .sort((a, b) => (b.ageMs ?? -1) - (a.ageMs ?? -1));
-  }, [bubbles, itemsByBubble, bubbleAccountingPathByName, bubbleMeta, defaultBubbleNames, extraLinesByBubble, deferredSearch, nowMs]);
+  }, [
+    bubbles,
+    itemsByBubble,
+    bubbleAccountingPathByName,
+    bubbleMeta,
+    defaultBubbleNames,
+    extraLinesByBubble,
+    deferredSearch,
+    nowMs,
+    pendingMoves,
+    pendingTickMs,
+  ]);
+  ordersRef.current = orders;
 
   // Urgent → Regular → Stale, empty bands dropped so the page isn't mostly
   // headers on a quiet day.
@@ -647,13 +791,22 @@ export default function SalesOrderView({
   // CashPad` already scans for.
   const cashPadItems = itemsByBubble.get("CASHPAD") || EMPTY_ARRAY;
 
-  const toggleOrder = useCallback((id) =>
-    setCollapsedOrderIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    }), []);
+  const toggleOrder = useCallback(
+    (id) =>
+      setCollapsedOrderIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+        } else {
+          next.add(id);
+          // Collapsing reads as "I'm done with this one" — let a held move
+          // land immediately instead of waiting out the rest of its timer.
+          finalizePendingMove(id);
+        }
+        return next;
+      }),
+    [finalizePendingMove]
+  );
 
   const toggleCashPad = useCallback(() => setCashPadCollapsed((v) => !v), []);
 
@@ -742,7 +895,7 @@ export default function SalesOrderView({
               <span className="text-[11px] font-semibold opacity-70">{band.hint}</span>
             </div>
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-              {rows.map(({ bubble, items, accountingPath, meta, extraLines, ageMs }) => (
+              {rows.map(({ bubble, items, accountingPath, meta, extraLines, ageMs, pendingMove }) => (
                 <MemoOrderCard
                   key={bubble.id}
                   bubble={bubble}
@@ -754,6 +907,9 @@ export default function SalesOrderView({
                   historyByUid={historyByUid}
                   band={band}
                   ageMs={ageMs}
+                  pendingMove={pendingMove}
+                  onMoveNow={finalizePendingMove}
+                  onExtendHold={extendPendingMove}
                   expanded={!collapsedOrderIds.has(bubble.id)}
                   onToggle={toggleOrder}
                   onUpdateBubbleNotes={stableUpdateBubbleNotes}

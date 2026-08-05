@@ -45,6 +45,7 @@ const fallbackApi = {
   getOrderArrivalMap: warnAsync("getOrderArrivalMap", async () => ({ ok: true, map: {} })),
   writeOrders: warnAsync("writeOrders"),
   triggerOrderSage: warnAsync("triggerOrderSage"),
+  sendSageQueue: warnAsync("sendSageQueue"),
   releaseOrderSageLock: warnAsync("releaseOrderSageLock"),
   setSagePoActive: warnAsync("setSagePoActive"),
   setSageInvoiceActive: warnAsync("setSageInvoiceActive"),

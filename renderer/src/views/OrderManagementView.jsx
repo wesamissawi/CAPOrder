@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import Card from "../components/Card";
+import { DescriptionWithTooltip } from "../components/orderCardKit";
 import { isOrderSageLocked, sageLockLabel } from "../utils/sageLock";
 import { getOrderQtyDiscrepancy } from "../utils/qtyDiscrepancy";
 
@@ -24,6 +25,23 @@ function DismissibleMessage({ tone, onDismiss, children }) {
     </div>
   );
 }
+
+// Only meaningful in the unfiltered "all" view — buckets orders by how far
+// along the arrival workflow they are so the most urgent ones (nothing done
+// yet) surface at the top. Checking "Arrived" always force-sets "Picked Up"
+// too (see handleOrderCheckboxChange in App.jsx), so these three buckets are
+// mutually exclusive and exhaustive.
+function orderPickupSection(order) {
+  if (!order?.pickedUp) return "not-picked";
+  if (!order?.inStore) return "not-arrived";
+  return "rest";
+}
+
+const PICKUP_SECTION_LABELS = {
+  "not-picked": "Not Picked Up",
+  "not-arrived": "Picked Up, Not Arrived",
+  rest: "Arrived",
+};
 
 // sageDate is DDMMYY (e.g. "170726").
 function parseSageDate(ddmmyy) {
@@ -81,6 +99,10 @@ export default function OrderManagementView({
   handleOrderCheckboxChange,
   handleOrderFieldChange,
   onMarkForSage,
+  sageQueuedCount = 0,
+  sagePendingCount = 0,
+  onSendSageQueue,
+  sageQueueSending = false,
   onReleaseSageLock,
   onBubblifyOrder,
   onMarkComplete,
@@ -534,6 +556,30 @@ export default function OrderManagementView({
               >
                 {ordersSaving ? "Saving..." : ordersDirty ? "Save Changes" : "Saved"}
               </button>
+              {/* The queue's one and only exit. "Add to Sage Queue" on a card
+                  just parks the order; nothing is typed into Sage until this is
+                  pressed. Pressable from ANY machine — releasing the queue is a
+                  data change, and whichever machine is running Sage picks the
+                  work up from there. The count is everything still owed to
+                  Sage, so it keeps ticking down while the run is in progress. */}
+              {onSendSageQueue && (
+                <button
+                  onClick={onSendSageQueue}
+                  disabled={sageQueuedCount === 0 || sageQueueSending}
+                  className="px-4 py-2 rounded-xl bg-violet-600 text-white text-sm font-semibold disabled:opacity-50"
+                  title={
+                    sageQueuedCount === 0
+                      ? sagePendingCount > 0
+                        ? `${sagePendingCount} order${sagePendingCount === 1 ? "" : "s"} already on the way to Sage`
+                        : "Nothing is queued for Sage"
+                      : `Release ${sageQueuedCount} queued order${sageQueuedCount === 1 ? "" : "s"} — the machine running Sage enters them, oldest first`
+                  }
+                >
+                  {sageQueueSending
+                    ? "Sending..."
+                    : `Send to Sage${sagePendingCount ? ` (${sagePendingCount})` : ""}`}
+                </button>
+              )}
               <button
                 onClick={loadOrders}
                 disabled={ordersLoading}
@@ -632,6 +678,10 @@ export default function OrderManagementView({
             {filteredOrders.map((order, idx) => {
               const key = `${order.source || "unknown"}-${order.reference || order.__row || "order"}-${order.warehouse || "warehouse"}-${idx}`;
               const refKey = order.reference || order.__row || key;
+              // Two distinct states: waiting in the queue (removable), versus
+              // already released and on its way into Sage (not removable here —
+              // that is the lock overlay's Release button).
+              const isSageQueued = Boolean(order.sage_queued);
               const isSageTriggered = Boolean(order.sage_trigger);
               const sageLocked = isOrderSageLocked(order);
               const invoiceEntry = getInvoiceEntry(refKey, order.source_invoice || "");
@@ -667,11 +717,17 @@ export default function OrderManagementView({
                       : "border-amber-500 bg-amber-50 ring-2 ring-amber-300"
                   }`
                 : "border-indigo-100";
+              const showSectionHeader =
+                ordersPickupFilter === "all" &&
+                (idx === 0 || orderPickupSection(filteredOrders[idx - 1]) !== orderPickupSection(order));
               return (
-                <Card
-                  key={key}
-                  className={`${cardTone} ${sageLocked ? "sage-locked-card" : ""}`}
-                >
+                <React.Fragment key={key}>
+                  {showSectionHeader && (
+                    <div className="col-span-full mt-4 first:mt-0 flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+                      {PICKUP_SECTION_LABELS[orderPickupSection(order)]}
+                    </div>
+                  )}
+                  <Card className={`${cardTone} ${sageLocked ? "sage-locked-card" : ""}`}>
                   {sageLocked && (
                     <div className="sage-lock-overlay">
                       <div className="sage-lock-spinner" />
@@ -757,17 +813,36 @@ export default function OrderManagementView({
                           </button>
                         )}
                         {!order.enteredInSage && !hasQtyDiscrepancy && (
+                          // Doubles as the way back out: while an order is only
+                          // queued it carries no Sage lock, so the Release
+                          // button inside the lock overlay isn't there to
+                          // un-queue it.
                           <button
                             type="button"
-                            onClick={() => onMarkForSage(refKey)}
+                            onClick={() =>
+                              isSageQueued ? onReleaseSageLock?.(order) : onMarkForSage(refKey)
+                            }
                             disabled={isSageTriggered}
                             className={`px-3 py-1 rounded-full text-xs font-semibold border ${
                               isSageTriggered
                                 ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                : isSageQueued
+                                ? "bg-violet-50 text-violet-700 border-violet-300 hover:bg-violet-100"
                                 : "bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50"
                             }`}
+                            title={
+                              isSageTriggered
+                                ? "Released — waiting for the machine running Sage to enter it"
+                                : isSageQueued
+                                ? 'Waiting in the Sage queue — press "Send to Sage" at the top to release it, or click here to take it back out'
+                                : "Add this order to the Sage queue. Nothing is entered in Sage until the queue is sent."
+                            }
                           >
-                            {isSageTriggered ? "Ready for Sage" : "Send to Sage"}
+                            {isSageTriggered
+                              ? "Sending to Sage"
+                              : isSageQueued
+                              ? "In Sage Queue — remove"
+                              : "Add to Sage Queue"}
                           </button>
                         )}
                       </div>
@@ -1237,6 +1312,7 @@ export default function OrderManagementView({
                               item.partLineCode || item.partNumber
                                 ? `${item.partLineCode || ""} ${item.partNumber || ""}`.trim()
                                 : "Item";
+                            const desc = (item.partDescription || "").trim();
                             const cost = item.costPrice ?? item.extended ?? "";
                             const rowTone = liIdx % 2 === 0 ? "bg-blue-50" : "bg-white";
                             const feeKey = `${refKey}-li-${liIdx}`;
@@ -1349,10 +1425,10 @@ export default function OrderManagementView({
                                 className={`text-xs text-slate-700 flex items-center justify-between gap-3 px-3 py-1.5 rounded-lg ${rowTone}`}
                               >
                                 <div className="flex-1 min-w-0 flex items-center gap-2">
-                                  <span className="truncate">
+                                  <span className="shrink-0">
                                     {part} <span className="text-slate-400">x</span> {qty}
                                   </span>
-                                  <div className="flex items-center gap-2">
+                                  <div className="flex items-center gap-2 shrink-0">
                                     {showFeeInput ? (
                                       <input
                                         type="text"
@@ -1398,6 +1474,11 @@ export default function OrderManagementView({
                                       </button>
                                     )}
                                   </div>
+                                  {desc && (
+                                    <div className="min-w-0 flex-1">
+                                      <DescriptionWithTooltip text={desc} />
+                                    </div>
+                                  )}
                                 </div>
                                 <span className="font-semibold text-slate-800 tabular-nums">{cost}</span>
                               </div>
@@ -1488,7 +1569,8 @@ export default function OrderManagementView({
                         Invoice differs from last Sage update
                       </div>
                     )}
-                </Card>
+                  </Card>
+                </React.Fragment>
               );
             })}
             {!ordersLoading && filteredOrders.length === 0 && !ordersError && (

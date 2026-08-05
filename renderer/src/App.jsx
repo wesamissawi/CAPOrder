@@ -390,6 +390,10 @@ export default function App() {
   const [sageInvoiceEnabled, setSageInvoiceEnabled] = useState(false);
   const [sageLockInfo, setSageLockInfo] = useState(null); // { lock, ownMachineId }
   const [sageReadyOrders, setSageReadyOrders] = useState([]);
+  // True only while the "Send N to Sage" click is in flight. The AHK run itself
+  // outlives it — progress after that shows on the cards, which blur one by one
+  // as the queue works through them.
+  const [sageQueueSending, setSageQueueSending] = useState(false);
   const [sageInvoiceReadyOrders, setSageInvoiceReadyOrders] = useState([]);
   const [payments, setPayments] = useState([]);
   const [paymentsLoading, setPaymentsLoading] = useState(false);
@@ -2846,12 +2850,16 @@ export default function App() {
   async function handleReleaseSageLock(order) {
     const refKey = order?.reference || order?.__row;
     if (!refKey) return;
-    const proceed = api?.confirm
-      ? await api.confirm(
-          `Release ${order.reference || refKey} from Sage?`,
-          "Only do this if Sage is NOT currently processing this order — check Sage first. The order will go back to unsent; if it was already entered, mark it entered by hand instead of sending it again."
-        )
-      : true;
+    // An order that is merely queued has no lock and nothing running against
+    // it — taking it back out is free and reversible, so it does not deserve
+    // the "check Sage first" warning that a live lock does.
+    const proceed =
+      api?.confirm && isOrderSageLocked(order)
+        ? await api.confirm(
+            `Release ${order.reference || refKey} from Sage?`,
+            "Only do this if Sage is NOT currently processing this order — check Sage first. The order will go back to unsent; if it was already entered, mark it entered by hand instead of sending it again."
+          )
+        : true;
     if (!proceed) return;
     try {
       const res = await api?.releaseOrderSageLock?.(refKey);
@@ -2864,7 +2872,9 @@ export default function App() {
   function handleOrderCheckboxChange(referenceKey, field, checked) {
     if (field === "inStore") {
       // Marking as arrived should also mark as picked up.
-      updateOrderByKey(referenceKey, { inStore: checked, pickedUp: checked || false });
+      updateOrderByKeyAndSave(referenceKey, { inStore: checked, pickedUp: checked || false });
+    } else if (field === "pickedUp") {
+      updateOrderByKeyAndSave(referenceKey, { [field]: checked });
     } else if (field === "totalVerified" && checked) {
       updateOrderByKey(referenceKey, { [field]: checked, valueCheckAlert: false });
     } else {
@@ -2885,8 +2895,43 @@ export default function App() {
       };
     });
   }
+  // Adds the order to the Sage purchase queue. This only sets `sage_queued`,
+  // which no processor looks at — nothing reaches Sage until "Send to Sage"
+  // promotes it to a real trigger.
   function handleOrderSageTrigger(referenceKey) {
     sendOrderToSage(referenceKey, "purchase");
+  }
+
+  // Release the whole queue. This machine does not have to be the Sage machine:
+  // the promotion writes replicated order data, so whichever machine holds the
+  // Sage PO lock sees the triggers arrive and does the typing. Each order it
+  // finishes pushes back here, so the counter empties on its own.
+  async function handleSendSageQueue() {
+    if (sageQueueSending) return;
+    setOrdersError(null);
+    if (!(await flushPendingOrderEdits())) {
+      setOrdersError(FLUSH_FAILED_MSG);
+      return;
+    }
+    setSageQueueSending(true);
+    try {
+      const res = await api?.sendSageQueue?.();
+      if (!res?.ok) {
+        setOrdersError(res?.error || "Failed to send the Sage queue.");
+      } else if (res.sent > 0 && !sagePoEnabled && !sageLockInfo?.lock?.machineId) {
+        // Queued and released, but nobody is holding the Sage PO lock, so no
+        // machine will pick them up yet. Say so rather than let the orders sit
+        // looking sent.
+        setOrdersError(
+          `${res.sent} order${res.sent === 1 ? "" : "s"} released to Sage, but no machine is running Sage right now — they will be entered as soon as one turns "Run Sage" on.`
+        );
+      }
+    } catch (e) {
+      setOrdersError(e?.message || "Failed to send the Sage queue.");
+    } finally {
+      setSageQueueSending(false);
+    }
+    await loadOrders();
   }
 
   function handleOpenQtyConfirm(refKey) {
@@ -5626,8 +5671,26 @@ export default function App() {
   }, [currentView, ordersInitialized, ordersLoading]);
 
   useEffect(() => {
-    setSageReadyOrders((orders || []).filter((o) => o && o.sage_trigger));
+    // Same test processSageOrdersQueue uses to pick its targets — these are the
+    // orders actually on their way into Sage, not the ones still waiting to be
+    // released. An already-entered order carrying a stale trigger is not work.
+    setSageReadyOrders((orders || []).filter((o) => o && o.sage_trigger && !o.enteredInSage));
   }, [orders]);
+
+  // The waiting room: added to the queue, not yet released by "Send to Sage".
+  const sageQueuedCount = useMemo(
+    () => (orders || []).filter((o) => o && o.sage_queued && !o.enteredInSage).length,
+    [orders]
+  );
+  // Everything still owed to Sage, whether it is waiting or already running.
+  // This is the number on the button, so it climbs as orders are queued and
+  // falls one at a time as Sage finishes them.
+  const sagePendingCount = useMemo(
+    () =>
+      (orders || []).filter((o) => o && (o.sage_queued || o.sage_trigger) && !o.enteredInSage)
+        .length,
+    [orders]
+  );
 
   const todayRangeMs = () => {
     const now = new Date();
@@ -5680,14 +5743,30 @@ export default function App() {
       : pickupFiltered;
 
     // sort by orderDate descending (newest first), fallback to orderDateRaw string
-    const sorted = [...(todayFiltered || [])].sort((a, b) => {
-      const da = new Date(a?.orderDate || a?.orderDateRaw || 0).getTime();
-      const db = new Date(b?.orderDate || b?.orderDateRaw || 0).getTime();
-      if (Number.isNaN(da) && Number.isNaN(db)) return 0;
-      if (Number.isNaN(da)) return 1;
-      if (Number.isNaN(db)) return -1;
-      return db - da;
-    });
+    const byDateDesc = (list) =>
+      [...(list || [])].sort((a, b) => {
+        const da = new Date(a?.orderDate || a?.orderDateRaw || 0).getTime();
+        const db = new Date(b?.orderDate || b?.orderDateRaw || 0).getTime();
+        if (Number.isNaN(da) && Number.isNaN(db)) return 0;
+        if (Number.isNaN(da)) return 1;
+        if (Number.isNaN(db)) return -1;
+        return db - da;
+      });
+
+    // On the unfiltered "all" view, bucket into three sections by arrival
+    // progress (see orderPickupSection in OrderManagementView.jsx) so the
+    // most urgent orders — nothing done yet — surface at the top, each
+    // bucket still newest-first internally. Any other pickup filter keeps a
+    // single flat sort, since the buckets would collapse to one group anyway.
+    let sorted;
+    if (ordersPickupFilter === "all") {
+      const notPickedUp = (todayFiltered || []).filter((o) => !o.pickedUp);
+      const pickedNotArrived = (todayFiltered || []).filter((o) => o.pickedUp && !o.inStore);
+      const rest = (todayFiltered || []).filter((o) => o.pickedUp && o.inStore);
+      sorted = [...byDateDesc(notPickedUp), ...byDateDesc(pickedNotArrived), ...byDateDesc(rest)];
+    } else {
+      sorted = byDateDesc(todayFiltered);
+    }
 
     // Badge counts for the filter buttons: scoped by search + Today (same as
     // the visible list) but NOT by which pickup filter is currently selected,
@@ -5918,6 +5997,10 @@ export default function App() {
             handleOrderCheckboxChange={handleOrderCheckboxChange}
             handleOrderFieldChange={handleOrderFieldChange}
             onMarkForSage={handleOrderSageTrigger}
+            sageQueuedCount={sageQueuedCount}
+            sagePendingCount={sagePendingCount}
+            onSendSageQueue={handleSendSageQueue}
+            sageQueueSending={sageQueueSending}
             onReleaseSageLock={handleReleaseSageLock}
             onBubblifyOrder={handleBubblifyOrder}
             onMarkComplete={handleMarkComplete}

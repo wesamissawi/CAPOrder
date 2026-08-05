@@ -22,6 +22,11 @@ const createSageService = (deps) => {
 
   const { runSagePurchase, runSageReconcile, runUpdateInvoice, runSageSalesInvoice } = createSageActions(deps);
 
+  // `sage_trigger` means "send this to Sage now" and nothing else — the waiting
+  // room is `sage_queued`, which this never looks at (see orders.ipc.js). So
+  // this stays fully automatic on purpose: whichever machine holds the PO
+  // heartbeat lock picks the work up the moment a trigger lands in its store,
+  // no matter which machine pressed the button.
   async function processSageOrdersQueue() {
     if (!getSagePoActive()) return;
     if (sageProcessing) {

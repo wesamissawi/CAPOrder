@@ -144,6 +144,10 @@ const createSageDomain = (deps) => {
         sage_reference_synced: o?.sage_reference || o?.reference || "",
         sage_total_synced: nextSageTotal,
         sage_trigger: false,
+        // Also clear the waiting room. An order can pick sage_queued back up in
+        // the gap between being released and the processor stamping its lock;
+        // finishing the run has to be the last word, or it reappears as queued.
+        sage_queued: false,
         sage_processed_at: nowIso,
         lastUpdatedAt: nowIso,
         totalVerified: verified ? true : o.totalVerified,
