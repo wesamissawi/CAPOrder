@@ -25,6 +25,24 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('bubble-shared:updated', listener);
   },
 
+  // Replicated store: concurrent-edit review. The store resolves collisions on
+  // its own; these surface the ones where a person's change lost, so somebody
+  // can check whether it mattered.
+  readConflicts: () => ipcRenderer.invoke('crdt:conflicts'),
+  dismissConflict: (id) => ipcRenderer.invoke('crdt:ack-conflict', id),
+  dismissAllConflicts: () => ipcRenderer.invoke('crdt:ack-all-conflicts'),
+  readStoreStats: () => ipcRenderer.invoke('crdt:stats'),
+  onConflicts: (cb) => {
+    const listener = (_e, data) => cb(data);
+    ipcRenderer.on('crdt:conflicts', listener);
+    return () => ipcRenderer.removeListener('crdt:conflicts', listener);
+  },
+  onPaymentsUpdated: (cb) => {
+    const listener = (_e, data) => cb(data);
+    ipcRenderer.on('payments:updated', listener);
+    return () => ipcRenderer.removeListener('payments:updated', listener);
+  },
+
   // file utilities
   getDataPath: () => ipcRenderer.invoke('items:get-path'),
   revealDataFile: () => ipcRenderer.invoke('items:reveal'),
@@ -32,9 +50,6 @@ contextBridge.exposeInMainWorld('api', {
   useDefaultFile: () => ipcRenderer.invoke('items:use-default'),
 
     // locking
-  lockItem: (uid) => ipcRenderer.invoke('items:lock-item', uid),
-  applyEdit: (uid, patch) => ipcRenderer.invoke('items:apply-edit', uid, patch),
-  releaseLock: (uid) => ipcRenderer.invoke('items:release-lock', uid),
 
   readUIState: () => ipcRenderer.invoke('ui-state:read'),
   writeUIState: (state) => ipcRenderer.invoke('ui-state:write', state),
@@ -172,14 +187,4 @@ contextBridge.exposeInMainWorld('api', {
   getInterchange: (fileName) => ipcRenderer.invoke('rules:interchange-get', fileName),
   saveInterchange: (fileName, table) => ipcRenderer.invoke('rules:interchange-save', fileName, table),
 
-  getBubbleLocks: () => ipcRenderer.invoke('bubble-lock:get-all'),
-  claimBubbleLock: (bubbleId, bubbleName, opts) => ipcRenderer.invoke('bubble-lock:claim', bubbleId, bubbleName, opts),
-  releaseBubbleLock: (bubbleId, opts) => ipcRenderer.invoke('bubble-lock:release', bubbleId, opts),
-  heartbeatBubbleLock: (bubbleId) => ipcRenderer.invoke('bubble-lock:heartbeat', bubbleId),
-  respondToBubbleRequest: (bubbleId, allow) => ipcRenderer.invoke('bubble-lock:respond', bubbleId, allow),
-  onBubbleLocksUpdated: (cb) => {
-    const listener = (_e, data) => cb?.(data);
-    ipcRenderer.on('bubble-lock:updated', listener);
-    return () => ipcRenderer.removeListener('bubble-lock:updated', listener);
-  },
 });

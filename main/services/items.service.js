@@ -1,5 +1,8 @@
 const createItemsService = (deps) => {
-  const { getQueueFile, readItemsAt, writeItemsAt, splitItemsByQueue, randomUUID, fs, path } = deps;
+  // Item storage now lives in the replicated CRDT store (main/crdt/). This
+  // service keeps what is genuinely its own job — deriving and appending the
+  // lifecycle history — and delegates persistence.
+  const { getQueueFile, readAllQueueItems, writeItemRecords, randomUUID, fs, path } = deps;
 
   // Append-only lifecycle log so a part's whole journey can be traced — when it
   // was created, moved between bubbles, sent to Sage / CashPad, and deleted.
@@ -91,50 +94,22 @@ const createItemsService = (deps) => {
     };
   }
 
-  function readAllQueueItems() {
-    // readItemsAt throws on read/parse failure (ITEMS_READ_FAILED). Let it
-    // propagate: a write based on a failed read is how data gets erased.
-    const queues = ['OUTSTANDING', 'SAGE_AR', 'CASH_SALE'];
-    const byQueue = {};
-    queues.forEach((queue) => {
-      const file = getQueueFile(queue);
-      byQueue[queue] = readItemsAt(file);
-    });
-    return byQueue;
-  }
-
-  // Before a write that REMOVES items, keep a timestamped copy of the current
-  // file in <dir>/backups so an accidental wipe is recoverable. Keep the
-  // newest 40 backups per file.
-  function backupBeforeDeletion(file) {
-    try {
-      if (!fs || !path) return;
-      if (!fs.existsSync(file)) return;
-      const dir = path.join(path.dirname(file), 'backups');
-      fs.mkdirSync(dir, { recursive: true });
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const base = path.basename(file, '.json');
-      // Read-then-write, not copyFileSync: a Windows copy opens the source
-      // denying delete-sharing, which makes another machine's atomic replace of
-      // this same file fail with EPERM on its rename.
-      fs.writeFileSync(path.join(dir, `${base}.${stamp}.json`), fs.readFileSync(file));
-      const siblings = fs.readdirSync(dir)
-        .filter((f) => f.startsWith(`${base}.`) && f.endsWith('.json'))
-        .sort();
-      while (siblings.length > 40) {
-        const oldest = siblings.shift();
-        try { fs.unlinkSync(path.join(dir, oldest)); } catch {}
-      }
-    } catch (e) {
-      console.warn('[items] backup before deletion failed', file, e);
-    }
-  }
-
-  // Writes are upserts by uid. Items on disk that are absent from `items` are
-  // KEPT — another machine may have added them while this caller's state was
-  // stale, and "absent = delete" is how whole files used to get erased.
-  // Deletions happen only for uids explicitly listed in `deletedUids`
-  // (or, legacy, when replaceAll: true is passed — no caller does anymore).
+  // Writes are upserts by uid, and only the FIELDS that changed are published
+  // (see main/crdt/merge.js). Items absent from `items` are KEPT — another
+  // machine may have added them while this caller's state was stale, and
+  // "absent = delete" is how whole files used to get erased. Deletions happen
+  // only for uids explicitly listed in `deletedUids`.
+  //
+  // The old per-item `rev` gate that used to live here is gone. It was a
+  // one-dimensional approximation of causality: it could tell that a writer was
+  // behind, but not WHAT it was behind on, so it had to reject the entire item
+  // — losing the parts of the write that were perfectly valid — and it fell
+  // back to last-writer-wins whenever two machines happened to be on the same
+  // rev. Field-level merge with a hybrid logical clock subsumes it: a stale
+  // writer's untouched fields now emit no ops at all, and a genuine collision
+  // is resolved deterministically and reported rather than silently dropped.
+  // The `rev` FIELD is still carried on items for the renderer's benefit; it is
+  // simply no longer load-bearing for concurrency.
   function writeItems(items, options = {}) {
     // historyEvent: { event, extra } — an event the CALLER knows about that the
     // diff below can't infer. Sending a sale to Sage stamps an invoice number
@@ -142,7 +117,15 @@ const createItemsService = (deps) => {
     // the derived events fires; this is how that still reaches the lifecycle
     // log. When set it replaces the derived event for the incoming items, so a
     // move that also carries one traces as the caller's event, not two.
-    const { replaceAll = false, deletedUids = [], deleteReason = 'deleted', historyEvent = null } = options;
+    // fromClient: this array came back from the renderer, so it must be diffed
+    // against what the renderer was shown rather than against a fresh read.
+    const {
+      deletedUids = [],
+      deleteReason = 'deleted',
+      historyEvent = null,
+      clearFields = null,
+      fromClient = false,
+    } = options;
     // Removal isn't always a delete: archiving a sold bubble ('archived') or a
     // return slip whose credit came back ('credit_received') also remove items
     // from the active queues, but should trace as themselves, not 'deleted'.
@@ -150,8 +133,8 @@ const createItemsService = (deps) => {
     const removalEvent = REMOVAL_EVENTS[deleteReason] || 'deleted';
     const queues = ['OUTSTANDING', 'SAGE_AR', 'CASH_SALE'];
 
-    // 1) Read current state of all queues (throws — and aborts the write —
-    //    if any queue file is unreadable)
+    // 1) Current state, straight from the replicated store. Still read BEFORE
+    //    the write, because the history events below are a diff against it.
     const currentByQueue = readAllQueueItems();
 
     // 2) Build uid -> item map from current items
@@ -164,37 +147,18 @@ const createItemsService = (deps) => {
       });
     });
 
-    // 3) Apply incoming items (upsert by uid, version-gated).
-    //    An incoming item overwrites the on-disk copy only when it is NOT
-    //    strictly older by rev. i.e. we reject a write whose rev is lower than
-    //    what's already on disk — that's a stale writer (e.g. another machine
-    //    saving its older in-memory copy, or a file-watch push that fired
-    //    before a local move was persisted) trying to revert a newer change.
-    //    Equal rev is accepted so writers that don't bump rev (e.g. lock
-    //    metadata, legacy paths) still save rather than being silently dropped;
-    //    the trade-off is that a true concurrent same-rev edit is last-writer-
-    //    wins, which would need a machineId tiebreak to resolve deterministically.
-    const revNum = (it) => {
-      const r = Number(it && it.rev);
-      return Number.isFinite(r) ? r : 0;
-    };
-    // Lifecycle events accumulated across this write (create / move / queue
-    // change / delete), flushed once to the JSONL log at the end.
+    // 3) Derive the lifecycle events this write implies. This is now the ONLY
+    //    thing the loop does — merging is the store's job.
     const historyAt = new Date().toISOString();
     const historyEvents = [];
     const normPath = (p) => p || 'OUTSTANDING';
 
     const incomingUids = new Set();
-    let rejectedStale = 0;
     (items || []).forEach((it) => {
       if (!it) return;
       const uid = it.uid || randomUUID();
       incomingUids.add(uid);
       const existing = map.get(uid);
-      if (existing && revNum(it) < revNum(existing)) {
-        rejectedStale += 1;
-        return; // keep the newer on-disk copy
-      }
       // Trace the item's journey: first appearance, a queue change (Sage /
       // CashPad / back to stock), or a plain bubble move within the same queue.
       if (historyEvent && historyEvent.event) {
@@ -228,55 +192,31 @@ const createItemsService = (deps) => {
       }
       map.set(uid, { ...it, uid });
     });
-    if (rejectedStale > 0) {
-      console.warn(`[items] write rejected ${rejectedStale} stale item(s) (older rev than disk)`);
-    }
 
-    // 3b) Apply deletions. Snapshot each removed item first so its deletion can
-    //     be traced (see appendHistory below).
+    // 3b) Trace deletions. Snapshot each removed item first so its removal is
+    //     described by what it WAS, not by an empty record.
     let removedCount = 0;
     (deletedUids || []).forEach((uid) => {
       if (uid && map.has(uid)) {
         historyEvents.push(mkHistoryRecord(map.get(uid), removalEvent, historyAt));
-        map.delete(uid);
         removedCount += 1;
       }
     });
-    if (replaceAll) {
-      Array.from(map.keys()).forEach((uid) => {
-        if (!incomingUids.has(uid)) {
-          historyEvents.push(mkHistoryRecord(map.get(uid), removalEvent, historyAt));
-          map.delete(uid);
-          removedCount += 1;
-        }
-      });
-    }
     if (removedCount > 0) {
       console.warn(`[items] write removes ${removedCount} item(s) (incoming ${incomingUids.size})`);
     }
 
-    // 4) Split merged list back into queues
-    const mergedList = Array.from(map.values());
-    const buckets = splitItemsByQueue(mergedList);
+    // 4) Publish. One call: the store diffs each item against what this process
+    //    was last served, appends only the changed fields to our own op log,
+    //    and rewrites whichever of the three queue projections changed.
+    const result = writeItemRecords(items || [], { deletedUids, clearFields, fromClient });
 
-    // 5) Atomically write each queue file if changed
-    queues.forEach((queue) => {
-      const file = getQueueFile(queue);
-      const current = currentByQueue[queue] || [];
-      const next = buckets[queue];
-      const a = JSON.stringify(current ?? []);
-      const b = JSON.stringify(next ?? []);
-      if (a !== b) {
-        if ((next?.length ?? 0) < current.length) backupBeforeDeletion(file);
-        writeItemsAt(file, next);
-      }
-    });
-
-    // 6) Flush the lifecycle events for this write (after the queues are safely
-    //    written; failures here are swallowed inside appendHistory).
+    // 5) Flush the lifecycle events (after the ops are durable; failures here
+    //    are swallowed inside appendHistory).
     if (historyEvents.length) {
       appendHistory(historyEvents);
     }
+    return result;
   }
 
   return { readAllQueueItems, writeItems, readHistory };

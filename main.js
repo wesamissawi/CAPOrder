@@ -27,6 +27,10 @@ const { createSageService } = require('./main/services/sage.service');
 const { configureSageQueue } = require('./main/services/sage.actions');
 const { createAppConfigService } = require('./main/services/appConfig.service');
 const { createUpdatesService } = require('./main/services/updates.service');
+// Shared business data is replicated as a CRDT (see main/crdt/README.md).
+// Machines exchange append-only op logs instead of overwriting shared JSON
+// files, which is what removes lost updates between machines on the share.
+const { createCrdtLayer } = require('./main/crdt');
 
 // Point Playwright to the packaged browsers when running in production
 if (app.isPackaged) {
@@ -57,7 +61,6 @@ const { resolveCapCode } = require('./src/scrapers/capRules');
 
 const isDev = !app.isPackaged;
 
-const LOCK_DURATION_MS = 20000; // 20 seconds
 
 const itemsDomain = createItemsDomain({ randomUUID });
 const {
@@ -65,8 +68,6 @@ const {
   computeAllocatedFor,
   toDDMMYYYY,
   makeOutstandingFromLine,
-  splitItemsByQueue,
-  cleanExpiredLocks,
 } = itemsDomain;
 
 
@@ -479,51 +480,10 @@ function stopSageHeartbeat() {
   }
 }
 
-// ---- bubble edit locks ----
-const BUBBLE_LOCKS_FILE = 'bubble_locks.json';
-
-function getBubbleLocksFile() {
-  return path.join(getSharedDataDir(), BUBBLE_LOCKS_FILE);
-}
-
-function ensureBubbleLocksFile() {
-  const f = getBubbleLocksFile();
-  ensureDir(path.dirname(f));
-  if (!fs.existsSync(f)) fs.writeFileSync(f, JSON.stringify({}, null, 2), 'utf-8');
-  return f;
-}
-
-function readBubbleLocks() {
-  try {
-    const f = ensureBubbleLocksFile();
-    const raw = JSON.parse(fs.readFileSync(f, 'utf-8'));
-    // Prune entries with no heartbeat for 60s — definitely abandoned
-    const now = Date.now();
-    const cleaned = {};
-    Object.entries(raw || {}).forEach(([id, lock]) => {
-      if (lock && (now - (lock.lastActive || 0)) < 60000) cleaned[id] = lock;
-    });
-    return cleaned;
-  } catch { return {}; }
-}
-
-function writeBubbleLock(bubbleId, data) {
-  try {
-    const f = ensureBubbleLocksFile();
-    const locks = readBubbleLocks();
-    locks[bubbleId] = data;
-    writeJsonAtomic(f, JSON.stringify(locks, null, 2));
-  } catch (e) { console.error('[bubble-lock] write failed', e); }
-}
-
-function releaseBubbleLock(bubbleId) {
-  try {
-    const f = ensureBubbleLocksFile();
-    const locks = readBubbleLocks();
-    delete locks[bubbleId];
-    writeJsonAtomic(f, JSON.stringify(locks, null, 2));
-  } catch (e) { console.error('[bubble-lock] release failed', e); }
-}
+// Bubble edit locks lived here — bubble_locks.json plus its read/write/release
+// helpers. Removed with the rest of the lock: concurrent edits to one bubble
+// merge per field now, so there is nothing left to serialize. bubble_locks.json
+// on the share is inert and can be deleted; nothing reads or writes it.
 
 function readConfig() {
   try { if (fs.existsSync(INSTANCE_PATHS.windowConfig)) return JSON.parse(fs.readFileSync(INSTANCE_PATHS.windowConfig, 'utf-8')); } catch {}
@@ -651,43 +611,39 @@ function readItemsAt(file) {
   err.file = file;
   throw err;
 }
-function writeItemsAt(file, items) {
-  ensureDataFileAt(file);
-  writeJsonAtomic(file, JSON.stringify(items ?? [], null, 2));
-}
-function readQueueItems(queue) {
-  const file = getQueueFile(queue);
-  let items = readItemsAt(file);
-  // Items written by legacy/AHK tools have no uid. Writes now upsert by uid
-  // (no implicit deletions), so every item needs a stable identity — stamp
-  // missing uids once and persist them so all machines see the same ids.
-  if ((items || []).some((it) => it && !it.uid)) {
-    items = (items || []).map((it) => (it && !it.uid ? { ...it, uid: randomUUID() } : it));
-    try {
-      writeItemsAt(file, items);
-      console.log('[items] stamped missing uids in', path.basename(file));
-    } catch (e) {
-      console.error('[items] failed to persist stamped uids', file, e);
-    }
-  }
-  return (items || []).map((it) => ({
-    ...it,
-    accountingPath: queue,
-  }));
-}
+// writeItemsAt used to live here — the whole-file replace of one queue. Every
+// queue file is a projection now and is written by main/crdt/projections.js.
+// ---- replicated store ----
+//
+// Everything below that reads or writes shared business data goes through this
+// layer. It keeps the old function names and signatures on purpose — the
+// concurrency fix is underneath them, not spread across their several hundred
+// call sites. See main/crdt/index.js for what changed semantically (in short:
+// a save publishes the fields you changed, instead of overwriting the file
+// with the copy you happened to be holding).
+//
+// The functions passed in are hoisted declarations defined further down this
+// file; the layer only calls them lazily, after startup has resolved the
+// shared folder.
+const crdt = createCrdtLayer({
+  machineId: getMachineId(),
+  getSharedDataDir,
+  resolveBusinessPaths,
+  getSharedBubbleFile: () => getSharedBubbleDataPath(),
+  writeJsonAtomic,
+  buildOrdersIndex,
+  instanceDir: INSTANCE_DIR,
+  onChange: (summary) => onCrdtChange(summary),
+});
+
 function readItems() {
-  return [
-    ...readQueueItems('OUTSTANDING'),
-    ...readQueueItems('SAGE_AR'),
-    ...readQueueItems('CASH_SALE'),
-  ];
+  return crdt.readItems();
 }
 
 const itemsService = createItemsService({
   getQueueFile,
-  readItemsAt,
-  writeItemsAt,
-  splitItemsByQueue,
+  readAllQueueItems: () => crdt.readAllQueueItems(),
+  writeItemRecords: (items, opts) => crdt.writeItemRecords(items, opts),
   randomUUID,
   fs,
   path,
@@ -719,13 +675,16 @@ function getOrdersArchiveFile() {
   return resolved.ordersArchive;
 }
 function readOrders() {
-  return readItemsAt(getOrdersFile());
+  return crdt.readOrders();
 }
+// orders_index.json is pure derived data — it is rebuilt from the order and
+// archive tables on every projection pass, so it is read from the file rather
+// than replicated separately. Nothing can make it disagree with them.
 function readOrdersIndex() {
   return readItemsAt(getOrdersIndexFile());
 }
 function readOrdersArchive() {
-  return readItemsAt(getOrdersArchiveFile());
+  return crdt.readOrdersArchive();
 }
 // ---- Order Assignment ledger ----
 //
@@ -751,14 +710,13 @@ function ensureOrderAssignmentsFile() {
   }
   return file;
 }
+// Rebuilt from the three flat assignment entities (see main/crdt/index.js), so
+// two people working different lines of the same order no longer overwrite
+// each other, and two assignments made at once no longer lose one to an array
+// replace. The nested shape callers expect is unchanged.
 function readOrderAssignments() {
-  const file = ensureOrderAssignmentsFile();
   try {
-    const raw = fs.readFileSync(file, 'utf-8');
-    if (!raw.trim()) return {};
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
-    return {};
+    return crdt.readOrderAssignments();
   } catch (e) {
     // Unlike the item queues, a ledger read failure is not destructive on its
     // own — but it must not silently read as "nothing assigned", which would
@@ -769,10 +727,7 @@ function readOrderAssignments() {
   }
 }
 function writeOrderAssignments(ledger) {
-  const file = getOrderAssignmentsFile();
-  backupFile(file);
-  ensureOrderAssignmentsFile();
-  writeJsonAtomic(file, JSON.stringify(ledger ?? {}, null, 2));
+  return crdt.writeOrderAssignments(ledger ?? {});
 }
 function ensureArchiveFileAt(file) {
   ensureDataFileAt(file);
@@ -787,45 +742,37 @@ function writeOrdersAt(file, orders) {
   writeJsonAtomic(file, JSON.stringify(orders ?? [], null, 2));
 }
 function writeOrders(orders) {
-  const res = writeOrdersAt(getOrdersFile(), orders);
-  refreshOrdersIndex(orders);
-  return res;
+  // Publishes only the fields that changed relative to what this process was
+  // served, and removes only orders the caller actually saw and left out — so
+  // an order another machine added mid-edit is no longer collateral damage.
+  // orders_index.json is refreshed as part of the projection pass.
+  return crdt.writeOrders(orders);
 }
-// Identity for matching one specific order against a freshly-read orders.json.
-// Scoped by source because a reference can collide across vendors.
-function orderRemovalKey(order) {
-  const ref = (order?.reference || order?.__row || '').toString().trim().toUpperCase();
-  const src = (order?.source || '').toString().trim().toUpperCase();
-  return ref ? `${ref}|${src}` : '';
-}
-
-// Remove exactly the orders we just archived or deleted, against a FRESH read of
-// orders.json — never by overwriting the file with the array we read earlier.
-// Archiving does real work in between (adding parts to Outstanding, reconciling
-// a credit against stock, writing the 3.5MB archive over SMB), and a blind
-// write-back of the pre-work array erased anything another machine had added or
-// edited in that window. Removal is expressed as a set operation so concurrent
-// changes survive: counted per key, so archiving one of two same-reference
-// orders still removes only one.
+// Remove exactly the orders we just archived or deleted.
+//
+// This used to be a careful workaround: archiving does real work in between
+// (adding parts to Outstanding, reconciling a credit against stock, writing the
+// 3.5MB archive over SMB), and writing back the pre-work array erased anything
+// another machine had added in that window. Removal was therefore expressed as
+// a set operation against a fresh read, COUNTED per `reference|source` key —
+// because that key wasn't unique, and archiving one of two orders sharing a
+// reference had to remove exactly one of them.
+//
+// Orders carry a stable `__uid` now, so removal is just "delete these records"
+// and the counting is gone. A fallback that matched on `reference|source` for
+// orders predating the stamp went with it: every order on the share carries a
+// __uid, so it could no longer fire, and a key-based match is exactly the
+// ambiguity __uid was introduced to end.
 function removeOrdersFromDisk(removedOrders) {
-  const counts = new Map();
-  (removedOrders || []).forEach((o) => {
-    const k = orderRemovalKey(o);
-    if (!k) return;
-    counts.set(k, (counts.get(k) || 0) + 1);
-  });
   const fresh = readOrders() || [];
-  const keep = fresh.filter((o) => {
-    const k = orderRemovalKey(o);
-    const n = k ? counts.get(k) || 0 : 0;
-    if (n > 0) {
-      counts.set(k, n - 1);
-      return false;
-    }
-    return true;
+  const doomed = new Set();
+  (removedOrders || []).forEach((o) => {
+    if (o && o.__uid) doomed.add(o.__uid);
+    else console.warn('[orders] removal skipped — order carries no __uid', o?.reference || '(no ref)');
   });
-  writeOrders(keep);
-  return keep;
+
+  if (doomed.size) crdt.removeOrders(Array.from(doomed));
+  return fresh.filter((o) => !(o && doomed.has(o.__uid)));
 }
 
 // Read-modify-write a SINGLE order on disk. Every Sage lock transition and both
@@ -844,7 +791,9 @@ function patchOrderOnDisk(refKey, patch) {
     return updated;
   });
   if (!updated) return null;
-  writeOrders(next);
+  // Commit just this order rather than the whole list. readOrders() above
+  // established the baseline, so only the patched fields become ops.
+  crdt.store.commit('order', [updated]);
   return updated;
 }
 
@@ -873,57 +822,42 @@ function clearSageOrderLock(refKey, patch = {}) {
 }
 
 function writeOrdersArchive(orders) {
-  const file = getOrdersArchiveFile();
-  backupFile(file);
-  ensureDataFileAt(file);
-  writeJsonAtomic(file, JSON.stringify(orders ?? [], null, 2));
-  refreshOrdersIndex(readOrders(), orders);
+  return crdt.writeOrdersArchive(orders);
 }
-function writeOrdersIndex(index) {
-  const file = getOrdersIndexFile();
-  ensureDataFileAt(file);
-  writeJsonAtomic(file, JSON.stringify(index ?? [], null, 2));
-}
+// writeOrdersIndex went with refreshOrdersIndex — orders_index.json is written
+// by the projection pass now, from buildOrdersIndex below.
 function getPaymentsFile() {
   const resolved = resolveBusinessPaths();
   return resolved.payments;
 }
 function readPayments() {
-  return readItemsAt(getPaymentsFile());
+  return crdt.readPayments();
 }
 function writePayments(payments) {
-  const file = getPaymentsFile();
-  backupFile(file);
-  ensureDataFileAt(file);
-  writeJsonAtomic(file, JSON.stringify(payments ?? [], null, 2));
-  return { ok: true, path: file };
+  crdt.writePayments(payments);
+  return { ok: true, path: getPaymentsFile() };
 }
 function getSageSalesRunsFile() {
   const resolved = resolveBusinessPaths();
   return resolved.sageSalesRuns;
 }
 function readSageSalesRuns() {
-  return readItemsAt(getSageSalesRunsFile());
+  return crdt.readSageSalesRuns();
 }
 function writeSageSalesRuns(runs) {
-  const file = getSageSalesRunsFile();
-  backupFile(file);
-  ensureDataFileAt(file);
-  writeJsonAtomic(file, JSON.stringify(runs ?? [], null, 2));
-  return { ok: true, path: file };
+  crdt.writeSageSalesRuns(runs);
+  return { ok: true, path: getSageSalesRunsFile() };
 }
 function getCloverLedgerFile() {
   const resolved = resolveBusinessPaths();
   return resolved.cloverLedger;
 }
 function readCloverLedger() {
-  return readItemsAt(getCloverLedgerFile());
+  return crdt.readCloverLedger();
 }
 function writeCloverLedger(entries) {
-  const file = getCloverLedgerFile();
-  ensureDataFileAt(file);
-  writeJsonAtomic(file, JSON.stringify(entries ?? [], null, 2));
-  return { ok: true, path: file };
+  crdt.writeCloverLedger(entries);
+  return { ok: true, path: getCloverLedgerFile() };
 }
 function buildOrdersIndex(activeOrders, archivedOrders) {
   const indexByKey = new Map();
@@ -972,12 +906,10 @@ function getArchivedOrderKeys() {
     return new Set();
   }
 }
-function refreshOrdersIndex(activeOrders, archivedOrders) {
-  const archive = Array.isArray(archivedOrders) ? archivedOrders : readOrdersArchive();
-  const active = Array.isArray(activeOrders) ? activeOrders : readOrders();
-  const index = buildOrdersIndex(active, archive);
-  writeOrdersIndex(index);
-}
+// refreshOrdersIndex used to live here. orders_index.json is rebuilt as part of
+// every projection pass now (main/crdt/projections.js), from the same merged
+// order + archive tables the other files come from, so it cannot drift out of
+// step with them and nothing needs to force it.
 function getArchivedOrderRefs(activeOrders, options = {}) {
   const vendor = (options.vendor || '').toString().trim().toLowerCase();
   const preferReferenceVendors = new Set(['world', 'transbec', 'bestbuy', 'proforce']);
@@ -1402,7 +1334,7 @@ function reconcileCreditReturnAgainstStock(order) {
     consumedUids.add(match.uid);
     const nextQty = (Number(match.quantity) || 0) - returnQty;
     if (nextQty > 0) {
-      upserts.push({ ...match, quantity: nextQty, last_moved_at: nowIso, rev: (Number(match.rev) || 0) + 1 });
+      upserts.push({ ...match, quantity: nextQty, last_moved_at: nowIso });
     } else {
       deletedUids.push(match.uid);
     }
@@ -1921,79 +1853,35 @@ function getSharedBubbleDataPath() {
   return path.join(sharedDir, SHARED_BUBBLE_FILE);
 }
 
-function ensureSharedBubbleFile() {
-  const target = getSharedBubbleDataPath();
-  ensureDir(path.dirname(target));
-  if (!fs.existsSync(target)) {
-    fs.writeFileSync(target, JSON.stringify({ bubbles: {} }, null, 2), 'utf-8');
-  }
-  return target;
-}
+// ensureSharedBubbleFile went with the bubble-shared watcher that was its last
+// caller. bubble_shared.json is a projection now — main/crdt/projections.js
+// creates the directory and writes the file, so there is nothing to pre-seed.
 
 function readSharedBubbleData() {
-  try {
-    const target = ensureSharedBubbleFile();
-    const raw = fs.readFileSync(target, 'utf-8');
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
-  } catch (e) {
-    console.error('[shared-bubble read]', e);
-  }
-  return { bubbles: {} };
+  return crdt.readSharedBubbleData();
 }
 
+// Each bubble is now its own replicated record. This used to read the whole
+// `bubbles` map, splice one entry in and write the lot back — so two machines
+// editing DIFFERENT bubbles at the same moment lost one of them entirely. A
+// write now describes only the bubble it names, and only the fields that
+// actually changed on it.
 function writeSharedBubbleData(bubbleId, payload) {
-  if (!bubbleId) return { ok: false, error: 'bubbleId required' };
-  try {
-    const target = ensureSharedBubbleFile();
-    const current = readSharedBubbleData();
-    const bubbles = current.bubbles && typeof current.bubbles === 'object' ? { ...current.bubbles } : {};
-    const next = {
-      ...(payload || {}),
-      id: bubbleId,
-    };
-    bubbles[bubbleId] = next;
-    writeJsonAtomic(target, JSON.stringify({ bubbles }, null, 2));
-    return { ok: true, path: target, data: { bubbles } };
-  } catch (e) {
-    console.error('[shared-bubble write]', e);
-    return { ok: false, error: e?.message || 'Failed to write shared bubble data' };
-  }
+  const res = crdt.writeSharedBubbleData(bubbleId, payload);
+  return res.ok ? { ...res, path: getSharedBubbleDataPath() } : res;
 }
 
 function deleteSharedBubbleData(bubbleId) {
-  if (!bubbleId) return { ok: false, error: 'bubbleId required' };
-  try {
-    const target = ensureSharedBubbleFile();
-    const current = readSharedBubbleData();
-    const bubbles = current.bubbles && typeof current.bubbles === 'object' ? { ...current.bubbles } : {};
-    delete bubbles[bubbleId];
-    writeJsonAtomic(target, JSON.stringify({ bubbles }, null, 2));
-    return { ok: true, path: target };
-  } catch (e) {
-    console.error('[shared-bubble delete]', e);
-    return { ok: false, error: e?.message || 'Failed to delete shared bubble data' };
-  }
+  const res = crdt.deleteSharedBubbleData(bubbleId);
+  return res.ok ? { ...res, path: getSharedBubbleDataPath() } : res;
 }
 
 function readArchivedEntries() {
-  const file = getArchiveFile();
-  ensureArchiveFileAt(file);
-  try {
-    const raw = fs.readFileSync(file, 'utf-8');
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
-  } catch (e) {
-    console.error('[archive] read failed', e);
-    return [];
-  }
+  return crdt.readArchivedEntries();
 }
 
 function writeArchivedEntries(entries) {
-  const file = getArchiveFile();
-  ensureArchiveFileAt(file);
-  backupFile(file);
-  writeJsonAtomic(file, JSON.stringify(entries ?? [], null, 2));
+  return crdt.writeArchivedEntries(entries);
 }
 
 
@@ -2082,18 +1970,54 @@ configureSageQueue({
   },
 });
 
+// Push merged state to the renderer whenever the store changes, whether the
+// change came from this machine or arrived in another machine's op log.
+//
+// This replaces the old per-file watchers. Those had to re-read and re-parse a
+// whole JSON file on every event and defend against reading it mid-write; the
+// store hands us the entities that actually changed, already merged, so a push
+// can never carry a partial read. The "skip the push on a failed read" guard
+// that used to live in watchers.service.js is therefore no longer reachable —
+// there is no read to fail.
+function onCrdtChange(summary = {}) {
+  const changed = new Set(summary.entities || []);
+  const target = typeof win !== 'undefined' ? win : null;
+  if (!target || target.isDestroyed()) return;
+
+  try {
+    if (changed.has('item')) {
+      // checkout, not read: this IS the renderer's new view of the world, so it
+      // becomes the baseline its next save is measured against.
+      const items = crdt.checkoutItems();
+      target.webContents.send('items:updated', items);
+      console.log('[crdt] -> items:updated', items.length, summary.local ? '(local)' : '(remote)');
+    }
+    if (changed.has('order') || changed.has('orderArchive')) {
+      target.webContents.send('orders:updated', crdt.checkoutOrders());
+      if (getSageAnyActive()) scheduleSageProcessing();
+    }
+    if (changed.has('bubble')) {
+      target.webContents.send('bubble-shared:updated', crdt.readSharedBubbleData());
+    }
+    if (changed.has('payment')) {
+      target.webContents.send('payments:updated', crdt.checkoutPayments());
+    }
+    // Any new conflict is pushed immediately — the whole point of flagging one
+    // is that somebody finds out before the losing change is forgotten.
+    if ((summary.conflicts || []).length) {
+      target.webContents.send('crdt:conflicts', crdt.listConflicts());
+      console.warn('[crdt] concurrent edits flagged for review:', summary.conflicts.length);
+    }
+  } catch (e) {
+    console.error('[crdt] failed to push update to renderer', e);
+  }
+}
+
 const watchersService = createWatchersService({
   fs,
   getWin: () => win,
-  getQueueFile,
-  getOrdersFile,
-  ensureDataFileAt,
-  ensureSharedBubbleFile,
-  readItems,
-  readOrders,
-  readSharedBubbleData,
-  scheduleSageProcessing,
-  getSageIntegrationActive: getSageAnyActive,
+  getCrdtOpsDir: () => path.join(crdt.getCrdtDir(), 'ops'),
+  refreshCrdt: () => crdt.refresh(),
   getSagePoActive,
   getSageLockFile,
   readSageLock,
@@ -2104,16 +2028,10 @@ const watchersService = createWatchersService({
     sagePoActive = false;
     stopSageHeartbeat();
   },
-  getBubbleLocksFile,
-  readBubbleLocks,
 });
 const {
   startWatching,
-  startBubbleSharedWatching,
-  startOrdersWatching,
-  stopOrdersWatching,
   startSageLockWatching,
-  startBubbleLockWatching,
 } = watchersService;
 
 const updatesService = createUpdatesService({
@@ -2189,11 +2107,9 @@ async function createWindow() {
 
   console.log('[main] data file =', getDataFile());
   startWatching(win);
-  startBubbleSharedWatching(win);
   // Always watch orders.json, not just while this machine drives Sage: the
   // machine that triggers an order has to see the result the processing machine
   // writes back, otherwise its copy goes stale and a later save reverts it.
-  startOrdersWatching(win);
   registerAllIpc();
 
   const scheduleSaveBounds = () => {
@@ -2260,10 +2176,19 @@ app.whenReady().then(async () => {
     console.warn('[app-config] prompt for shared folder failed', e);
   }
   ensureBusinessFiles();
+  // Load the replicated store before anything reads business data. On the very
+  // first run against a share this also seeds the op log from the existing JSON
+  // files (once for the whole share, not once per machine) — so an existing
+  // installation migrates itself with no manual step.
   try {
-    refreshOrdersIndex();
+    const seed = crdt.start();
+    if (seed.seeded) console.log('[crdt] migrated existing data into the op log');
   } catch (e) {
-    console.warn('[orders] refresh index failed', e);
+    console.error('[crdt] startup failed', e);
+    dialog.showErrorBox(
+      'Shared data could not be opened',
+      `${e?.message || e}\n\nThe app will not save changes until this is resolved.`
+    );
   }
   try {
     const res = archiveCompletedOrders();
@@ -2319,13 +2244,18 @@ function registerAllIpc() {
     autoUpdater,
     sendUpdateStatus,
     beginManualCheck,
-    LOCK_DURATION_MS,
     INSTANCE_DIR,
     INSTANCE_PATHS,
     VENDOR_PATHS,
     readItems,
+    checkoutItems: () => crdt.checkoutItems(),
     writeItems,
     readHistory,
+    // Replicated-store surface: conflict review + diagnostics.
+    listCrdtConflicts: () => crdt.listConflicts(),
+    ackCrdtConflict: (id) => crdt.ackConflict(id),
+    ackAllCrdtConflicts: () => crdt.ackAllConflicts(),
+    getCrdtStats: () => crdt.stats(),
     appendPrintSnapshot,
     findPrintSnapshots,
     getPrintsFile,
@@ -2334,7 +2264,6 @@ function registerAllIpc() {
     writeConfig,
     startWatching,
     setDataFileOverride: (next) => { dataFileOverride = next; },
-    cleanExpiredLocks,
     readOrders,
     writeOrders,
     getOrdersFile,
@@ -2361,8 +2290,6 @@ function registerAllIpc() {
     getOrderAssignmentsFile,
     randomUUID,
     resetSageQueue,
-    stopOrdersWatching,
-    startOrdersWatching,
     scheduleSageProcessing,
     getSagePoActive,
     setSagePoActive: (next) => { sagePoActive = Boolean(next); },
@@ -2437,7 +2364,6 @@ function registerAllIpc() {
     getSharedDirInfo,
     writeAppConfig,
     getItemsReplaceAll,
-    startBubbleSharedWatching,
     validateWritable,
     migrateBusinessFilesToShared,
     getResolvedPathsSummary,
@@ -2450,14 +2376,9 @@ function registerAllIpc() {
     startSageHeartbeat,
     stopSageHeartbeat,
     getMachineId,
-    readBubbleLocks,
-    writeBubbleLock,
-    releaseBubbleLock,
-    getBubbleLocksFile,
   };
 
   startSageLockWatching();
-  startBubbleLockWatching();
   registerAllIpcByDomain(ipcMain, deps);
 
   ipcMain.handle('dialog:confirm', async (evt, message, detail) => {

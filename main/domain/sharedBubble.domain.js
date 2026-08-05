@@ -17,6 +17,9 @@ function normalizeSharedBubblePayload(payload) {
   // other per-bubble field.
   if (typeof payload?.createdAt === 'string') data.createdAt = payload.createdAt;
   if (typeof payload?.delivered === 'boolean') data.delivered = payload.delivered;
+  // Sitting on the counter waiting to be picked up — the state between "being
+  // worked" and "delivered", and its own section in the Sales Order view.
+  if (typeof payload?.counter === 'boolean') data.counter = payload.counter;
   if (typeof payload?.paid === 'boolean') data.paid = payload.paid;
   if (typeof payload?.printedSignature === 'string') data.printedSignature = payload.printedSignature;
   if (typeof payload?.printedAt === 'string') data.printedAt = payload.printedAt;

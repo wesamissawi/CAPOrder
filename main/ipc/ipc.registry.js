@@ -6,14 +6,22 @@ const { registerCloverIpc } = require('./clover.ipc');
 const { registerStockFlowIpc } = require('./stockflow.ipc');
 const { registerSettingsIpc } = require('./settings.ipc');
 const { registerUpdatesIpc } = require('./updates.ipc');
-const { registerBubbleLocksIpc } = require('./bubbleLocks.ipc');
 const { registerRulesIpc } = require('./rules.ipc');
 const { registerOrderAssignmentIpc } = require('./orderAssignment.ipc');
 const { registerSageRunsIpc } = require('./sageRuns.ipc');
+const { registerCrdtIpc } = require('./crdt.ipc');
 
 function registerAllIpc(ipcMain, deps) {
+  registerCrdtIpc(ipcMain, {
+    listCrdtConflicts: deps.listCrdtConflicts,
+    ackCrdtConflict: deps.ackCrdtConflict,
+    ackAllCrdtConflicts: deps.ackAllCrdtConflicts,
+    getCrdtStats: deps.getCrdtStats,
+  });
+
   registerItemsIpc(ipcMain, {
     readItems: deps.readItems,
+    checkoutItems: deps.checkoutItems,
     writeItems: deps.writeItems,
     readHistory: deps.readHistory,
     getDataFile: deps.getDataFile,
@@ -25,8 +33,6 @@ function registerAllIpc(ipcMain, deps) {
     startWatching: deps.startWatching,
     getWin: deps.getWin,
     setDataFileOverride: deps.setDataFileOverride,
-    LOCK_DURATION_MS: deps.LOCK_DURATION_MS,
-    cleanExpiredLocks: deps.cleanExpiredLocks,
     getItemsReplaceAll: deps.getItemsReplaceAll,
     runSageSalesInvoice: deps.runSageSalesInvoice,
   });
@@ -40,8 +46,6 @@ function registerAllIpc(ipcMain, deps) {
     getSageInvoiceActive: deps.getSageInvoiceActive,
     setSageInvoiceActive: deps.setSageInvoiceActive,
     resetSageQueue: deps.resetSageQueue,
-    stopOrdersWatching: deps.stopOrdersWatching,
-    startOrdersWatching: deps.startOrdersWatching,
     scheduleSageProcessing: deps.scheduleSageProcessing,
     syncOutstandingInvoices: deps.syncOutstandingInvoices,
     readItems: deps.readItems,
@@ -167,8 +171,6 @@ function registerAllIpc(ipcMain, deps) {
     getSharedDirInfo: deps.getSharedDirInfo,
     writeAppConfig: deps.writeAppConfig,
     startWatching: deps.startWatching,
-    startOrdersWatching: deps.startOrdersWatching,
-    startBubbleSharedWatching: deps.startBubbleSharedWatching,
     validateWritable: deps.validateWritable,
     migrateBusinessFilesToShared: deps.migrateBusinessFilesToShared,
     getResolvedPathsSummary: deps.getResolvedPathsSummary,
@@ -189,12 +191,6 @@ function registerAllIpc(ipcMain, deps) {
     beginManualCheck: deps.beginManualCheck,
   });
 
-  registerBubbleLocksIpc(ipcMain, {
-    readBubbleLocks: deps.readBubbleLocks,
-    writeBubbleLock: deps.writeBubbleLock,
-    releaseBubbleLock: deps.releaseBubbleLock,
-    getMachineId: deps.getMachineId,
-  });
 
   registerRulesIpc(ipcMain);
 

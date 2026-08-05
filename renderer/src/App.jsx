@@ -4,6 +4,7 @@ import api from "./api";
 import InvoicePreview, { INVOICE_DOCUMENT_DEFAULTS } from "./components/InvoicePreview";
 import AssignInvoiceModal from "./components/AssignInvoiceModal";
 import QtyConfirmModal from "./components/QtyConfirmModal";
+import ConflictReview from "./components/ConflictReview";
 import DashboardView from "./views/DashboardView";
 import OrderManagementView from "./views/OrderManagementView";
 import OrderAssignmentView from "./views/OrderAssignmentView";
@@ -21,15 +22,23 @@ import {
   normalizeItems,
   ensureBubblesForItems,
   groupItemsByBubble,
-  mergeItems,
   uniqueName,
   makeUid,
-  nextRev,
   computeBubblePrintSignature,
 } from "./utils/inventory";
 import { isOrderSageLocked, orderKeyMatches } from "./utils/sageLock";
 
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
+
+// How long an item change is allowed to sit in memory before it is published.
+// Short enough to be invisible, long enough that one user action (which often
+// fires several setItems calls in a row) becomes one commit rather than four.
+// See the write-through save effect for why this is no longer a ten-second
+// "don't hammer the share" window.
+const SAVE_COALESCE_MS = 250;
+// How long to wait before retrying a save the main process refused (a transient
+// SMB error, typically). See saveRetryTick for why a retry has to be automatic.
+const SAVE_RETRY_MS = 3000;
 
 // Scanned Epicor invoices that belong to no order yet: OCR couldn't match them
 // to a reference (known), no epicorOnly order was created from them (created),
@@ -380,11 +389,6 @@ export default function App() {
   const [sagePoEnabled, setSagePoEnabled] = useState(false);
   const [sageInvoiceEnabled, setSageInvoiceEnabled] = useState(false);
   const [sageLockInfo, setSageLockInfo] = useState(null); // { lock, ownMachineId }
-  // Bubble edit locks
-  const [bubbleLocks, setBubbleLocks] = useState({});
-  const [ownMachineId, setOwnMachineId] = useState('');
-  const [pendingRequestBubbles, setPendingRequestBubbles] = useState(new Set());
-  const pendingRequestsRef = React.useRef({}); // { [bubbleId]: { startedAt, timeoutId } }
   const [sageReadyOrders, setSageReadyOrders] = useState([]);
   const [sageInvoiceReadyOrders, setSageInvoiceReadyOrders] = useState([]);
   const [payments, setPayments] = useState([]);
@@ -543,28 +547,36 @@ export default function App() {
   // Drag state (items only)
 
   // Save / watch bookkeeping.
-  // Initialize to the serialized initial state ("[]") so the idle autosave can
+  // Initialize to the serialized initial state ("[]") so the save effect can
   // never see "unsaved changes" before the first successful load — that window
   // used to allow an empty state to overwrite the real item files.
   const lastSavedRef = useRef("[]");
-  const skipNextSaveRef = useRef(false);
   const itemsLoadedRef = useRef(false);
+  // Always-current mirror of `items`. The items:updated listener is registered
+  // once, on mount, so it cannot read `items` out of its own closure.
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  // True from the moment a save is handed to the main process until it answers.
+  const saveInFlightRef = useRef(false);
+  // Bumped to re-run the save effect after a failed write. Without it a failure
+  // would wait for the user's next edit to retry — and because incoming pushes
+  // are now DEFERRED while this side holds unsent changes (rather than being
+  // merged over them), a machine left alone after a hiccup would stop seeing
+  // other machines entirely. Deferring is only safe if the flush is guaranteed.
+  const [saveRetryTick, setSaveRetryTick] = useState(0);
   // Uids the user explicitly deleted but whose deletion hasn't been confirmed
-  // saved yet. Saves are upserts — an item absent from our state is NOT
-  // deleted on disk unless its uid is sent in this list. The ledger also keeps
-  // incoming file updates from resurrecting a just-deleted item.
+  // saved yet. Saves are upserts — an item absent from our state is NOT deleted
+  // on disk unless its uid is sent in this list.
+  //
+  // It used to double as a filter over incoming pushes, alongside a second
+  // permanent `archivedUidsRef` set, because a watcher event that had read the
+  // file BEFORE the delete landed would put the parts back for a tick and
+  // ensureBubblesForItems would rebuild the bubble around them — the empty
+  // ghost card. Neither filter is needed now. A pending deletion makes
+  // hasUnsentItemChanges true, so the push is deferred rather than applied, and
+  // once the write lands the store holds a tombstone stamped later than the
+  // item, so no later push can resurrect it.
   const deletedUidsRef = useRef(new Set());
-  // Uids that have been ARCHIVED — gone from the active queue for good, with a
-  // copy filed in the Archive. Separate from deletedUidsRef because that one is
-  // cleared as soon as the write is confirmed, and it also doubles as the
-  // "deletions to send with the next save": leaving uids in it forever would
-  // make autosave write on every tick. This set is never cleared and never
-  // sent — it only stops a file-watcher event that was already in flight (and
-  // so read the file BEFORE the archive write landed) from re-adding the parts.
-  // That resurrection is what used to leave an empty ghost card behind: the
-  // parts came back for one tick, ensureBubblesForItems rebuilt the bubble from
-  // them, and the next event took the parts away again.
-  const archivedUidsRef = useRef(new Set());
 
   function markItemsDeleted(uids) {
     (uids || []).forEach((u) => { if (u) deletedUidsRef.current.add(u); });
@@ -572,19 +584,60 @@ export default function App() {
   function confirmItemsDeleted(uids) {
     (uids || []).forEach((u) => deletedUidsRef.current.delete(u));
   }
-  function markItemsArchived(uids) {
-    (uids || []).forEach((u) => { if (u) archivedUidsRef.current.add(u); });
-  }
-  function filterPendingDeleted(list) {
-    if (!deletedUidsRef.current.size && !archivedUidsRef.current.size) return list;
-    return (list || []).filter(
-      (it) => !deletedUidsRef.current.has(it?.uid) && !archivedUidsRef.current.has(it?.uid)
-    );
-  }
 
   // "User is editing any field" flag
   const isEditingAnythingRef = useRef(false);
   
+
+  // Is this renderer holding item changes the main process hasn't been told
+  // about? Either not sent yet, or sent and still in flight.
+  function hasUnsentItemChanges() {
+    if (saveInFlightRef.current) return true;
+    if (deletedUidsRef.current.size > 0) return true;
+    return JSON.stringify(itemsRef.current) !== lastSavedRef.current;
+  }
+
+  // Adopt a push from the main process as the truth, wholesale.
+  //
+  // There is no client-side merge any more, and there must not be one. The push
+  // IS the merged state: the store resolved it field-by-field against every
+  // machine's op log before sending it (main/crdt/merge.js), so anything this
+  // side did to "defend" its own values could only undo that work. mergeItems
+  // kept whichever copy carried the higher `rev`, which meant discarding the
+  // ENTIRE incoming item — including fields another machine had legitimately
+  // changed and this one had never touched. It then set lastSavedRef to that
+  // half-local result, which told the save effect those local edits were
+  // already on disk and quietly cancelled the write that would have published
+  // them. That is how a sell price could be typed, accepted on screen, and
+  // never reach the share.
+  //
+  // The one thing this side knows that the store does not is whether it is
+  // holding changes it hasn't sent. Those are never merged in here — the push
+  // is deferred until the save has gone out, and then the state is re-read.
+  // Flush, then adopt; never both at once.
+  function adoptPushedItems(arr) {
+    const norm = normalizeItems(arr || []);
+    const incoming = JSON.stringify(norm);
+    // Our own commit echoing back is the common case — the store pushes after
+    // every local write. Nothing moved, so don't touch state at all.
+    if (incoming === lastSavedRef.current) return;
+    dbg('items:ADOPT', { incomingCount: norm.length });
+    setItems((prev) => {
+      // Reuse the previous object for any item that came back byte-identical.
+      // This is NOT a merge — the value always comes from the push, and an item
+      // that differs is taken wholesale. It only keeps object identity stable
+      // so the memoized order cards don't all re-render on a push that changed
+      // one part. Pushes are frequent now; without this every save would
+      // re-render every card in the view.
+      const before = new Map(prev.map((it) => [it.uid, it]));
+      return norm.map((it) => {
+        const old = before.get(it.uid);
+        return old && JSON.stringify(old) === JSON.stringify(it) ? old : it;
+      });
+    });
+    lastSavedRef.current = incoming;
+    ensureBubblesForItems(norm, setBubbles);
+  }
 
   // === Load once & subscribe to file changes ===
   useEffect(() => {
@@ -619,72 +672,19 @@ export default function App() {
     }
     loadItemsInitial();
 
-    // const off = api.onItemsUpdated((arr) => {
-    //   if (isEditingAnythingRef.current) {
-    //     console.log("[ipc] items:updated ignored (user is editing)");
-    //     return;
-    //   }
-
-    //   const norm = normalizeItems(arr || []);
-    //   setItems((prev) => {
-    //     const merged = mergeItems(prev, norm);
-    //     const prevStr = JSON.stringify(prev);
-    //     const mergedStr = JSON.stringify(merged);
-    //     if (mergedStr === prevStr) {
-    //       lastSavedRef.current = mergedStr;
-    //       return prev;
-    //     }
-    //     lastSavedRef.current = mergedStr;
-    //     ensureBubblesForItems(merged, setBubbles);
-    //     return merged;
-    //   });
-    // });
     const off = api.onItemsUpdated((arr) => {
-      if (isEditingAnythingRef.current) {
-        console.log("[ipc] items:updated ignored (user is editing)");
+      itemsLoadedRef.current = true; // main only pushes successfully-read data
+      // Defer rather than merge — see adoptPushedItems. The deferred push is
+      // collected by refreshItemsIfPending once the save has landed.
+      if (isEditingAnythingRef.current || hasUnsentItemChanges()) {
         pendingItemsRefreshRef.current = true;
+        dbg('items:PUSH-DEFERRED', {
+          editing: isEditingAnythingRef.current,
+          saveInFlight: saveInFlightRef.current,
+        });
         return;
       }
-
-      const norm = filterPendingDeleted(normalizeItems(arr || []));
-      itemsLoadedRef.current = true; // main only pushes successfully-read data
-      dbg('event:onItemsUpdated', {
-        incomingCount: norm.length,
-        pendingDeletes: Array.from(deletedUidsRef.current || []),
-      });
-      setItems((prev) => {
-        const merged = mergeItems(prev, norm);
-        const prevStr = JSON.stringify(prev);
-        const mergedStr = JSON.stringify(merged);
-        // Detect items whose allocation is about to change because of this
-        // external push — this is how a just-filled CashPad move can get
-        // reverted before autosave persists it.
-        const prevByUid = new Map(prev.map((it) => [it.uid, it]));
-        const reverts = [];
-        merged.forEach((it) => {
-          const before = prevByUid.get(it.uid);
-          if (before && before.allocated_to !== it.allocated_to) {
-            reverts.push({ uid: it.uid, from: before.allocated_to, to: it.allocated_to });
-          }
-        });
-        const droppedUids = prev
-          .filter((it) => !merged.some((m) => m.uid === it.uid))
-          .map((it) => ({ uid: it.uid, allocated_to: it.allocated_to }));
-        if (reverts.length || droppedUids.length) {
-          dbg('event:onItemsUpdated:ALLOC-CHANGES', {
-            changed: mergedStr !== prevStr,
-            reverts,
-            droppedUids,
-          });
-        }
-        if (mergedStr === prevStr) {
-          lastSavedRef.current = mergedStr;
-          return prev;
-        }
-        lastSavedRef.current = mergedStr;
-        ensureBubblesForItems(merged, setBubbles);
-        return merged;
-      });
+      adoptPushedItems(arr);
     });
 
 
@@ -716,54 +716,75 @@ export default function App() {
   }, [currentView]);
 
 
-  // === Autosave after 10s of inactivity ===
+  // === Write-through save ===
+  //
+  // Every item mutation in this file goes through state and is persisted here,
+  // so this effect is the single place that decides how long a change lives
+  // only in memory. That used to be ten seconds of item-inactivity, with the
+  // timer restarting on every change — which is why "Send to Sage" and the
+  // CashPad fill each grew their own hand-rolled flush, and why editing a sell
+  // price could look like the app was refusing the edit.
+  //
+  // The delay existed to keep whole-file rewrites off the share: back then every
+  // save replaced all three queue files, so saving often was expensive and
+  // saving a stale array was destructive. Neither is true now. A save is diffed
+  // field-by-field against the exact state this renderer was handed and
+  // publishes only what actually changed (main/crdt/merge.js) — a save with
+  // nothing in it emits zero ops and writes zero bytes, and a save that is
+  // minutes stale still can't revert a field it didn't touch.
+  //
+  // What's left is a coalescing window, not a delay: one user action often fires
+  // several setItems calls, and this folds them into one commit.
   useEffect(() => {
     if (!items) return;
-    // Never autosave before the first successful load — the state would be
-    // empty and the write would erase the real item files.
+    // Never save before the first successful load — the state would be empty
+    // and the write would erase the real item files.
     if (!itemsLoadedRef.current) return;
     const id = setTimeout(() => {
-      if (skipNextSaveRef.current) {
-        skipNextSaveRef.current = false;
-        return;
-      }
       const current = JSON.stringify(items);
       const pendingDeletes = Array.from(deletedUidsRef.current);
       if (current === lastSavedRef.current && pendingDeletes.length === 0) return;
       lastSavedRef.current = current;
-      const allocSummary = (items || []).reduce((acc, it) => {
-        const k = it.allocated_to || "(none)";
-        acc[k] = (acc[k] || 0) + 1;
-        return acc;
-      }, {});
-      dbg('autosave:WRITE', { itemCount: items.length, pendingDeletes, allocSummary });
-      console.log("[autosave] writing items to disk after idle", items);
+      dbg('save:WRITE', { itemCount: items.length, pendingDeletes });
+      saveInFlightRef.current = true;
+      let failed = false;
       api.writeItems(items, pendingDeletes).then((res) => {
         if (res && res.ok === false) {
-          dbg('autosave:REJECTED', res.error);
-          console.error("[autosave] write rejected by main:", res.error);
-          // Allow a retry on the next change; keep pending deletions queued
+          dbg('save:REJECTED', res.error);
+          console.error("[save] write rejected by main:", res.error);
+          // Allow a retry; keep pending deletions queued
           lastSavedRef.current = "";
+          failed = true;
         } else {
-          dbg('autosave:OK', { itemCount: items.length });
+          dbg('save:OK', { itemCount: items.length, ops: res?.ops ?? 0 });
           confirmItemsDeleted(pendingDeletes);
         }
       }).catch((e) => {
-        dbg('autosave:FAILED', String(e));
-        console.error("[autosave] write failed", e);
+        dbg('save:FAILED', String(e));
+        console.error("[save] write failed", e);
         lastSavedRef.current = "";
+        failed = true;
+      }).finally(() => {
+        saveInFlightRef.current = false;
+        if (failed) {
+          setTimeout(() => setSaveRetryTick((t) => t + 1), SAVE_RETRY_MS);
+          return; // still dirty — a push must keep waiting for a clean flush
+        }
+        // Any push that arrived while this was in flight was deferred, not
+        // merged. Now that our side is clean, go and get it.
+        refreshItemsIfPending();
       });
-    }, 10000);
+    }, SAVE_COALESCE_MS);
 
     return () => clearTimeout(id);
-  }, [items]);
+  }, [items, saveRetryTick]);
 
   // === Helpers ===
   function updateItemByKey(uid, patch) {
     setItems((prev) =>
       prev.map((it) => {
         if (it.uid !== uid) return it;
-        const next = { ...it, ...patch, rev: nextRev(it) };
+        const next = { ...it, ...patch };
         if (
           patch.hasOwnProperty("allocated_to") &&
           patch.allocated_to &&
@@ -802,7 +823,7 @@ export default function App() {
     // same pattern as paymentIds above: only sent when this call is actually
     // the one changing them, otherwise carried forward from what's cached
     // locally so an unrelated save (e.g. a notes edit) doesn't blank them out.
-    ["createdAt", "delivered", "paid", "printedSignature", "printedAt", "salesOrderNumber", "sageInvoiceNumber", "sageSentAt", "sageRunId"].forEach((key) => {
+    ["createdAt", "delivered", "counter", "paid", "printedSignature", "printedAt", "salesOrderNumber", "sageInvoiceNumber", "sageSentAt", "sageRunId"].forEach((key) => {
       const has = Object.prototype.hasOwnProperty.call(overrides, key);
       const val = has ? overrides[key] : meta[key];
       if (val !== undefined) payload[key] = val;
@@ -896,6 +917,7 @@ export default function App() {
           const som = {};
           if (typeof entry.createdAt === "string") som.createdAt = entry.createdAt;
           if (typeof entry.delivered === "boolean") som.delivered = entry.delivered;
+          if (typeof entry.counter === "boolean") som.counter = entry.counter;
           if (typeof entry.paid === "boolean") som.paid = entry.paid;
           if (typeof entry.printedSignature === "string") som.printedSignature = entry.printedSignature;
           if (typeof entry.printedAt === "string") som.printedAt = entry.printedAt;
@@ -1450,7 +1472,6 @@ export default function App() {
                 allocated_to: fallback,
                 ...(fallbackPath ? { accountingPath: fallbackPath } : {}),
                 last_moved_at: nowIso,
-                rev: nextRev(it),
               }
           : it
       );
@@ -1480,7 +1501,6 @@ export default function App() {
         api.deleteSharedBubbleData(bubble.name).catch(() => {});
       }
     }
-    _releaseBubbleLockOnDelete(bubbleId);
     markSharedBubbleDeleted(bubble);
   }
 
@@ -1496,7 +1516,6 @@ export default function App() {
               return_slip_id: "",
               return_slip_date: "",
               last_moved_at: new Date().toISOString(),
-              rev: nextRev(it),
             }
           : it
       );
@@ -1529,7 +1548,7 @@ export default function App() {
     setItems((prev) =>
       prev.map((it) =>
         it.return_slip_id === slipId
-          ? { ...it, return_slip_date: value, rev: nextRev(it) }
+          ? { ...it, return_slip_date: value }
           : it
       )
     );
@@ -1568,7 +1587,7 @@ export default function App() {
     setItems((prev) =>
       prev.map((it) =>
         it.return_slip_id === slipId
-          ? { ...it, return_slip_status: value, rev: nextRev(it) }
+          ? { ...it, return_slip_status: value }
           : it
       )
     );
@@ -1587,7 +1606,7 @@ export default function App() {
     setItems((prev) =>
       prev.map((it) =>
         it.return_slip_id === slipId
-          ? { ...it, return_slip_po: value, rev: nextRev(it) }
+          ? { ...it, return_slip_po: value }
           : it
       )
     );
@@ -1696,7 +1715,6 @@ export default function App() {
             allocated_to: targetName,
             accountingPath,
             last_moved_at: nowIso,
-            rev: nextRev(it),
           }
         : it
     );
@@ -1728,15 +1746,22 @@ export default function App() {
     persistSharedBubbleSnapshot(bubbleId, { paymentIds: cleanIds });
   }
 
-  // Sales Order view's Delivered/Paid checkboxes — one flag at a time, same
-  // dual-write (local bubbleMeta + cross-machine shared file) as every other
-  // per-bubble field.
+  // Sales Order view's Delivered/Counter/Paid checkboxes — same dual-write
+  // (local bubbleMeta + cross-machine shared file) as every other per-bubble
+  // field.
+  //
+  // Takes either a single (key, value) or a whole patch object. The patch form
+  // exists because Counter and Delivered are mutually exclusive: ticking one
+  // has to clear the other, and two back-to-back single-key calls would BOTH
+  // read the same stale `bubbleMeta` off this closure, so the second would
+  // silently undo the first.
   function handleSetBubbleFlag(bubbleId, key, value) {
     if (!bubbleId) return;
+    const patch = key && typeof key === "object" ? key : { [key]: value };
     const bubble = bubbles.find((b) => b.id === bubbleId);
     const nameKey = bubble?.name;
     const meta = bubbleMeta[bubbleId] || bubbleMeta[nameKey] || {};
-    const nextMeta = { ...meta, [key]: value };
+    const nextMeta = { ...meta, ...patch };
     const nextBubbleMeta = {
       ...bubbleMeta,
       ...(nameKey ? { [nameKey]: nextMeta } : {}),
@@ -1744,7 +1769,7 @@ export default function App() {
     };
     setBubbleMeta(nextBubbleMeta);
     persistUIState(nextBubbleMeta);
-    persistSharedBubbleSnapshot(bubbleId, { [key]: value });
+    persistSharedBubbleSnapshot(bubbleId, patch);
   }
 
   // Shared by every view that offers "Send to Sage Sales" (Cash Sales and
@@ -1756,11 +1781,11 @@ export default function App() {
     // items:sage-sales-invoice reads the items back off DISK in the main
     // process — it can't see React state. Price edits (Match payment, CAP add,
     // a typed discount) only call updateItemByKey, which sets state and leaves
-    // persistence to the 10s idle autosave, and that timer RESTARTS on every
-    // change. So sending to Sage within 10s of pricing a card sent Sage the
-    // previous prices, and doing it again "worked" only because the autosave
-    // had landed in between. Writing here makes what's on screen and what the
-    // AHK types the same thing by construction.
+    // persistence to the write-through save effect. That lands in a fraction of
+    // a second, but "a fraction of a second" is not "before the next line of
+    // this function", and Sage typing yesterday's prices is not a failure worth
+    // racing for. Flushing here makes what's on screen and what the AHK types
+    // the same thing by construction rather than by timing.
     const pending = JSON.stringify(items);
     if (pending !== lastSavedRef.current) {
       try {
@@ -1810,7 +1835,6 @@ export default function App() {
         ...it,
         sage_invoice_number: invoiceNumber,
         sage_sent_at: nowIso,
-        rev: nextRev(it),
       }));
       const byUid = new Map(stampedSaleItems.map((it) => [it.uid, it]));
       const nextItems = items.map((it) => byUid.get(it.uid) || it);
@@ -2140,9 +2164,10 @@ export default function App() {
     });
 
     // Build the moved-items array explicitly so we can persist it to disk
-    // immediately (below) instead of waiting for the 10s idle autosave. If we
-    // wait, any items:updated push in that window — common when other machines
-    // are open — re-reads the stale on-disk copy and reverts the move.
+    // immediately (below) rather than leaving it to the write-through save.
+    // This one is worth doing by hand: the shared-bubble writes just below have
+    // to describe parts that are already committed, or another machine reads a
+    // payment bubble whose contents haven't arrived yet.
     let moved = 0;
     const updatedItems = items.map((it) => {
       const dest = itemToBubble.get(it.uid);
@@ -2157,7 +2182,6 @@ export default function App() {
         allocated_to: dest,
         accountingPath: ACCOUNTING_PATHS.CASH_SALE,
         last_moved_at: now,
-        rev: nextRev(it),
       };
       // The cash-sale price, per unit, on exactly the basis the fit above used
       // — anything else and the card's total wouldn't add up to the payment it
@@ -2224,10 +2248,10 @@ export default function App() {
   // (e.g. after fixing a markup or a wrong payment amount).
   //
   // Deliberately NOT a loop over handleDeleteBubble. That reads `bubbles` and
-  // `bubbleMeta` out of the render closure and leaves persistence to the
-  // debounced autosave, so N calls in a row would each work from the same stale
-  // snapshot and only one bubble's cleanup would survive. This does the whole
-  // set in one pass and writes immediately, exactly as Auto-fill does.
+  // `bubbleMeta` out of the render closure, so N calls in a row would each work
+  // from the same stale snapshot and only one bubble's cleanup would survive —
+  // a React closure problem, not a persistence one. This does the whole set in
+  // one pass, exactly as Auto-fill does.
   async function handleReturnAllToCashPad() {
     // Exactly the set Cash Sales displays — NOT a second, parallel rule. When
     // this filtered on the accounting path alone it silently skipped any card
@@ -2278,7 +2302,6 @@ export default function App() {
             // CashPad means the part is on the cash-sale path.
             accountingPath: ACCOUNTING_PATHS.CASH_SALE,
             last_moved_at: nowIso,
-            rev: nextRev(it),
           }
         : it
     );
@@ -2308,13 +2331,12 @@ export default function App() {
         );
         if (b.name) api.deleteSharedBubbleData(b.name).catch(() => {});
       }
-      _releaseBubbleLockOnDelete(b.id);
       markSharedBubbleDeleted(b);
     });
 
-    // Persist the moves right away rather than waiting on the idle autosave —
-    // an items:updated push from another machine in that window would re-read
-    // the stale file and undo all of this.
+    // Persist the moves here rather than leaving them to the write-through
+    // save, so the bubble deletions above and the parts they released are
+    // committed together instead of a moment apart.
     try {
       const res = await api.writeItems(updatedItems);
       if (res && res.ok === false) throw new Error(res.error || "Unknown error");
@@ -2372,10 +2394,6 @@ export default function App() {
         const remainingItems = items.filter((it) => it.allocated_to !== bubble.name);
         const removedUids = bubbleItems.map((it) => it.uid);
         markItemsDeleted(removedUids);
-        // Permanent, on top of the pending-delete tombstone above — these parts
-        // are in the Archive now and must never come back from a late watcher
-        // push and rebuild this bubble.
-        markItemsArchived(removedUids);
         setItems(remainingItems);
         lastSavedRef.current = JSON.stringify(remainingItems);
         // Only clears the active queue files — the archive copy above is what
@@ -2432,7 +2450,6 @@ export default function App() {
         api.deleteSharedBubbleData(bubbleId).catch((e) => console.warn("[shared-bubble] delete failed", e));
         if (bubble?.name) api.deleteSharedBubbleData(bubble.name).catch(() => {});
       }
-      _releaseBubbleLockOnDelete(bubbleId);
       markSharedBubbleDeleted(bubble);
     } catch (e) {
       console.error("[archive-cash-sale] failed", e);
@@ -2641,21 +2658,24 @@ export default function App() {
     isEditingAnythingRef.current = false;
   }
 
+  // Collect a push that was deferred because this side had unsent changes.
+  //
+  // By the time this runs the flush has landed, so a straight read is the
+  // merged truth — it already contains both what we sent and whatever the
+  // deferred push was carrying. That is the whole reason deferring is safe:
+  // nothing is dropped, it is only picked up a beat later from the one place
+  // that is entitled to decide what the answer is.
   async function refreshItemsIfPending() {
     if (!pendingItemsRefreshRef.current) return;
+    // Still dirty (a failed save, or the user typed again) — leave the flag up
+    // and try after the next save rather than reading over live changes.
+    if (isEditingAnythingRef.current || hasUnsentItemChanges()) return;
+    pendingItemsRefreshRef.current = false;
     try {
-      const latest = await api.readItems();
-      const norm = filterPendingDeleted(normalizeItems(latest || []));
-      setItems((prev) => {
-        const merged = mergeItems(prev, norm);
-        lastSavedRef.current = JSON.stringify(merged);
-        ensureBubblesForItems(merged, setBubbles);
-        return merged;
-      });
+      adoptPushedItems(await api.readItems());
     } catch (e) {
-      console.error("[items] refresh after edit failed", e);
-    } finally {
-      pendingItemsRefreshRef.current = false;
+      pendingItemsRefreshRef.current = true;
+      console.error("[items] deferred refresh failed", e);
     }
   }
 
@@ -2931,11 +2951,7 @@ export default function App() {
       return;
     }
     const freshItems = await api.readItems();
-    if (Array.isArray(freshItems)) {
-      const filtered = filterPendingDeleted(freshItems);
-      setItems(filtered);
-      lastSavedRef.current = JSON.stringify(filtered);
-    }
+    if (Array.isArray(freshItems)) adoptPushedItems(freshItems);
   }
 
   async function handleReconcileTotals(referenceKey) {
@@ -5392,15 +5408,9 @@ export default function App() {
       if (!res?.ok) throw new Error(res?.error || "Failed to add outstanding items.");
       setOutstandingStatus(`Added ${res.added ?? 0} outstanding line(s).`);
 
-      // Pull fresh outstanding items immediately (fs.watch can be skipped while editing)
-      const latestItems = await api.readItems();
-      const normItems = filterPendingDeleted(normalizeItems(latestItems || []));
-      setItems((prev) => {
-        const merged = mergeItems(prev, normItems);
-        lastSavedRef.current = JSON.stringify(merged);
-        ensureBubblesForItems(merged, setBubbles);
-        return merged;
-      });
+      // The main process just added these parts, so re-read rather than waiting
+      // on the push. What comes back is already merged — adopt it as-is.
+      adoptPushedItems(await api.readItems());
 
       if (ordersInitialized) {
         // refresh orders so addedToOutstanding flags are reflected
@@ -5592,91 +5602,19 @@ export default function App() {
     return () => clearInterval(id);
   }, [sageLockInfo?.lockIsLive, sageLockInfo?.lock?.machineId, sageLockInfo?.ownMachineId]);
 
-  // ---- Bubble edit locks ----
-  const BUBBLE_LOCK_STALE_MS = 10000;
-
-  // Which bubble IDs this machine currently owns (derived from lock file)
-  const myEditingBubbleIds = React.useMemo(() => {
-    if (!ownMachineId) return new Set();
-    const now = Date.now();
-    return new Set(
-      Object.entries(bubbleLocks)
-        .filter(([, l]) => l.owner === ownMachineId && (now - (l.lastActive || 0)) < BUBBLE_LOCK_STALE_MS)
-        .map(([id]) => id)
-    );
-  }, [bubbleLocks, ownMachineId]);
-
-  // Load initial lock state
-  useEffect(() => {
-    if (!api?.getBubbleLocks) return;
-    api.getBubbleLocks().then((res) => {
-      if (res?.locks) setBubbleLocks(res.locks);
-      if (res?.ownMachineId) setOwnMachineId(res.ownMachineId);
-    }).catch(() => {});
-  }, []);
-
-  // Subscribe to lock file changes pushed from main process
-  useEffect(() => {
-    if (!api?.onBubbleLocksUpdated) return;
-    const off = api.onBubbleLocksUpdated(({ locks, ownMachineId: mid }) => {
-      setBubbleLocks(locks || {});
-      if (mid) setOwnMachineId(mid);
-
-      const pending = pendingRequestsRef.current;
-      Object.entries(pending).forEach(([bubbleId, req]) => {
-        const lock = (locks || {})[bubbleId];
-        if (!lock) return;
-        if (lock.owner === mid) {
-          // Our request was granted (or force-claim was confirmed)
-          clearTimeout(req.timeoutId);
-          delete pending[bubbleId];
-          setPendingRequestBubbles((prev) => { const n = new Set(prev); n.delete(bubbleId); return n; });
-        } else if (lock.request?.status === 'denied' && lock.request?.from === mid) {
-          // Explicitly denied
-          clearTimeout(req.timeoutId);
-          delete pending[bubbleId];
-          setPendingRequestBubbles((prev) => { const n = new Set(prev); n.delete(bubbleId); return n; });
-          alert(`Access to bubble "${lock.bubbleName || bubbleId}" was denied.`);
-        }
-      });
-    });
-    return () => off?.();
-  }, []);
-
-  // Heartbeat — keep owned bubbles fresh every 3s
-  useEffect(() => {
-    const ids = Array.from(myEditingBubbleIds);
-    if (ids.length === 0) return;
-    const interval = setInterval(() => {
-      ids.forEach((id) => api.heartbeatBubbleLock?.(id).catch(() => {}));
-    }, 3000);
-    return () => clearInterval(interval);
-  }, [myEditingBubbleIds]);
-
-  // Release all locks when window closes
-  useEffect(() => {
-    const release = () => {
-      myEditingBubbleIds.forEach((id) => api.releaseBubbleLock?.(id).catch(() => {}));
-    };
-    window.addEventListener('beforeunload', release);
-    return () => window.removeEventListener('beforeunload', release);
-  }, [myEditingBubbleIds]);
-
-  // Called when a bubble is destroyed — force-removes the lock regardless of who owns it
-  function _releaseBubbleLockOnDelete(bubbleId) {
-    api.releaseBubbleLock?.(bubbleId, { force: true }).catch(() => {});
-    _clearBubbleLockLocally(bubbleId);
-  }
-
-  function _clearBubbleLockLocally(bubbleId) {
-    setBubbleLocks((prev) => { const n = { ...prev }; delete n[bubbleId]; return n; });
-    const pending = pendingRequestsRef.current;
-    if (pending[bubbleId]) {
-      clearTimeout(pending[bubbleId].timeoutId);
-      delete pending[bubbleId];
-      setPendingRequestBubbles((prev) => { const n = new Set(prev); n.delete(bubbleId); return n; });
-    }
-  }
+  // ---- Bubble edit locks: removed ----
+  //
+  // One machine at a time could hold a bubble, via bubble_locks.json, a 3s
+  // heartbeat, a 10s staleness window, and a request/grant/deny handshake for
+  // taking one off someone. All of it existed to stop two machines editing the
+  // same order and losing one of the edits — which cannot happen now: the store
+  // merges per field against every machine's op log, and a genuine same-field
+  // collision is reported in Conflict Review rather than silently dropped.
+  //
+  // Note what is NOT being claimed: this never coordinated the PEOPLE, only the
+  // data. If "someone else is already picking this order" turns out to be worth
+  // showing, it wants presence — who is looking at what, advisory and never
+  // blocking — not a lock, and it can be built on the store like anything else.
 
   useEffect(() => {
     // The Epicor view needs orders too: assigning a scan to an order lists the
@@ -6134,14 +6072,7 @@ export default function App() {
               const res = await api.addArchiveLineToCashSales(order, line, target);
               if (res?.ok) {
                 try {
-                  const latest = await api.readItems();
-                  const norm = filterPendingDeleted(normalizeItems(latest || []));
-                  setItems((prev) => {
-                    const merged = mergeItems(prev, norm);
-                    lastSavedRef.current = JSON.stringify(merged);
-                    ensureBubblesForItems(merged, setBubbles);
-                    return merged;
-                  });
+                  adoptPushedItems(await api.readItems());
                 } catch (e) {
                   console.error("[archive-add] item refresh failed", e);
                 }
@@ -7122,6 +7053,8 @@ export default function App() {
         </div>
       )}
 
+      {/* Renders nothing unless two machines genuinely raced the same field. */}
+      <ConflictReview />
     </div>
   );
 }

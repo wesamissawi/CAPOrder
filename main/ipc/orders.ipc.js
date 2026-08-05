@@ -8,8 +8,6 @@ const registerOrdersIpc = (ipcMain, deps) => {
     getSageInvoiceActive,
     setSageInvoiceActive,
     resetSageQueue,
-    stopOrdersWatching,
-    startOrdersWatching,
     scheduleSageProcessing,
     syncOutstandingInvoices,
     readItems,
@@ -54,7 +52,6 @@ const registerOrdersIpc = (ipcMain, deps) => {
   // wrote — it kept an ever-staler copy of the array, un-blurred a locked card,
   // and offered "Send to Sage" again on an order that was already in Sage.
   function refreshOrdersWatch() {
-    startOrdersWatching(deps.getWin());
   }
 
   ipcMain.handle('sage:get-lock', () => {
@@ -130,7 +127,6 @@ const registerOrdersIpc = (ipcMain, deps) => {
       writeSageLock?.({ machineId: ownId, lockedAt: now, heartbeatAt: now, running: false });
       startSageHeartbeat?.();
       setSagePoActive(true);
-      startOrdersWatching(deps.getWin());
       scheduleSageProcessing();
       return { ok: true, active: true, path: getOrdersFile() };
     } catch (e) {
@@ -148,7 +144,6 @@ const registerOrdersIpc = (ipcMain, deps) => {
         return { ok: true, active: false };
       }
       setSageInvoiceActive(true);
-      startOrdersWatching(deps.getWin());
       scheduleSageProcessing();
       return { ok: true, active: true, path: getOrdersFile() };
     } catch (e) {

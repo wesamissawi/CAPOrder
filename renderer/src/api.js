@@ -23,6 +23,14 @@ const fallbackApi = {
   readItemHistory: warnAsync("readItemHistory", async () => ({ ok: false, history: [] })),
   exportItems: warnAsync("exportItems"),
   onItemsUpdated: warnEvent("onItemsUpdated"),
+
+  // Replicated store — concurrent-edit review.
+  readConflicts: warnAsync("readConflicts", async () => ({ ok: true, conflicts: [] })),
+  dismissConflict: warnAsync("dismissConflict", async () => ({ ok: true, conflicts: [] })),
+  dismissAllConflicts: warnAsync("dismissAllConflicts", async () => ({ ok: true, conflicts: [] })),
+  readStoreStats: warnAsync("readStoreStats", async () => ({ ok: false })),
+  onConflicts: warnEvent("onConflicts"),
+  onPaymentsUpdated: warnEvent("onPaymentsUpdated"),
   getDataPath: warnAsync("getDataPath", async () => ({ path: "(not in Electron)" })),
   revealDataFile: warnAsync("revealDataFile"),
   chooseItemsFile: warnAsync("chooseItemsFile"),
@@ -31,9 +39,6 @@ const fallbackApi = {
 
 
   // NEW ---- locking fallbacks
-  lockItem: warnAsync("lockItem"),
-  applyEdit: warnAsync("applyEdit"),
-  releaseLock: warnAsync("releaseLock"),
 
 
   readOrders: async () => [],
@@ -127,12 +132,6 @@ const fallbackApi = {
   onUpdateStatus: warnEvent("onUpdateStatus"),
   getSageLock: warnAsync("getSageLock", async () => ({ ok: false, lock: null, ownMachineId: null })),
   onSageLockChanged: warnEvent("onSageLockChanged"),
-  getBubbleLocks: warnAsync("getBubbleLocks", async () => ({ locks: {}, ownMachineId: null })),
-  claimBubbleLock: warnAsync("claimBubbleLock", async () => ({ ok: true, claimed: true })),
-  releaseBubbleLock: warnAsync("releaseBubbleLock"),
-  heartbeatBubbleLock: warnAsync("heartbeatBubbleLock"),
-  respondToBubbleRequest: warnAsync("respondToBubbleRequest"),
-  onBubbleLocksUpdated: warnEvent("onBubbleLocksUpdated"),
   readConfig: warnAsync("readConfig", async () => ({ ok: false, config: {}, raw: {}, overrides: {} })),
   writeConfig: warnAsync("writeConfig"),
   getAppConfig: warnAsync("getAppConfig"),

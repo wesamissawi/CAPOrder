@@ -12,37 +12,17 @@ const api = window.api ?? {
   useDefaultFile: async () => ({ ok: false }),
 };
 
+// How long a change may sit in memory before it is published. Coalesces the
+// burst of setItems calls behind one user action into a single commit; it is
+// not a throttle. Keep in step with the main app's SAVE_COALESCE_MS.
+const SAVE_COALESCE_MS = 250;
+
 // === Helpers ===
-function mergeItems(prev, incoming) {
-  const byUid = new Map(prev.map((it) => [it.uid, it]));
-  const result = [];
-
-  for (const incomingItem of incoming) {
-    const existing = byUid.get(incomingItem.uid);
-    if (!existing) {
-      // brand new item → add it
-      result.push(incomingItem);
-      continue;
-    }
-
-    // If equal, keep the existing object to avoid remounts
-    const same = JSON.stringify(existing) === JSON.stringify(incomingItem);
-    if (same) {
-      result.push(existing);
-    } else {
-      // Keep whichever has the higher rev so a stale push can't revert a local
-      // edit; on a tie prefer the incoming disk copy so machines converge.
-      const er = Number(existing && existing.rev) || 0;
-      const ir = Number(incomingItem && incomingItem.rev) || 0;
-      result.push(er > ir ? existing : incomingItem);
-    }
-
-    byUid.delete(incomingItem.uid);
-  }
-
-  // Any remaining in byUid were deleted from disk → drop them
-  return result;
-}
+// This window had its own copy of mergeItems — a per-item, rev-based
+// last-writer-wins over incoming pushes. Removed for the same reason as the
+// main app's: a push is already the merged truth (main/crdt/merge.js), and
+// re-deciding it here discarded other machines' changes wholesale. Pushes are
+// now adopted as-is.
 
 function makeUid() {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
@@ -84,8 +64,8 @@ function normalizeItems(arr) {
       itemcode: String(it.itemcode ?? ""),
       notes1: it.notes1 ?? "",
       notes2: it.notes2 ?? "",
-      // Preserve the per-item version so edits made here aren't rejected as
-      // stale by the version-gated write in the main process.
+      // Inert — the version gate this fed is gone. Carried through so the value
+      // on the share isn't disturbed. See utils/inventory.js.
       rev: Number.isFinite(Number(it.rev)) ? Number(it.rev) : 0,
       quantity:
         typeof it.quantity === "number"
@@ -96,12 +76,6 @@ function normalizeItems(arr) {
       sold_status: String(it.sold_status ?? ""),
     };
   });
-}
-
-// Bump the per-item version whenever this window edits an item.
-function nextRev(it) {
-  const r = Number(it && it.rev);
-  return (Number.isFinite(r) ? r : 0) + 1;
 }
 
 function ensureBubblesForItems(items, setBubblesFn) {
@@ -149,9 +123,8 @@ export default function App() {
   const draggedItemUidRef = useRef(null);
 
   // Anti save/watch loop
-  // "[]" matches the initial items state so autosave can't fire before load
+  // "[]" matches the initial items state so a save can't fire before load
   const lastSavedRef = useRef("[]");
-  const skipNextSaveRef = useRef(false);
   const itemsLoadedRef = useRef(false);
 
   const isEditingAllocatedForRef = useRef(false);
@@ -171,70 +144,43 @@ export default function App() {
       console.error("[init] readItems failed — saving disabled until load succeeds", e);
     });
 
-    // const off = api.onItemsUpdated((arr) => {
-    //   skipNextSaveRef.current = true;
-    //   const norm = normalizeItems(arr || []);
-    //   console.log("[ipc] items:updated ->", norm);
-    //   setItems(norm);
-    //   lastSavedRef.current = JSON.stringify(norm);
-    //   // ⬇️ also ensure bubbles for new/changed items
-    //   ensureBubblesForItems(norm, setBubbles);
-    // });
     const off = api.onItemsUpdated((arr) => {
+        itemsLoadedRef.current = true; // main only pushes successfully-read data
+        // Held back while a price is being typed, so the field isn't re-rendered
+        // under the cursor. Nothing is lost: the store keeps the merged state
+        // and the next push carries it.
         if (isEditingAllocatedForRef.current) {
-            console.log("[ipc] items:updated ignored (user is editing)");
+            console.log("[ipc] items:updated deferred (user is editing)");
             return;
         }
 
-        
         const norm = normalizeItems(arr || []);
-        itemsLoadedRef.current = true; // main only pushes successfully-read data
-        setItems((prev) => {
-            const merged = mergeItems(prev, norm);
-            lastSavedRef.current = JSON.stringify(merged);
-            ensureBubblesForItems(merged, setBubbles);
-            return merged;
-        });
+        setItems(norm);
+        lastSavedRef.current = JSON.stringify(norm);
+        ensureBubblesForItems(norm, setBubbles);
     });
 
 
     return () => off && off();
   }, []);
 
-//   // ==== Debounced save, no loops ====
-//   useEffect(() => {
-//     const id = setTimeout(() => {
-//       if (skipNextSaveRef.current) {
-//         skipNextSaveRef.current = false;
-//         return;
-//       }
-//       const current = JSON.stringify(items);
-//       if (current === lastSavedRef.current) return;
-//       lastSavedRef.current = current;
-//       console.log("[save] writing items to disk", items);
-//       api.writeItems(items);
-//     }, 300);
-//     return () => clearTimeout(id);
-//   }, [items]);
-
-// ==== Autosave after 10s of inactivity ====
+// ==== Write-through save ====
+// Mirrors the main app's effect: a change is published as soon as the burst of
+// setItems calls behind one user action has settled. The window is for
+// coalescing, not for throttling the share — saves are diffed field-by-field
+// and a save with nothing in it costs nothing (see main/crdt/merge.js).
 useEffect(() => {
   // If nothing in items, nothing to save
   if (!items) return;
-  // Never autosave before the first successful load — empty state would erase files
+  // Never save before the first successful load — empty state would erase files
   if (!itemsLoadedRef.current) return;
 
   const id = setTimeout(() => {
-    if (skipNextSaveRef.current) {
-      skipNextSaveRef.current = false;
-      return;
-    }
     const current = JSON.stringify(items);
     if (current === lastSavedRef.current) return;
     lastSavedRef.current = current;
-    console.log("[autosave] writing items to disk after idle", items);
     api.writeItems(items);
-  }, 10000); // 10 seconds of no changes
+  }, SAVE_COALESCE_MS);
 
   return () => clearTimeout(id); // reset timer on every items change
 }, [items]);
@@ -242,7 +188,7 @@ useEffect(() => {
 
   // ==== Helpers ====
   function updateItemByKey(uid, patch) {
-    setItems((prev) => prev.map((it) => (it.uid === uid ? { ...it, ...patch, rev: nextRev(it) } : it)));
+    setItems((prev) => prev.map((it) => (it.uid === uid ? { ...it, ...patch } : it)));
   }
 
   function toggleExpand(uid) {
@@ -297,7 +243,7 @@ function handleAllocatedForBlur(it) {
     // Update items in React state
     setItems((prev) => {
       const next = prev.map((item) =>
-        item.uid === uid ? { ...item, allocated_for: normalized, rev: nextRev(item) } : item
+        item.uid === uid ? { ...item, allocated_for: normalized } : item
       );
       // Immediately persist this change
       lastSavedRef.current = JSON.stringify(next);

@@ -1,6 +1,7 @@
 const registerItemsIpc = (ipcMain, deps) => {
   const {
     readItems,
+    checkoutItems,
     writeItems,
     readHistory,
     getDataFile,
@@ -12,14 +13,17 @@ const registerItemsIpc = (ipcMain, deps) => {
     startWatching,
     getWin,
     setDataFileOverride,
-    LOCK_DURATION_MS,
-    cleanExpiredLocks,
     runSageSalesInvoice,
   } = deps;
 
   // items:read intentionally lets read failures reject the invoke — the
   // renderer must treat that as "unknown state", never as an empty list.
-  ipcMain.handle('items:read', () => readItems());
+  //
+  // checkoutItems, not readItems: this snapshots what the UI is being shown so
+  // that when it saves the whole array back — possibly minutes later — the
+  // store can tell which fields the USER changed from the ones other machines
+  // changed underneath. See main/crdt/store.js.
+  ipcMain.handle('items:read', () => checkoutItems());
   // Upsert-by-uid save. Items absent from `items` are preserved on disk;
   // deletions happen only for the uids the renderer explicitly lists in
   // `deletedUids`. This stops a stale/partial renderer state from erasing
@@ -35,13 +39,17 @@ const registerItemsIpc = (ipcMain, deps) => {
       const historyEvent = allowedEvents.includes(options?.historyEvent?.event)
         ? { event: options.historyEvent.event, extra: options.historyEvent.extra || {} }
         : null;
-      const current = readItems();              // throws if any queue file is unreadable
-      const a = JSON.stringify(current);
-      const b = JSON.stringify(items ?? []);
-      if (a !== b || deletions.length > 0) {
-        writeItems(items, { replaceAll: false, deletedUids: deletions, deleteReason, historyEvent });
-      }
-      return { ok: true };
+      // No pre-flight comparison against a fresh read any more: it was there to
+      // avoid pointless whole-file rewrites, and it would now do harm — reading
+      // here would move the diff baseline off what the renderer was shown. The
+      // store already emits nothing when nothing changed.
+      const res = writeItems(items, {
+        deletedUids: deletions,
+        deleteReason,
+        historyEvent,
+        fromClient: true,
+      });
+      return { ok: true, ops: res?.ops ?? 0 };
     } catch (e) {
       console.error('[items:write] aborted', e?.message || e);
       return { ok: false, error: e?.message || 'Failed to save items.' };
@@ -94,80 +102,22 @@ const registerItemsIpc = (ipcMain, deps) => {
     return { ok: true, path: getDataFile() };
   });
 
-  // Acquire a 20s lock on a specific item
-  ipcMain.handle('items:lock-item', (_evt, uid) => {
-    try {
-    let items = readItems();
-    const { items: cleaned, changed } = cleanExpiredLocks(items);
-    if (changed) {
-      items = cleaned;
-      writeItems(items);
-    }
-
-    const idx = items.findIndex((it) => it.uid === uid);
-    if (idx === -1) {
-      return { ok: false, reason: 'not-found' };
-    }
-
-    const it = items[idx];
-    const now = Date.now();
-
-    if (it.lock_expires_at && it.lock_expires_at > now) {
-      // Someone else holds a valid lock
-      return { ok: false, reason: 'locked' };
-    }
-
-    const lock_expires_at = now + LOCK_DURATION_MS;
-    items[idx] = { ...it, lock_expires_at };
-    writeItems(items);
-
-    return { ok: true, item: items[idx], lock_expires_at };
-    } catch (e) {
-      console.error('[items:lock-item] aborted', e?.message || e);
-      return { ok: false, reason: 'read-failed', error: e?.message };
-    }
-  });
-
-  // Apply an edit to a locked item and remove the lock
-  ipcMain.handle('items:apply-edit', (_evt, uid, patch) => {
-    try {
-    let items = readItems();
-    const { items: cleaned, changed } = cleanExpiredLocks(items);
-    if (changed) {
-      items = cleaned;
-      writeItems(items);
-    }
-
-    const idx = items.findIndex((it) => it.uid === uid);
-    if (idx === -1) {
-      return { ok: false, reason: 'not-found' };
-    }
-
-    const it = items[idx];
-    const now = Date.now();
-
-    if (!it.lock_expires_at || it.lock_expires_at < now) {
-      // Lock expired or never existed
-      return { ok: false, reason: 'lock-expired' };
-    }
-
-    // Don't keep the lock field in the final saved item
-    const { lock_expires_at, ...rest } = it;
-    // Bump rev so this edit supersedes stale copies on other machines. If the
-    // patch itself carries a rev, respect it (it's already newer); otherwise
-    // increment from the current value.
-    const patchRev = Number(patch && patch.rev);
-    const bumpedRev = Number.isFinite(patchRev) ? patchRev : (Number(rest.rev) || 0) + 1;
-    const updated = { ...rest, ...(patch || {}), rev: bumpedRev };
-    items[idx] = updated;
-
-    writeItems(items);
-    return { ok: true, item: updated };
-    } catch (e) {
-      console.error('[items:apply-edit] aborted', e?.message || e);
-      return { ok: false, reason: 'read-failed', error: e?.message };
-    }
-  });
+  // items:lock-item / items:apply-edit / items:release-lock lived here.
+  //
+  // A 20-second exclusive lock on one item, taken before an edit and dropped
+  // after, with an expiry sweep so a machine that died mid-edit didn't leave a
+  // part unopenable forever. It made one edit at a time possible on a shared
+  // file where a save rewrote the whole thing.
+  //
+  // Two machines editing the same part is no longer a race to be prevented:
+  // different fields both survive, and the same field resolves the same way on
+  // every machine and is reported in Conflict Review. Locking would now cost
+  // availability — a part stuck behind a dead machine's lock — to prevent
+  // something that can't happen.
+  //
+  // `clearFields` on the store stays. It is how the CRDT expresses "this field
+  // is gone" (a clear has to replicate, or other machines keep a value this one
+  // dropped), not lock machinery — these handlers were just its only caller.
 
   ipcMain.handle('items:sage-sales-invoice', async (_evt, bubbleName, customerCode, notes, paymentType, options) => {
     if (typeof runSageSalesInvoice !== 'function') {
@@ -190,27 +140,6 @@ const registerItemsIpc = (ipcMain, deps) => {
     });
   });
 
-  // Optional: manual lock release (e.g., user cancels)
-  ipcMain.handle('items:release-lock', (_evt, uid) => {
-    try {
-      let items = readItems();
-      const idx = items.findIndex((it) => it.uid === uid);
-      if (idx === -1) return { ok: false, reason: 'not-found' };
-
-      const it = items[idx];
-      if (!it.lock_expires_at) {
-        return { ok: true, released: false }; // nothing to do
-      }
-
-      const { lock_expires_at, ...rest } = it;
-      items[idx] = rest;
-      writeItems(items);
-      return { ok: true, released: true };
-    } catch (e) {
-      console.error('[items:release-lock] aborted', e?.message || e);
-      return { ok: false, reason: 'read-failed', error: e?.message };
-    }
-  });
 };
 
 module.exports = { registerItemsIpc };

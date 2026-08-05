@@ -1,24 +1,19 @@
 const createWatchersService = (deps) => {
+  // Two watchers left: the op-log directory (everything replicated) and
+  // sage_lock.json (the one exclusion that isn't about data). The queue-file,
+  // orders, bubble-shared and bubble-lock watchers are gone, and so are the
+  // readers they needed.
   const {
     fs,
     getWin,
-    getQueueFile,
-    getOrdersFile,
-    ensureDataFileAt,
-    ensureSharedBubbleFile,
-    readItems,
-    readOrders,
-    readSharedBubbleData,
-    scheduleSageProcessing,
-    getSageIntegrationActive,
+    getCrdtOpsDir,
+    refreshCrdt,
     getSagePoActive,
     getSageLockFile,
     readSageLock,
     sageLockIsLive,
     getMachineId,
     onSageLockForcedOff,
-    getBubbleLocksFile,
-    readBubbleLocks,
   } = deps;
 
   const chokidar = (() => {
@@ -28,10 +23,7 @@ const createWatchersService = (deps) => {
   const useChokidar = Boolean(chokidar && typeof chokidar.watch === 'function');
 
   let itemsWatchers = [];
-  let ordersWatcher = null;
-  let bubbleSharedWatcher = null;
   let sageLockWatcher = null;
-  let bubbleLockWatcher = null;
   const debounceTimers = new Map();
 
   function debounce(key, fn, wait = 200) {
@@ -77,12 +69,25 @@ const createWatchersService = (deps) => {
     };
   }
 
+  // ---- replicated store ----
+  //
+  // One watcher on <share>/crdt/ops replaces the per-file watchers that used to
+  // sit on each queue file, orders.json and bubble_shared.json.
+  //
+  // Watching the op logs instead of the data files is a strictly better signal:
+  //
+  //   * Op logs are append-only, so a change event means "there is more to
+  //     read", never "someone is halfway through replacing this file". The
+  //     awaitWriteFinish debounce and the skip-the-push-on-a-failed-read guards
+  //     existed only to survive that second case.
+  //   * A refresh reads just the bytes appended since last time, rather than
+  //     re-parsing every file from the top.
+  //   * The store works out which entities actually changed, so the renderer is
+  //     only told about what moved.
+  //
+  // The projection files are still written, but nothing watches them any more —
+  // they are output, not a channel.
   function startWatching() {
-    const files = [
-      getQueueFile('OUTSTANDING'),
-      getQueueFile('SAGE_AR'),
-      getQueueFile('CASH_SALE'),
-    ];
     itemsWatchers.forEach((w) => {
       try {
         if (typeof w === 'function') w();
@@ -90,88 +95,65 @@ const createWatchersService = (deps) => {
       } catch {}
     });
     itemsWatchers = [];
-    files.forEach((file) => {
-      ensureDataFileAt(file);
-      const w = createFileWatcher(file, () => {
-        // A failed/partial read (e.g. another machine mid-write over SMB) must
-        // never reach the renderer: it would look like items were deleted and
-        // a later save would erase them for real. Skip the push instead.
-        let arr;
-        try {
-          arr = readItems();
-        } catch (e) {
-          console.error('[main] watch -> items read failed, skipping push', e?.message || e);
-          return;
-        }
-        const win = getWin();
-        if (win && !win.isDestroyed()) {
-          win.webContents.send('items:updated', arr);
-          // Allocation summary makes it obvious when an incoming push still has
-          // items sitting in CASHPAD (i.e. it will revert a just-done fill).
-          let allocSummary = {};
-          try {
-            allocSummary = (arr || []).reduce((acc, it) => {
-              const k = (it && it.allocated_to) || '(none)';
-              acc[k] = (acc[k] || 0) + 1;
-              return acc;
-            }, {});
-          } catch {}
-          const changedFile = require('path').basename(file);
-          console.log('[main] watch -> items:updated', arr.length, 'changedFile=', changedFile, 'alloc=', JSON.stringify(allocSummary));
-        }
-      }, 'items');
-      itemsWatchers.push(w);
-    });
-  }
 
-  function startBubbleSharedWatching() {
-    try {
-      if (typeof bubbleSharedWatcher === 'function') bubbleSharedWatcher();
-      else if (bubbleSharedWatcher && typeof bubbleSharedWatcher.close === 'function') bubbleSharedWatcher.close();
-    } catch {}
-    const target = ensureSharedBubbleFile();
-    bubbleSharedWatcher = createFileWatcher(target, () => {
-      const data = readSharedBubbleData();
-      const win = getWin();
-      if (win && !win.isDestroyed()) {
-        win.webContents.send('bubble-shared:updated', data);
-        console.log('[main] watch -> bubble-shared:updated');
-      }
-    }, 'bubble-shared');
-  }
+    if (typeof getCrdtOpsDir !== 'function' || typeof refreshCrdt !== 'function') {
+      console.warn('[watch] CRDT ops dir not configured — remote changes will not stream in');
+      return;
+    }
 
-  function startOrdersWatching() {
-    const file = getOrdersFile();
+    const dir = getCrdtOpsDir();
     try {
-      if (typeof ordersWatcher === 'function') ordersWatcher();
-      else if (ordersWatcher && typeof ordersWatcher.close === 'function') ordersWatcher.close();
-    } catch {}
-    ensureDataFileAt(file);
-    ordersWatcher = createFileWatcher(file, () => {
-      let arr;
+      fs.mkdirSync(dir, { recursive: true });
+    } catch (e) {
+      console.error('[watch] could not create ops dir', dir, e);
+    }
+
+    // Watch the DIRECTORY, not individual logs: a machine that joins the share
+    // later shows up as a new file, and a per-file watcher list would never see
+    // it. Pulling in that case is exactly when it matters most.
+    const onOps = () => {
       try {
-        arr = readOrders();
+        refreshCrdt();
       } catch (e) {
-        console.error('[main] watch -> orders read failed, skipping push', e?.message || e);
-        return;
+        console.error('[watch] crdt refresh failed', e?.message || e);
       }
-      const win = getWin();
-      if (win && !win.isDestroyed()) {
-        win.webContents.send('orders:updated', arr);
-        console.log('[main] watch -> orders:updated', Array.isArray(arr) ? arr.length : 0);
+    };
+
+    if (useChokidar) {
+      const watcher = chokidar.watch(dir, { ignoreInitial: true, depth: 0 });
+      const handler = () => debounce('crdt-ops', onOps, 150);
+      watcher.on('add', handler);
+      watcher.on('change', handler);
+      watcher.on('unlink', handler);
+      itemsWatchers.push(() => {
+        try { watcher.close(); } catch {}
+      });
+    } else {
+      try {
+        const watcher = fs.watch(dir, { persistent: false }, () => debounce('crdt-ops', onOps, 150));
+        itemsWatchers.push(() => {
+          try { watcher.close(); } catch {}
+        });
+      } catch (e) {
+        console.error('[watch] fs.watch on ops dir failed', e);
       }
-      if (getSageIntegrationActive())
-        scheduleSageProcessing();
-    }, 'orders');
+    }
+
+    // A directory watch over SMB can miss events — the change notification is
+    // best-effort on a network share, and a missed one would leave this machine
+    // quietly stale. A slow poll is the backstop; it costs a stat per log.
+    const poll = setInterval(onOps, 5000);
+    itemsWatchers.push(() => clearInterval(poll));
+
+    console.log('[watch] watching op logs at', dir);
   }
 
-  function stopOrdersWatching() {
-    try {
-      if (typeof ordersWatcher === 'function') ordersWatcher();
-      else if (ordersWatcher && typeof ordersWatcher.close === 'function') ordersWatcher.close();
-    } catch {}
-    ordersWatcher = null;
-  }
+  // startOrdersWatching / stopOrdersWatching / startBubbleSharedWatching lived
+  // here. Orders and shared bubbles ride the op-log watcher above like
+  // everything else, so the three were already empty stubs kept to spare their
+  // call sites; the call sites are gone too now. Sage processing is triggered
+  // from the store's change callback in main.js, which knows whether orders
+  // were among the entities that actually changed.
 
   function startSageLockWatching() {
     if (!getSageLockFile || !readSageLock || !getMachineId) return;
@@ -204,33 +186,13 @@ const createWatchersService = (deps) => {
     }, 'sage-lock');
   }
 
-  function startBubbleLockWatching() {
-    if (!getBubbleLocksFile || !readBubbleLocks) return;
-    try {
-      if (typeof bubbleLockWatcher === 'function') bubbleLockWatcher();
-      else if (bubbleLockWatcher && typeof bubbleLockWatcher.close === 'function') bubbleLockWatcher.close();
-    } catch {}
-    const file = getBubbleLocksFile();
-    if (!file) return;
-    bubbleLockWatcher = createFileWatcher(file, () => {
-      const locks = readBubbleLocks();
-      const win = getWin();
-      if (win && !win.isDestroyed()) {
-        win.webContents.send('bubble-lock:updated', {
-          locks,
-          ownMachineId: getMachineId ? getMachineId() : null,
-        });
-      }
-    }, 'bubble-lock');
-  }
+  // startBubbleLockWatching lived here. The bubble lock is gone — see main.js.
+  // The sage lock keeps its watcher: that one coordinates a single Sage UI
+  // being driven by AHK, which is a real-world exclusion the store can't merge.
 
   return {
     startWatching,
-    startBubbleSharedWatching,
-    startOrdersWatching,
-    stopOrdersWatching,
     startSageLockWatching,
-    startBubbleLockWatching,
   };
 };
 

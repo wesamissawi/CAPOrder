@@ -58,7 +58,6 @@ export default function StopAssignModal({
           ...it,
           allocated_for: drafts[it.uid].trim(),
           last_moved_at: new Date().toISOString(),
-          rev: (Number(it.rev) || 0) + 1,
         }));
       await onConfirm(changed);
     } finally {

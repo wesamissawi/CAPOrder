@@ -93,6 +93,26 @@ const BANDS = [
     cardCls: "border-slate-300 opacity-90",
     badgeCls: "bg-slate-200 text-slate-600 border-slate-300",
   },
+  // The two status bands. They sit AFTER the age bands on purpose: an order
+  // that's on the counter or already out the door isn't work you're chasing,
+  // so it drops out of the age queue at the top and parks down here until it's
+  // archived. Both are driven by their checkbox, not by the clock.
+  {
+    key: "COUNTER",
+    label: "Counter",
+    hint: "waiting to be picked up",
+    headerCls: "border-sky-200 bg-sky-50 text-sky-700",
+    cardCls: "border-sky-300 ring-1 ring-sky-100",
+    badgeCls: "bg-sky-100 text-sky-700 border-sky-300",
+  },
+  {
+    key: "DELIVERED",
+    label: "Delivered",
+    hint: "handed off to the customer",
+    headerCls: "border-emerald-200 bg-emerald-50 text-emerald-700",
+    cardCls: "border-emerald-300",
+    badgeCls: "bg-emerald-100 text-emerald-700 border-emerald-300",
+  },
 ];
 
 // An order's age in ms. `meta.createdAt` is the real answer, but it's only
@@ -113,7 +133,14 @@ function resolveOrderAgeMs(meta, items, nowMs) {
   return earliest === Infinity ? null : nowMs - earliest;
 }
 
-function bandKeyFor(ageMs) {
+// Status beats the clock: once an order is on the counter or delivered, how
+// old it is stops being the thing that decides where it sits. Delivered wins
+// over Counter for the same reason — it's the later state — though the
+// checkboxes clear each other, so an order carrying both is only ever a
+// leftover from an older build.
+function bandKeyFor(ageMs, meta) {
+  if (meta?.delivered === true) return "DELIVERED";
+  if (meta?.counter === true) return "COUNTER";
   if (ageMs === null) return "REGULAR";
   if (ageMs < URGENT_MAX_MS) return "URGENT";
   if (ageMs < REGULAR_MAX_MS) return "REGULAR";
@@ -252,11 +279,29 @@ function OrderCard({
           just a browsable list of what's sitting there. */}
       {!isPool && (
       <div className="mt-2 flex flex-wrap items-center gap-2">
+        {/* Counter and Delivered are the same order at two different moments,
+            so each clears the other — sent as ONE patch, because two separate
+            flag calls would both read the same pre-change meta. */}
+        <label
+          className="flex items-center gap-1.5 text-xs font-semibold text-slate-600"
+          title="Picked and sitting on the counter, waiting for the customer"
+        >
+          <input
+            type="checkbox"
+            checked={meta?.counter === true}
+            onChange={(e) =>
+              onSetFlag(bubble.id, { counter: e.target.checked, delivered: false })
+            }
+          />
+          Counter
+        </label>
         <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600">
           <input
             type="checkbox"
             checked={meta?.delivered === true}
-            onChange={(e) => onSetFlag(bubble.id, "delivered", e.target.checked)}
+            onChange={(e) =>
+              onSetFlag(bubble.id, { delivered: e.target.checked, counter: false })
+            }
           />
           Delivered
         </label>
@@ -501,6 +546,9 @@ export default function SalesOrderView({
   const stableUpdateBubbleNotes = useCallback((id, notes) => handlersRef.current.onUpdateBubbleNotes(id, notes), []);
   const stableNotesCommit = useCallback((id, notes) => handlersRef.current.onBubbleNotesBlur(id, notes), []);
   const stableRequestPrint = useCallback((bubble) => handlersRef.current.onRequestPrint(bubble), []);
+  // `flag` is either a key ("paid") or a whole patch ({ counter, delivered }) —
+  // App.jsx accepts both, and the patch form is what keeps Counter/Delivered
+  // from clobbering each other.
   const stableSetFlag = useCallback((id, flag, value) => handlersRef.current.onSetBubbleFlag(id, flag, value), []);
   const stableSendToCashPad = useCallback((id) => handlersRef.current.onSendToCashPad(id), []);
   const stableSendToReturns = useCallback((id) => handlersRef.current.onSendToReturns(id), []);
@@ -556,7 +604,7 @@ export default function SalesOrderView({
       )
       .map((o) => {
         const ageMs = resolveOrderAgeMs(o.meta, o.items, nowMs);
-        return { ...o, ageMs, bandKey: bandKeyFor(ageMs) };
+        return { ...o, ageMs, bandKey: bandKeyFor(ageMs, o.meta) };
       })
       // Oldest first inside each band, so the order closest to slipping into the
       // next band sits at the top of its section. Unknown ages (no createdAt, no
@@ -610,8 +658,8 @@ export default function SalesOrderView({
   const toggleCashPad = useCallback(() => setCashPadCollapsed((v) => !v), []);
 
   // Local-state update — same path BubbleColumn's own price field uses
-  // (onUpdateItem = App.jsx's updateItemByKey), so it persists through the
-  // app's normal debounced items save rather than a separate write.
+  // (onUpdateItem = App.jsx's updateItemByKey). App's write-through save
+  // publishes it a beat later, so this needs no write of its own.
   const handleSavePrice = useCallback((uid, value) => {
     handlersRef.current.onUpdateItem(uid, { allocated_for: value });
   }, []);

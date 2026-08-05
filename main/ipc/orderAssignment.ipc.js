@@ -404,7 +404,6 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
             ...it,
             allocated_to: destination,
             last_moved_at: nowIso,
-            rev: (Number(it.rev) || 0) + 1,
           });
           touchedUids.push(it.uid);
           need -= have;
@@ -415,7 +414,6 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
             ...it,
             quantity: have - need,
             last_moved_at: nowIso,
-            rev: (Number(it.rev) || 0) + 1,
           });
           const spawn = {
             ...it,
@@ -423,7 +421,6 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
             quantity: need,
             allocated_to: destination,
             last_moved_at: nowIso,
-            rev: 1,
           };
           upserts.push(spawn);
           touchedUids.push(spawn.uid);
@@ -510,7 +507,6 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
         // anyone must not stay in the Sage AR or CashPad queue.
         accountingPath: 'OUTSTANDING',
         last_moved_at: nowIso,
-        rev: (Number(it.rev) || 0) + 1,
       }));
 
       let returned = upserts.reduce((sum, it) => sum + (Number(it.quantity) || 0), 0);
@@ -592,7 +588,6 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
           ? {}
           : { return_slip_id: '', return_slip_date: '', return_slip_po: '', return_slip_status: '' }),
         last_moved_at: nowIso,
-        rev: (Number(item.rev) || 0) + 1,
       };
       writeItems([moved]);
 

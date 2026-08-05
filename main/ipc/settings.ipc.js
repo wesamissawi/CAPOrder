@@ -15,8 +15,6 @@ const registerSettingsIpc = (ipcMain, deps) => {
     getSharedDirInfo,
     writeAppConfig,
     startWatching,
-    startOrdersWatching,
-    startBubbleSharedWatching,
     validateWritable,
     migrateBusinessFilesToShared,
     getResolvedPathsSummary,
@@ -56,8 +54,6 @@ const registerSettingsIpc = (ipcMain, deps) => {
       ensureBusinessFiles();
       // restart watchers to pick up new shared dir
       startWatching(deps.getWin());
-      startOrdersWatching(deps.getWin());
-      startBubbleSharedWatching(deps.getWin());
       const { sharedDir, sharedConfigured } = getSharedDirInfo();
       return { ok: true, config: { ...next, sharedDataDir: sharedDir, instanceDataDir: INSTANCE_DIR }, sharedConfigured, path: INSTANCE_PATHS.appConfig };
     } catch (e) {
@@ -103,7 +99,6 @@ const registerSettingsIpc = (ipcMain, deps) => {
       const res = migrateBusinessFilesToShared(mode);
       ensureBusinessFiles();
       startWatching(deps.getWin());
-      startOrdersWatching(deps.getWin());
       return res;
     } catch (e) {
       console.error('[app-config:migrate-business]', e);

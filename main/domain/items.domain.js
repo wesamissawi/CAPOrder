@@ -84,7 +84,6 @@ const createItemsDomain = (deps) => {
       source_inv: inv || order?.source || 'world',
       warehouse: order?.warehouse || order?.seller || '',
       last_moved_at: nowIso,
-      rev: 1,
       quantity: qty,
       reference_num: order?.reference || '',
       sold_date: '',
@@ -95,42 +94,18 @@ const createItemsDomain = (deps) => {
     };
   }
 
-  function splitItemsByQueue(items) {
-    const buckets = {
-      OUTSTANDING: [],
-      SAGE_AR: [],
-      CASH_SALE: [],
-    };
-    (items || []).forEach((it) => {
-      const queue = it?.accountingPath || 'OUTSTANDING';
-      if (queue === 'SAGE_AR') buckets.SAGE_AR.push(it);
-      else if (queue === 'CASH_SALE') buckets.CASH_SALE.push(it);
-      else buckets.OUTSTANDING.push(it);
-    });
-    return buckets;
-  }
+  // splitItemsByQueue used to live here, fanning a merged list back out into the
+  // three queue files. accountingPath is a plain field on the record now and the
+  // split is a projection concern — see main/crdt/projections.js.
 
-  function cleanExpiredLocks(items) {
-    const now = Date.now();
-    let changed = false;
-    const cleaned = items.map((it) => {
-      if (it.lock_expires_at && it.lock_expires_at < now) {
-        const { lock_expires_at, ...rest } = it;
-        changed = true;
-        return rest;
-      }
-      return it;
-    });
-    return { items: cleaned, changed };
-  }
+  // cleanExpiredLocks used to live here — the sweep that freed an item whose
+  // 20s edit lock had lapsed. The lock is gone; see main/ipc/items.ipc.js.
 
   return {
     toMoneyString,
     computeAllocatedFor,
     toDDMMYYYY,
     makeOutstandingFromLine,
-    splitItemsByQueue,
-    cleanExpiredLocks,
   };
 };
 
