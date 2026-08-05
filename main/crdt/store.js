@@ -443,6 +443,11 @@ function createStore(deps) {
     const baselineFor = fromClient ? checkedOut[entity] : served[entity];
     const ops = [];
 
+    // Passed as a function so a stamp is minted only for records that actually
+    // changed. Most callers hand back a whole collection to change one row in
+    // it, so this is the difference between 1 stamp and 1,100. See diffToOp.
+    const mintHlc = () => clock.tick();
+
     for (const raw of values || []) {
       if (!raw) continue;
       const record = def.ensureKey(raw);
@@ -458,7 +463,7 @@ function createStore(deps) {
         record,
         base ? base.value : null,
         base ? base.version : recordVersion(tables[entity].get(key)),
-        clock.tick(),
+        mintHlc,
         clearFields
       );
       if (op) ops.push(op);
@@ -479,6 +484,10 @@ function createStore(deps) {
     // safe and every machine (including this one, on restart) picks it up.
     appendOps(getCrdtDir(), machineId, ops);
     advanceOwnOffset();
+    // Persist the clock at the same boundary the log becomes durable — once per
+    // commit rather than once per stamp. Anything the debounce is still holding
+    // goes out here too.
+    clock.flush();
 
     const result = applyOps(ops);
     // Our own writes become the new baseline immediately, so a follow-up save

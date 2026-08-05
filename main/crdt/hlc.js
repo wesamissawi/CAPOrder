@@ -79,6 +79,21 @@ function hlcMillis(stamp) {
 // that restarts after its system clock was corrected backwards would issue
 // timestamps below ones it already published, and its own recent writes would
 // start losing to its own older ones.
+//
+// Persisting is COALESCED, not synchronous per stamp. It used to write on every
+// tick and every advancing observe, which measured at 8ms a call inside Electron
+// (a synchronous write to the user-data directory, scanned on close). One order
+// archive mints ~1,300 stamps, so stamping cost 10.6 seconds against 19ms of
+// actual merge work, and a startup that replays the op log paid it once per op.
+//
+// Coalescing is safe because this file is not the clock's source of truth. On
+// startup every op read from every log is passed through observe(), so the real
+// high-water mark is recovered from the logs themselves. What's left for this
+// file to cover is the narrow case where the system clock moves BACKWARDS across
+// a restart — and against the drift that guards against, a second of staleness
+// is nothing.
+const PERSIST_DEBOUNCE_MS = 1000;
+
 function createClock({ machineId, now = Date.now, load = () => null, persist = () => {} }) {
   if (!machineId) throw new Error('createClock requires a machineId');
 
@@ -86,13 +101,37 @@ function createClock({ machineId, now = Date.now, load = () => null, persist = (
   let lastMs = Number.isFinite(Number(restored.ms)) ? Number(restored.ms) : 0;
   let counter = Number.isFinite(Number(restored.counter)) ? Number(restored.counter) : 0;
 
-  function save() {
+  // What we have actually written, so a flush with nothing new to say is free.
+  let savedMs = lastMs;
+  let savedCounter = counter;
+  let pending = null;
+
+  // Write now. Called at commit boundaries (where the op log is already being
+  // made durable) and on shutdown.
+  function flush() {
+    if (pending) {
+      clearTimeout(pending);
+      pending = null;
+    }
+    if (savedMs === lastMs && savedCounter === counter) return;
     try {
       persist({ ms: lastMs, counter });
+      savedMs = lastMs;
+      savedCounter = counter;
     } catch {
       // A clock that can't persist is still correct for this run; the restart
       // hazard above is rare enough that it must not block a save.
     }
+  }
+
+  function save() {
+    if (pending) return; // already scheduled — this is the coalescing
+    pending = setTimeout(() => {
+      pending = null;
+      flush();
+    }, PERSIST_DEBOUNCE_MS);
+    // Never hold the process open just to write a clock file.
+    if (typeof pending.unref === 'function') pending.unref();
   }
 
   // Issue a new timestamp for a local event.
@@ -141,7 +180,7 @@ function createClock({ machineId, now = Date.now, load = () => null, persist = (
     return formatHlc(lastMs, counter, machineId);
   }
 
-  return { tick, observe, peek, machineId };
+  return { tick, observe, peek, flush, machineId };
 }
 
 module.exports = {

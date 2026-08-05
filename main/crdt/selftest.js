@@ -501,6 +501,78 @@ scenario('a snapshot records how much of our own log it covers', (dir) => {
   assert.strictEqual(snapshotOf(b, 'item').p2.allocated_for, '20');
 });
 
+// Callers hand back whole collections to change one row — writeOrdersArchive
+// commits all ~1,100 archived orders to add one. A stamp per record meant
+// minting 1,099 that were thrown away, and because each one synchronously wrote
+// the clock file (8ms inside Electron), archiving an order took 11 seconds with
+// 19ms of it spent merging. Stamps are minted lazily now; this is the guard.
+scenario('a whole-list commit mints one stamp per CHANGE, not per record', (dir) => {
+  const a = makeStore('ALPHA', dir);
+  a.load({ project: false });
+
+  const many = [];
+  for (let i = 0; i < 500; i += 1) many.push({ uid: `p${i}`, itemcode: `PN-${i}`, allocated_for: '1' });
+  a.commit('item', many);
+
+  // Baseline is now all 500. Change exactly one and write the whole list back.
+  const readBack = a.read('item');
+  const before = a._internal.clock.peek();
+  const one = readBack.map((it) => (it.uid === 'p250' ? { ...it, allocated_for: '99' } : it));
+  const res = a.commit('item', one);
+
+  assert.strictEqual(res.ops, 1, 'a one-record change emitted more than one op');
+  assert.strictEqual(a.read('item').find((i) => i.uid === 'p250').allocated_for, '99');
+
+  // The clock must have advanced by exactly the one stamp that was used. If it
+  // jumped 500, stamps are being minted for untouched records again.
+  const advanced = Number(a._internal.clock.peek().split('.')[1]) - Number(before.split('.')[1]);
+  const sameMs = a._internal.clock.peek().split('.')[0] === before.split('.')[0];
+  if (sameMs) {
+    assert.ok(advanced <= 1, `clock counter advanced ${advanced} for a single-record change`);
+  }
+
+  // And stamps must still be DISTINCT within one commit — recordCreatedAt uses
+  // the oldest stamp in a record as its birth order, and projections sort by it,
+  // so collapsing a commit to one shared stamp would reshuffle every file.
+  const stamps = new Set();
+  const logFile = path.join(dir, 'crdt', 'ops', 'ALPHA.jsonl');
+  for (const line of fs.readFileSync(logFile, 'utf-8').split('\n')) {
+    if (line.trim()) stamps.add(JSON.parse(line).h);
+  }
+  const opCount = fs.readFileSync(logFile, 'utf-8').split('\n').filter((l) => l.trim()).length;
+  assert.strictEqual(stamps.size, opCount, 'two ops share a stamp — birth ordering would be ambiguous');
+});
+
+// A projection path that comes through undefined used to become the literal
+// string "undefined" as an object key, and writing that is RELATIVE — so a
+// business file appeared in the process working directory instead of on the
+// share. It cost nothing here (a stray file in the repo, from this very test
+// file passing a partial path set) but the same slip against a real config
+// would put live data somewhere nobody would look for it.
+scenario('a missing projection path is refused, not written to the CWD', (dir) => {
+  const cwdBefore = fs.readdirSync(process.cwd());
+  const a = createStore({
+    fs,
+    path,
+    machineId: 'ALPHA',
+    getCrdtDir: () => path.join(dir, 'crdt'),
+    // Deliberately incomplete — every other projection path is undefined.
+    getProjectionPaths: () => ({ outstanding: path.join(dir, 'proj', 'o.json') }),
+    writeJsonAtomic,
+    buildOrdersIndex: () => [],
+    clockStatePath: path.join(dir, 'clock.json'),
+    onChange: () => {},
+  });
+  a.load({ project: false });
+  a.commit('item', [{ uid: 'p1', itemcode: 'PN-1' }]);
+
+  assert.ok(!fs.existsSync('undefined'), 'wrote a file literally named "undefined" into the CWD');
+  const cwdAfter = fs.readdirSync(process.cwd());
+  assert.deepStrictEqual(cwdAfter, cwdBefore, 'a projection escaped into the working directory');
+  // The one path that WAS supplied still has to be written.
+  assert.ok(fs.existsSync(path.join(dir, 'proj', 'o.json')), 'the valid projection was skipped too');
+});
+
 console.log('');
 if (failures.length) {
   console.log(`${failures.length} of ${caseNum} scenarios FAILED`);

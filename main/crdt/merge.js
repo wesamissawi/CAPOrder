@@ -273,7 +273,14 @@ function materializeTable(table) {
 // a deliberate edit to every other machine. Absence means "no opinion"; that is
 // the same rule the item queues already followed when they made deletion
 // explicit rather than inferring it from a missing uid.
-function diffToOp(entity, key, nextValue, baselineValue, parentVersion, hlc, clearFields) {
+// `mintHlc` is a FUNCTION, not a stamp, and it is called only once this has
+// decided there is something to publish. Stamping is not free — see the note on
+// persistence in hlc.js — and callers legitimately hand the whole collection
+// back to change one record in it: archiving an order commits all ~1,100
+// archived orders. Taking a stamp per record meant minting and discarding 1,099
+// of them, which cost 10.6 seconds against 19ms of diffing. A plain string is
+// still accepted, for callers that already hold a stamp.
+function diffToOp(entity, key, nextValue, baselineValue, parentVersion, mintHlc, clearFields) {
   const fields = {};
   const cleared = [];
   const next = nextValue || {};
@@ -295,7 +302,7 @@ function diffToOp(entity, key, nextValue, baselineValue, parentVersion, hlc, cle
   if (!Object.keys(fields).length && !cleared.length) return null;
 
   return {
-    h: hlc,
+    h: typeof mintHlc === 'function' ? mintHlc() : mintHlc,
     e: entity,
     k: key,
     o: OP_SET,

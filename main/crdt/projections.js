@@ -143,6 +143,21 @@ function writeProjections(contents, { fs, path, writeJsonAtomic, lastWritten, al
 
   for (const file of Object.keys(contents)) {
     const next = contents[file];
+
+    // These keys come from getProjectionPaths(). If one of them is ever
+    // undefined, `out[paths.thing] = ...` in buildProjections stores it under
+    // the STRING "undefined" — and writing that is a relative path, so a
+    // business file lands in whatever the process working directory happens to
+    // be. Silently, in the wrong place, forever. Refuse instead.
+    if (!file || file === 'undefined') {
+      console.error(
+        '[crdt/projections] refusing to write a projection with no path —',
+        'getProjectionPaths() is missing a key'
+      );
+      failed.push(String(file));
+      continue;
+    }
+
     if (lastWritten.get(file) === next) continue;
 
     // Refuse to blank a populated file while the store itself is empty. That
