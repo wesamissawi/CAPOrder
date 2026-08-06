@@ -73,6 +73,7 @@ function registerAllIpc(ipcMain, deps) {
     writeSageLock: deps.writeSageLock,
     clearSageLock: deps.clearSageLock,
     sageLockIsLive: deps.sageLockIsLive,
+    tryAcquireSagePoLock: deps.tryAcquireSagePoLock,
     startSageHeartbeat: deps.startSageHeartbeat,
     stopSageHeartbeat: deps.stopSageHeartbeat,
     getMachineId: deps.getMachineId,

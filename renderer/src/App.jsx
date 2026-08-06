@@ -26,6 +26,7 @@ import {
   computeBubblePrintSignature,
 } from "./utils/inventory";
 import { isOrderSageLocked, orderKeyMatches } from "./utils/sageLock";
+import { applyInvoiceEnvironmentalFees } from "./utils/environmentalFee";
 
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
 
@@ -3834,6 +3835,7 @@ export default function App() {
 
       const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
       let appliedCount = 0;
+      const unmatchedFees = [];
 
       // Patched list built synchronously from current orders — not inside a
       // setOrders updater, because the save below depends on the result being
@@ -3851,6 +3853,22 @@ export default function App() {
         const invoiceNeedsSync =
           Boolean(o.invoiceSageUpdate) &&
           String(found.invoiceNumber || "").trim() !== String(o.sage_reference_synced || "").trim();
+
+        // The invoice prints the environmental handling charge PER LINE ("EHC :
+        // 0.21 Ext: 1.26" under the part), so unlike BestBuy — which only gives
+        // a whole-invoice EHC and has to prompt for manual entry — we can put the
+        // per-unit fee straight onto the matching line. This is the same write
+        // the "+ev" box in Order Management performs, via the shared helper, so
+        // the Sage cost/extended come out fee-inclusive either way.
+        const fees = applyInvoiceEnvironmentalFees(o, found.lineItems);
+        if (fees.unmatched.length) {
+          unmatchedFees.push(
+            `${o.reference}: could not match ${fees.unmatched
+              .map((u) => `${u.part} ($${u.feeUnit.toFixed(2)}/ea)`)
+              .join(", ")} to a line on the order — add the fee by hand.`
+          );
+        }
+
         return {
           ...o,
           source_invoice: found.invoiceNumber,
@@ -3859,14 +3877,11 @@ export default function App() {
           invoiceNeedsSync,
           ...(Number.isFinite(totalNum) ? { billed_total: totalNum } : {}),
           ...(found.fileName ? { worldInvoiceFile: found.fileName } : {}),
-          // The invoice carries the environmental handling charge per line and
-          // as a total; keep it so it can be reconciled against Sage.
-          ...(found.hasEnvironmentalFee
-            ? {
-                hasEnvironmentalFee: true,
-                environmentalFeeAmount: found.environmentalFeeAmount,
-              }
-            : {}),
+          lineItems: fees.lineItems,
+          sage_lineItems: fees.sage_lineItems,
+          // Only flag for attention when a charge could NOT be placed; a matched
+          // one is already on its line and needs no manual step.
+          ...(fees.unmatched.length ? { environmentalFeeAlert: true } : {}),
           lastUpdatedAt: new Date().toISOString(),
           _localDirty: true,
         };
@@ -3905,7 +3920,9 @@ export default function App() {
       // status log by the scraper, so a bad read is visible rather than silent.
       const appliedMsg =
         appliedCount > 0 ? `Filled invoice/total for ${appliedCount} order(s) in Order Management.` : "";
-      setWorldStatus([logMsg, appliedMsg].filter(Boolean).join("\n") || "Checked Gmail.");
+      setWorldStatus(
+        [logMsg, appliedMsg, ...unmatchedFees].filter(Boolean).join("\n") || "Checked Gmail."
+      );
     } catch (e) {
       console.error("[vendor] world fetch error", e);
       setWorldError(e?.message || "Failed to fetch World invoices.");

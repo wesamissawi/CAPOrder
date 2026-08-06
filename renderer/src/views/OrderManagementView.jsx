@@ -3,6 +3,7 @@ import Card from "../components/Card";
 import { DescriptionWithTooltip } from "../components/orderCardKit";
 import { isOrderSageLocked, sageLockLabel } from "../utils/sageLock";
 import { getOrderQtyDiscrepancy } from "../utils/qtyDiscrepancy";
+import { applyEnvironmentalFee } from "../utils/environmentalFee";
 
 function DismissibleMessage({ tone, onDismiss, children }) {
   const boxStyles =
@@ -1360,97 +1361,19 @@ export default function OrderManagementView({
                                 item.environmentalFeeAmount !== undefined &&
                                 String(item.environmentalFeeAmount).trim() !== "");
                             const showFeeInput = hasFeeVal || Boolean(draft?.editing);
-                            const toNumber = (val) => {
-                              const n = Number(val);
-                              return Number.isFinite(n) ? n : null;
-                            };
                             const handleFeeChange = (value) => {
-                              const trimmed = String(value || "").trim();
-                              const hasFee = trimmed !== "";
-                              const parsed = Number(trimmed);
-                              const amountVal = hasFee && Number.isFinite(parsed) ? parsed : hasFee ? trimmed : null;
-
-                              const baseLineItems = order.lineItems || [];
-                              const baseLineItem = baseLineItems[liIdx] || item || {};
-                              const baseCostVal = toNumber(baseLineItem.costPriceValue ?? baseLineItem.costPrice);
-                              const baseCostStr =
-                                baseLineItem.costPrice ??
-                                order.sage_lineItems?.[liIdx]?.costPrice ??
-                                "";
-                              const baseExtendedVal = toNumber(baseLineItem.extendedValue ?? baseLineItem.extended);
-                              const baseExtendedStr =
-                                baseLineItem.extended ??
-                                order.sage_lineItems?.[liIdx]?.extended ??
-                                "";
-                              const qtyVal =
-                                toNumber(baseLineItem.quantity) ??
-                                toNumber(order.sage_lineItems?.[liIdx]?.quantity) ??
-                                0;
-                              const feeNum = toNumber(amountVal);
-
-                              const nextCostVal =
-                                hasFee && feeNum !== null && baseCostVal !== null
-                                  ? baseCostVal + feeNum
-                                  : baseCostVal;
-                              const nextCostStr =
-                                hasFee && feeNum !== null && baseCostVal !== null
-                                  ? String(nextCostVal)
-                                  : baseCostStr;
-
-                              const nextExtendedVal =
-                                hasFee && feeNum !== null && baseExtendedVal !== null
-                                  ? baseExtendedVal + feeNum * qtyVal
-                                  : baseExtendedVal;
-                              const nextExtendedStr =
-                                hasFee && feeNum !== null && baseExtendedVal !== null
-                                  ? String(nextExtendedVal)
-                                  : baseExtendedStr;
-
-                              const nextLineItems = (order.lineItems || []).map((li, idx) => {
-                                if (idx !== liIdx) return li;
-                                const updated = {
-                                  ...li,
-                                  hasEnvironmentalFee: hasFee,
-                                  environmentalFeeAmount: amountVal,
-                                };
-                                return updated;
-                              });
-
-                              const baseSage = Array.isArray(order.sage_lineItems) && order.sage_lineItems.length
-                                ? order.sage_lineItems
-                                : order.lineItems || [];
-                              const nextSageLineItems = baseSage.map((li, idx) => {
-                                if (idx !== liIdx) return li;
-                                const source = li || baseLineItem;
-                                const updated = {
-                                  ...source,
-                                  hasEnvironmentalFee: hasFee,
-                                  environmentalFeeAmount: amountVal,
-                                };
-                                if (nextCostVal !== null) {
-                                  updated.costPrice = nextCostStr;
-                                  updated.costPriceValue = nextCostVal;
-                                } else {
-                                  updated.costPrice = baseCostStr;
-                                  updated.costPriceValue = baseCostVal;
-                                }
-                                if (nextExtendedVal !== null) {
-                                  updated.extended = nextExtendedStr;
-                                  updated.extendedValue = nextExtendedVal;
-                                } else {
-                                  updated.extended = baseExtendedStr;
-                                  updated.extendedValue = baseExtendedVal;
-                                }
-                                return updated;
-                              });
+                              // Shared with the World Gmail invoice fetch, which
+                              // applies the same per-unit fee automatically —
+                              // see utils/environmentalFee.js.
+                              const next = applyEnvironmentalFee(order, liIdx, value);
 
                               setLineItemFeeDrafts((prev) => ({
                                 ...prev,
                                 [feeKey]: { editing: true, value },
                               }));
                               markDirty(refKey, "Environmental fee");
-                              handleOrderFieldChange(refKey, "lineItems", nextLineItems);
-                              handleOrderFieldChange(refKey, "sage_lineItems", nextSageLineItems);
+                              handleOrderFieldChange(refKey, "lineItems", next.lineItems);
+                              handleOrderFieldChange(refKey, "sage_lineItems", next.sage_lineItems);
                             };
                             return (
                               <div

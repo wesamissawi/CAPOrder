@@ -119,7 +119,16 @@ const registerOrdersIpc = (ipcMain, deps) => {
       // read + liveness-check + write all happen atomically inside
       // tryAcquireSagePoLock (guarded by an exclusive-create gate file), so two
       // machines racing this call can never both believe they won.
-      const claim = tryAcquireSagePoLock?.();
+      // A missing helper must NOT be reported as a foreign lock: an optional
+      // call returning undefined reads as "somebody else has it" and then every
+      // machine refuses to turn POs on while naming no owner — which is exactly
+      // what happened when this dep was left out of ipc.registry.js. Fail loudly
+      // instead, so the real cause shows up on the card.
+      if (typeof tryAcquireSagePoLock !== 'function') {
+        console.error('[sage] tryAcquireSagePoLock was not wired into the orders IPC deps');
+        return { ok: false, error: 'Sage lock helper is unavailable in this build.' };
+      }
+      const claim = tryAcquireSagePoLock();
       if (!claim?.ok) {
         console.warn('[sage] PO lock held by live machine', claim?.lockedBy);
         return { ok: false, error: 'sage-locked', lockedBy: claim?.lockedBy, running: claim?.running === true };
