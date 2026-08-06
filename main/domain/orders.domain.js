@@ -91,6 +91,9 @@ const SAGE_OWNED_FIELDS = [
   // renderer holding a copy from before the order was queued must not be able
   // to un-queue it by saving an unrelated edit.
   "sage_queued",
+  // The invoice-update waiting room, same idea as sage_queued but for orders
+  // already entered in Sage whose invoice number changed afterwards.
+  "sage_invoice_queued",
   "sage_invoice_trigger",
   "sage_lock",
   "journalEntry",

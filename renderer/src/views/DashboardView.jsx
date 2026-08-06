@@ -95,12 +95,14 @@ export default function DashboardView({
           <div className="space-y-1">
             <p className="text-lg font-semibold text-slate-800">Sage invoices</p>
             <p className="text-sm text-slate-500">
-              Sends invoice updates to Sage on <strong className="mx-1">this machine</strong>. Runs
-              independently — no cross-machine lock.
+              Invoice updates now ride the Sage queue like any purchase order: queue them from any
+              machine, press "Send to Sage", and the machine with
+              <strong className="mx-1">Sage purchase orders</strong>on enters them.
             </p>
-            {sageInvoiceEnabled && (
+            {invoiceReadyCount > 0 && (
               <p className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
-                Watching orders.json — {invoiceReadyCount} invoice update{invoiceReadyCount === 1 ? "" : "s"} queued.
+                {invoiceReadyCount} invoice update{invoiceReadyCount === 1 ? "" : "s"} released and waiting
+                for the Sage machine.
               </p>
             )}
             {sageInvoiceError && (

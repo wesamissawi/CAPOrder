@@ -329,6 +329,11 @@ const createSageDomain = (deps) => {
         ...o,
         invoiceNeedsSync: false,
         sage_invoice_trigger: false,
+        // Also clear the waiting room, for the same reason the purchase run
+        // clears sage_queued: the order can be re-queued in the gap between
+        // release and the lock being stamped, and the finished run must be the
+        // last word or it comes back looking queued.
+        sage_invoice_queued: false,
         sage_lock: null,
         invoiceSageUpdate: true,
         sage_reference_synced: o?.sage_reference || o?.source_invoice || o?.reference || "",

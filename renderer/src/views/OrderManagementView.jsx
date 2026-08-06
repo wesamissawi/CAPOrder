@@ -683,6 +683,9 @@ export default function OrderManagementView({
               // that is the lock overlay's Release button).
               const isSageQueued = Boolean(order.sage_queued);
               const isSageTriggered = Boolean(order.sage_trigger);
+              // The invoice-update queue: same two states, its own fields.
+              const isInvoiceQueued = Boolean(order.sage_invoice_queued);
+              const isInvoiceTriggered = Boolean(order.sage_invoice_trigger);
               const sageLocked = isOrderSageLocked(order);
               const invoiceEntry = getInvoiceEntry(refKey, order.source_invoice || "");
               const needsSync = Boolean(order.invoiceNeedsSync);
@@ -1495,12 +1498,39 @@ export default function OrderManagementView({
                             ? `Invoice differs from last Sage update (${order.sage_reference_synced})`
                             : "Invoice differs from last Sage update"}
                         </span>
+                        {/* Same three states as "Add to Sage Queue" on a
+                            purchase: the update is parked in the Sage queue and
+                            nothing is typed into Sage until "Send to Sage"
+                            releases it to the machine running Sage. Clicking it
+                            while queued takes it back out. */}
                         <button
                           type="button"
-                          className="px-2 py-1 text-xs rounded-lg border border-red-500 text-red-700 bg-white hover:bg-red-50"
-                          onClick={() => onUpdateInvoiceTrigger?.(refKey)}
+                          disabled={isInvoiceTriggered}
+                          className={`px-2 py-1 text-xs rounded-lg border ${
+                            isInvoiceTriggered
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              : isInvoiceQueued
+                              ? "bg-violet-50 text-violet-700 border-violet-300 hover:bg-violet-100"
+                              : "border-red-500 text-red-700 bg-white hover:bg-red-50"
+                          }`}
+                          title={
+                            isInvoiceTriggered
+                              ? "Released — waiting for the machine running Sage to update it"
+                              : isInvoiceQueued
+                              ? 'Waiting in the Sage queue — press "Send to Sage" at the top to release it, or click here to take it back out'
+                              : "Add this invoice update to the Sage queue. Nothing is changed in Sage until the queue is sent."
+                          }
+                          onClick={() =>
+                            isInvoiceQueued
+                              ? onReleaseSageLock?.(order)
+                              : onUpdateInvoiceTrigger?.(refKey)
+                          }
                         >
-                          Update Invoice
+                          {isInvoiceTriggered
+                            ? "Updating in Sage"
+                            : isInvoiceQueued
+                            ? "In Sage Queue — remove"
+                            : "Update Invoice"}
                         </button>
                       </div>
                     )}

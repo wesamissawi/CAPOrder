@@ -204,7 +204,6 @@ const registerOrdersIpc = (ipcMain, deps) => {
         // Someone else already finished it; refuse rather than double-enter.
         return { ok: false, error: 'This order is already entered in Sage.', order: target };
       }
-      const now = Date.now();
       // A purchase order goes into the WAITING ROOM (`sage_queued`), which the
       // processor does not look at — only `sage_trigger` means "run this", and
       // that is set later by sage:send-queue. Two fields rather than one gated
@@ -218,18 +217,20 @@ const registerOrdersIpc = (ipcMain, deps) => {
       // and wrong for one that may sit in the queue for an hour. The processor
       // stamps the real 'running' lock when it picks the order up.
       //
-      // Invoice updates are unchanged — they still fire immediately and lock.
+      // Invoice updates ("Invoice differs from last Sage update / Update
+      // Invoice") work exactly the same way, in their own waiting room:
+      // sage_invoice_queued rather than sage_queued, because an invoice update
+      // only ever applies to an order that IS already entered in Sage and the
+      // purchase queue filters those out everywhere. They used to fire
+      // immediately, which typed them into Sage on whichever machine happened to
+      // press the button; now they ride the same release + PO-lock machine.
       const updated = patchOrderOnDisk(
         key,
         kind === 'invoice'
-          ? {
-              sage_invoice_trigger: true,
-              sage_lock: { machineId: getMachineId?.() || null, stage: 'queued', kind, startedAt: now, heartbeatAt: now },
-            }
+          ? { sage_invoice_queued: true, sage_lock: null }
           : { sage_queued: true, sage_lock: null }
       );
       if (!updated) return { ok: false, error: 'Failed to queue the order.' };
-      if (kind === 'invoice') scheduleSageProcessing();
       return { ok: true, order: updated };
     } catch (e) {
       console.error('[sage:trigger-order]', e);
@@ -245,9 +246,14 @@ const registerOrdersIpc = (ipcMain, deps) => {
   ipcMain.handle('sage:send-queue', () => {
     try {
       const list = readOrders() || [];
-      const targets = list.filter(
-        (o) => o?.sage_queued === true && o?.enteredInSage !== true && !isOrderSageLocked?.(o)
-      );
+      // Two waiting rooms, one release. An invoice update is judged on
+      // sage_invoice_queued alone — unlike a purchase it is EXPECTED to be
+      // entered in Sage already, so the enteredInSage filter must not touch it.
+      const targets = list.filter((o) => {
+        if (!o || isOrderSageLocked?.(o)) return false;
+        if (o.sage_invoice_queued === true) return true;
+        return o.sage_queued === true && o.enteredInSage !== true;
+      });
       if (!targets.length) return { ok: true, sent: 0 };
       let sent = 0;
       targets.forEach((order) => {
@@ -257,7 +263,11 @@ const registerOrdersIpc = (ipcMain, deps) => {
           .trim()
           .toUpperCase();
         if (!key) return;
-        if (patchOrderOnDisk(key, { sage_trigger: true, sage_queued: false })) sent += 1;
+        const patch =
+          order.sage_invoice_queued === true
+            ? { sage_invoice_trigger: true, sage_invoice_queued: false }
+            : { sage_trigger: true, sage_queued: false };
+        if (patchOrderOnDisk(key, patch)) sent += 1;
       });
       scheduleSageProcessing();
       return { ok: true, sent };
@@ -277,6 +287,7 @@ const registerOrdersIpc = (ipcMain, deps) => {
       const updated = clearSageOrderLock(key, {
         sage_trigger: false,
         sage_queued: false,
+        sage_invoice_queued: false,
         sage_invoice_trigger: false,
       });
       if (!updated) return { ok: false, error: 'Order not found.' };

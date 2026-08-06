@@ -8,7 +8,6 @@ const createSageService = (deps) => {
     applySageResult,
     applyInvoiceResult,
     getSagePoActive,
-    getSageInvoiceActive,
     setSageOrderLock,
     clearSageOrderLock,
   } = deps;
@@ -127,8 +126,14 @@ const createSageService = (deps) => {
     }
   }
 
+  // Invoice updates ride the SAME machine as purchase orders — the one holding
+  // the PO heartbeat lock — and arrive the same way: queued on any machine
+  // (sage_invoice_queued), promoted to sage_invoice_trigger by "Send to Sage".
+  // They used to be gated on the local invoice toggle, which meant "Update
+  // Invoice" typed into Sage on whichever machine pressed the button, and two
+  // machines with invoices on could both grab the same update.
   async function processInvoiceUpdateQueue() {
-    if (!getSageInvoiceActive()) return;
+    if (!getSagePoActive()) return;
     if (invoiceProcessing) {
       invoicePendingRun = true;
       return;
@@ -146,7 +151,12 @@ const createSageService = (deps) => {
         targets.push({ refKey, order });
       });
       for (const { refKey, order } of targets) {
-        setSageOrderLock?.(refKey, "running");
+        // kind: "invoice" is what tells the lock when this order is finished —
+        // sageOrderWorkFinished checks sage_invoice_trigger for an invoice lock
+        // and enteredInSage for a purchase one, and an invoice update always
+        // runs on an order that is already entered, so a lock without the kind
+        // reads as finished the moment it is stamped and never blurs the card.
+        setSageOrderLock?.(refKey, "running", { kind: "invoice" });
         const res = await runUpdateInvoice(order);
         // Same rule as the purchase queue: update_invoice.ahk only prints the
         // journal entry once Sage has committed the update.
@@ -173,7 +183,7 @@ const createSageService = (deps) => {
       console.error("[sage-invoice] queue error", e);
     } finally {
       invoiceProcessing = false;
-      if (invoicePendingRun && getSageInvoiceActive()) {
+      if (invoicePendingRun && getSagePoActive()) {
         invoicePendingRun = false;
         setTimeout(() => processInvoiceUpdateQueue(), 200);
       } else {
@@ -183,9 +193,11 @@ const createSageService = (deps) => {
   }
 
   function scheduleSageProcessing() {
-    // Each queue self-gates on its own active flag, so just kick both.
-    if (getSagePoActive()) processSageOrdersQueue();
-    if (getSageInvoiceActive()) processInvoiceUpdateQueue();
+    // Both queues now belong to the PO machine; each still self-gates.
+    if (getSagePoActive()) {
+      processSageOrdersQueue();
+      processInvoiceUpdateQueue();
+    }
   }
 
   function resetSageQueue() {

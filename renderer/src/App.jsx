@@ -5678,8 +5678,14 @@ export default function App() {
   }, [orders]);
 
   // The waiting room: added to the queue, not yet released by "Send to Sage".
+  // An invoice update counts as an ordinary queue entry — it just lives in its
+  // own field, since it always applies to an order already entered in Sage and
+  // so can never pass the !enteredInSage test the purchase queue uses.
   const sageQueuedCount = useMemo(
-    () => (orders || []).filter((o) => o && o.sage_queued && !o.enteredInSage).length,
+    () =>
+      (orders || []).filter(
+        (o) => o && (o.sage_invoice_queued || (o.sage_queued && !o.enteredInSage))
+      ).length,
     [orders]
   );
   // Everything still owed to Sage, whether it is waiting or already running.
@@ -5687,8 +5693,13 @@ export default function App() {
   // falls one at a time as Sage finishes them.
   const sagePendingCount = useMemo(
     () =>
-      (orders || []).filter((o) => o && (o.sage_queued || o.sage_trigger) && !o.enteredInSage)
-        .length,
+      (orders || []).filter(
+        (o) =>
+          o &&
+          (o.sage_invoice_queued ||
+            o.sage_invoice_trigger ||
+            ((o.sage_queued || o.sage_trigger) && !o.enteredInSage))
+      ).length,
     [orders]
   );
 
