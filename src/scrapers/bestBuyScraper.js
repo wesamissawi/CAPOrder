@@ -132,7 +132,12 @@ async function getBestBuyOrders(options = {}) {
     }
 
     const mergedOrders = mergeOrders(existingOrders, newOrders);
-    fs.writeFileSync(ordersJsonPath, JSON.stringify(mergedOrders ?? [], null, 2), "utf-8");
+    // Not written to ordersJsonPath here: existingOrders was snapshotted
+    // before this multi-minute crawl started, so mergedOrders is stale
+    // relative to disk by now. The caller (vendorOrders.service.js) re-reads
+    // current state and merges `orders` in below through the CRDT store,
+    // which is what actually persists it — safe even if another vendor
+    // fetch committed meanwhile.
 
     if (!scrapedOrders.length) {
       try {

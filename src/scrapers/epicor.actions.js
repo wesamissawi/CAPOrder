@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const Tesseract = require("tesseract.js");
 const { pdfToPng } = require("pdf-to-png-converter");
+const { writeJsonAtomic } = require("../../main/utils/atomicWrite");
 
 const EPICOR_LOGIN_URL = "https://webdocs.epicor.com/site/cgi-bin/3pp.pl/_0/1";
 
@@ -755,10 +756,18 @@ function loadInvoiceCache(cachePath) {
   return {};
 }
 
+// A range scan holds its own in-memory `cache` object across many minutes of
+// OCR work, so it can go stale relative to disk if a rescan/unmatchable-flag
+// edit (vendorOrders.service.js) or another scan writes meanwhile.
+// Re-reading disk right before writing and merging on top of it — rather than
+// blindly overwriting with the possibly-stale in-memory snapshot — means a
+// concurrent writer's entries survive; only a genuine same-key collision
+// (astronomically rare) can still be lost.
 function saveInvoiceCache(cachePath, cache) {
   try {
-    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-    fs.writeFileSync(cachePath, JSON.stringify(cache, null, 2), "utf8");
+    const fresh = loadInvoiceCache(cachePath);
+    const merged = { ...fresh, ...cache };
+    writeJsonAtomic(cachePath, JSON.stringify(merged, null, 2));
   } catch (e) {
     console.log(`[epicor] failed to save invoice cache: ${e.message}`);
   }

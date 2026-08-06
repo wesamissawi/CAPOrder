@@ -25,11 +25,6 @@ function resolvePaths(options = {}) {
   return { storageStatePath, ordersJsonPath };
 }
 
-// Save scraped orders into JSON file
-function saveOrdersToJson(orders, ordersJsonPath) {
-  fs.writeFileSync(ordersJsonPath, JSON.stringify(orders, null, 2), "utf8");
-}
-
 // MAIN ENTRY: call this from Electron main via IPC
 async function getWorldOrders(options = {}) {
   const { storageStatePath, ordersJsonPath } = resolvePaths(options);
@@ -148,7 +143,11 @@ async function getWorldOrders(options = {}) {
     );
 
     const finalOrders = existingOrders.concat(standardizedNewOrders);
-    saveOrdersToJson(finalOrders, ordersJsonPath);
+    // Not written to ordersJsonPath here: existingOrders was snapshotted before
+    // this multi-minute crawl started, so this array is stale relative to disk
+    // by now. The caller (vendorOrders.service.js) re-reads current state and
+    // merges `orders` in below through the CRDT store, which is what actually
+    // persists it — safe even if another vendor fetch committed meanwhile.
 
     return {
       ok: true,

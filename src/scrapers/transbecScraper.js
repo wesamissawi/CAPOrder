@@ -151,7 +151,13 @@ async function getTransbecOrders(options = {}) {
     const products = aggregateProducts(mergedOrders);
     statusLog.push(`Aggregated ${products.length} unique products from order line items.`);
 
-    saveJson(ordersJsonPath, mergedOrders);
+    // mergedOrders is NOT written to ordersJsonPath here: existingOrders was
+    // snapshotted before this multi-minute crawl started, so it's stale
+    // relative to disk by now. The caller (vendorOrders.service.js) re-reads
+    // current state and merges `orders` in through the CRDT store, which is
+    // what actually persists it — safe even if another vendor fetch committed
+    // meanwhile. transbec_products.json is vendor-private (not shared), so it
+    // still writes directly here.
     saveJson(productsJsonPath, products);
 
     return {

@@ -82,6 +82,19 @@ function dbg(tag, ...args) {
 
 // Shared between the orders pickup-filter switch and the filter-button badge
 // counts, so the two never drift out of sync.
+// BestBuy specifically: order is already in Sage but its emailed invoice
+// hasn't been matched yet (see handleFetchBestbuyInvoices). Mirrors the
+// "no invoice file yet" check gating the "Get Invoice from Gmail" button in
+// OrderManagementView.jsx.
+function isWaitingOnInvoice(order) {
+  return (
+    (order?.source || "").toString().trim().toLowerCase() === "bestbuy" &&
+    Boolean(order?.enteredInSage) &&
+    !order?.bestbuyInvoiceFile &&
+    !order?.bestbuyCreditFile
+  );
+}
+
 function matchesOrdersPickupFilter(order, value) {
   // Credit orders live entirely under their own "Credit" filter — regardless
   // of what state they're in (confirmed, picked up, invoiced, etc.) they must
@@ -425,6 +438,11 @@ export default function App() {
   const [proforceRunning, setProforceRunning] = useState(false);
   const [proforceStatus, setProforceStatus] = useState("");
   const [proforceError, setProforceError] = useState("");
+  // "Get All" fires every vendor fetch above at once. Tracked separately from
+  // the per-vendor `*Running` flags so the button can show its own "Fetching
+  // All..." state even though it's really just awaiting all six of them.
+  const [getAllOrdersRunning, setGetAllOrdersRunning] = useState(false);
+  const [getAllOrdersError, setGetAllOrdersError] = useState("");
   const [epicorOpening, setEpicorOpening] = useState(false);
   const [epicorStatus, setEpicorStatus] = useState("");
   const [epicorError, setEpicorError] = useState("");
@@ -827,7 +845,7 @@ export default function App() {
     // same pattern as paymentIds above: only sent when this call is actually
     // the one changing them, otherwise carried forward from what's cached
     // locally so an unrelated save (e.g. a notes edit) doesn't blank them out.
-    ["createdAt", "delivered", "counter", "paid", "printedSignature", "printedAt", "salesOrderNumber", "sageInvoiceNumber", "sageSentAt", "sageRunId"].forEach((key) => {
+    ["createdAt", "delivered", "counter", "paid", "noNewParts", "printedSignature", "printedAt", "salesOrderNumber", "sageInvoiceNumber", "sageSentAt", "sageRunId"].forEach((key) => {
       const has = Object.prototype.hasOwnProperty.call(overrides, key);
       const val = has ? overrides[key] : meta[key];
       if (val !== undefined) payload[key] = val;
@@ -923,6 +941,7 @@ export default function App() {
           if (typeof entry.delivered === "boolean") som.delivered = entry.delivered;
           if (typeof entry.counter === "boolean") som.counter = entry.counter;
           if (typeof entry.paid === "boolean") som.paid = entry.paid;
+          if (typeof entry.noNewParts === "boolean") som.noNewParts = entry.noNewParts;
           if (typeof entry.printedSignature === "string") som.printedSignature = entry.printedSignature;
           if (typeof entry.printedAt === "string") som.printedAt = entry.printedAt;
           if (typeof entry.salesOrderNumber === "string") som.salesOrderNumber = entry.salesOrderNumber;
@@ -3421,6 +3440,9 @@ export default function App() {
         setProforceStatus("");
         setProforceError("");
         break;
+      case "get-all":
+        setGetAllOrdersError("");
+        break;
       default:
         break;
     }
@@ -5703,6 +5725,67 @@ export default function App() {
     [orders]
   );
 
+  // True while THIS machine's own AHK run is actively typing into Sage right
+  // now (stage "running") or adjusting totals after ("reconcile") — as opposed
+  // to merely holding the Sage PO lock/toggle. "Get All" is allowed to run on
+  // the Sage-PO machine, just not while it's mid-keystroke: the vendor
+  // scrapers pop Playwright browser windows that can steal OS focus and send
+  // World/Transbec/etc. keystrokes into whatever Sage screen AHK is mid-way
+  // through typing into.
+  const sagePoRunningHere = useMemo(() => {
+    const ownId = sageLockInfo?.ownMachineId;
+    if (!ownId) return false;
+    return (orders || []).some((o) => {
+      const lock = o?.sage_lock;
+      if (!lock || typeof lock !== "object") return false;
+      if (lock.machineId !== ownId) return false;
+      if (lock.stage !== "running" && lock.stage !== "reconcile") return false;
+      return isOrderSageLocked(o);
+    });
+  }, [orders, sageLockInfo?.ownMachineId]);
+
+  const anyVendorFetchRunning =
+    worldOrdersRunning ||
+    cbkOrdersRunning ||
+    tigerOrdersRunning ||
+    bestBuyOrdersRunning ||
+    transbecOrdersRunning ||
+    proforceRunning;
+
+  const getAllOrdersDisabledReason = getAllOrdersRunning
+    ? ""
+    : sagePoRunningHere
+      ? "Sage is actively entering a purchase order on this machine right now — wait for it to finish before running every fetcher at once."
+      : anyVendorFetchRunning
+        ? "A fetch is already in progress."
+        : "";
+
+  // Fires every vendor fetch at once rather than one at a time. Safe to run
+  // concurrently — each fetch re-reads orders.json right before it writes and
+  // merges by order identity (mergeOrdersForWrite), so siblings running at the
+  // same time don't stomp each other's results. Blocked only while this
+  // machine is itself mid-keystroke in Sage (see sagePoRunningHere above); the
+  // Sage-PO machine is otherwise free to use it like any other.
+  async function handleGetAllOrders() {
+    if (getAllOrdersRunning || anyVendorFetchRunning || sagePoRunningHere) return;
+    setGetAllOrdersError("");
+    setGetAllOrdersRunning(true);
+    try {
+      await Promise.all([
+        handleGetWorldOrders(),
+        handleGetTransbecOrders(),
+        handleGetBestBuyOrders(),
+        handleGetCbkOrders(),
+        handleGetProforceOrders(),
+        handleGetTigerOrders(),
+      ]);
+    } catch (e) {
+      setGetAllOrdersError(e?.message || "Failed to fetch all vendor orders.");
+    } finally {
+      setGetAllOrdersRunning(false);
+    }
+  }
+
   const todayRangeMs = () => {
     const now = new Date();
     return {
@@ -5764,17 +5847,29 @@ export default function App() {
         return db - da;
       });
 
-    // On the unfiltered "all" view, bucket into three sections by arrival
-    // progress (see orderPickupSection in OrderManagementView.jsx) so the
-    // most urgent orders — nothing done yet — surface at the top, each
-    // bucket still newest-first internally. Any other pickup filter keeps a
+    // On the unfiltered "all" view, bucket into sections by arrival progress
+    // (see orderPickupSection in OrderManagementView.jsx) so the most urgent
+    // orders — nothing done yet — surface at the top, each bucket still
+    // newest-first internally. BestBuy orders still waiting on their emailed
+    // invoice are pulled out of the pickup-status buckets entirely and shown
+    // in their own bucket at the very bottom. Any other pickup filter keeps a
     // single flat sort, since the buckets would collapse to one group anyway.
     let sorted;
     if (ordersPickupFilter === "all") {
-      const notPickedUp = (todayFiltered || []).filter((o) => !o.pickedUp);
-      const pickedNotArrived = (todayFiltered || []).filter((o) => o.pickedUp && !o.inStore);
-      const rest = (todayFiltered || []).filter((o) => o.pickedUp && o.inStore);
-      sorted = [...byDateDesc(notPickedUp), ...byDateDesc(pickedNotArrived), ...byDateDesc(rest)];
+      const waitingInvoice = (todayFiltered || []).filter((o) => isWaitingOnInvoice(o));
+      const notPickedUp = (todayFiltered || []).filter((o) => !isWaitingOnInvoice(o) && !o.pickedUp);
+      const pickedNotArrived = (todayFiltered || []).filter(
+        (o) => !isWaitingOnInvoice(o) && o.pickedUp && !o.inStore
+      );
+      const rest = (todayFiltered || []).filter(
+        (o) => !isWaitingOnInvoice(o) && o.pickedUp && o.inStore
+      );
+      sorted = [
+        ...byDateDesc(notPickedUp),
+        ...byDateDesc(pickedNotArrived),
+        ...byDateDesc(rest),
+        ...byDateDesc(waitingInvoice),
+      ];
     } else {
       sorted = byDateDesc(todayFiltered);
     }
@@ -6043,6 +6138,10 @@ export default function App() {
             proforceRunning={proforceRunning}
             proforceStatus={proforceStatus}
             proforceError={proforceError}
+            onGetAllOrders={handleGetAllOrders}
+            getAllOrdersRunning={getAllOrdersRunning}
+            getAllOrdersError={getAllOrdersError}
+            getAllOrdersDisabledReason={getAllOrdersDisabledReason}
             onClearOrderFetchMessage={clearOrderFetchMessage}
             onClearInvoiceFetchMessage={clearInvoiceFetchMessage}
             onOpenEpicor={handleOpenEpicor}

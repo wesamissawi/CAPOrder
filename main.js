@@ -27,6 +27,7 @@ const { createSageService } = require('./main/services/sage.service');
 const { configureSageQueue } = require('./main/services/sage.actions');
 const { createAppConfigService } = require('./main/services/appConfig.service');
 const { createUpdatesService } = require('./main/services/updates.service');
+const { writeJsonAtomic } = require('./main/utils/atomicWrite');
 // Shared business data is replicated as a CRDT (see main/crdt/README.md).
 // Machines exchange append-only op logs instead of overwriting shared JSON
 // files, which is what removes lost updates between machines on the share.
@@ -456,6 +457,66 @@ function sageLockIsLive(lock) {
   if (!lock || !lock.machineId) return false;
   const beat = lock.heartbeatAt || lock.lockedAt || 0;
   return (Date.now() - beat) < SAGE_LOCK_STALE_MS;
+}
+
+// Claiming the lock is itself a read-then-write over the shared file (see
+// sage:set-po-active), which is not atomic on its own — two machines could
+// both read it as free at nearly the same moment and both write, each
+// believing it alone won, exactly the outcome sage_lock.json exists to
+// prevent. Guard the read+check+write with the same exclusive-create gate
+// used for the sales-order sequence (acquireSalesOrderSeqLock below), so only
+// one machine at a time can be inside that sequence.
+const SAGE_LOCK_GATE_FILE = 'sage_lock.acquire.lock';
+const SAGE_LOCK_GATE_STALE_MS = 5000;
+
+function acquireSageLockGate() {
+  const gatePath = path.join(getSharedDataDir(), SAGE_LOCK_GATE_FILE);
+  ensureDir(path.dirname(gatePath));
+  for (let attempt = 0; attempt < 40; attempt++) {
+    try {
+      fs.writeFileSync(
+        gatePath,
+        JSON.stringify({ machineId: getMachineId(), at: Date.now() }),
+        { flag: 'wx' }
+      );
+      return gatePath;
+    } catch (e) {
+      if (e?.code !== 'EEXIST') throw e;
+      // A machine that died mid-claim must not block the lock forever.
+      try {
+        const st = fs.statSync(gatePath);
+        if (Date.now() - st.mtimeMs > SAGE_LOCK_GATE_STALE_MS) {
+          fs.unlinkSync(gatePath);
+          continue;
+        }
+      } catch {}
+      sleepSync(50);
+    }
+  }
+  throw new Error('Sage lock is busy on another machine. Try again in a moment.');
+}
+
+function releaseSageLockGate(gatePath) {
+  try { fs.unlinkSync(gatePath); } catch (e) { console.error('[sage-lock] gate release failed', e); }
+}
+
+// Single entry point for claiming the PO lock: the read, liveness-check and
+// write all happen while holding the gate, so two machines racing this call
+// can never both come away believing they won.
+function tryAcquireSagePoLock() {
+  const gatePath = acquireSageLockGate();
+  try {
+    const lock = readSageLock();
+    const ownId = getMachineId();
+    if (lock && lock.machineId && lock.machineId !== ownId && sageLockIsLive(lock)) {
+      return { ok: false, lockedBy: lock.machineId, running: lock.running === true };
+    }
+    const now = Date.now();
+    writeSageLock({ machineId: ownId, lockedAt: now, heartbeatAt: now, running: false });
+    return { ok: true };
+  } finally {
+    releaseSageLockGate(gatePath);
+  }
 }
 
 function startSageHeartbeat() {
@@ -1056,6 +1117,25 @@ function csvEscape(value) {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
+const MANIFEST_HEADER = 'reference,invoice_number,billed_total,archived_at\n';
+
+// Two archives racing for the same vendor/month manifest (two machines, or two
+// orders archived close together) must never both decide the file is new and
+// both prepend a header, duplicating it mid-file. `!fs.existsSync` followed by
+// a separate `appendFileSync` is a check-then-act race; exclusive-create makes
+// "am I the one creating this file" and "write the header" the same atomic
+// step — only the true first writer succeeds, everyone else falls back to a
+// plain append onto the file that (by definition) already has its header.
+function appendManifestRow(manifestPath, row) {
+  try {
+    fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+    fs.writeFileSync(manifestPath, MANIFEST_HEADER + row + '\n', { flag: 'wx' });
+  } catch (e) {
+    if (e?.code !== 'EEXIST') throw e;
+    fs.appendFileSync(manifestPath, row + '\n', 'utf-8');
+  }
+}
+
 // Gather every vendor-invoice number we already have on file — from active
 // orders, the orders archive, and every <vendor>_YYYYMM/invoices.csv manifest —
 // so an Epicor range scan can flag invoices that are NOT yet in our records.
@@ -1132,15 +1212,13 @@ function archiveWorldEpicorAssets(archivedOrders) {
       fs.unlinkSync(sourcePath);
 
       const manifestPath = path.join(destDir, 'invoices.csv');
-      const isNewManifest = !fs.existsSync(manifestPath);
       const row = [
         csvEscape(order.reference || ''),
         csvEscape(order.source_invoice || ''),
         csvEscape(order.billed_total ?? ''),
         csvEscape(order.archivedAt || ''),
       ].join(',');
-      const header = 'reference,invoice_number,billed_total,archived_at\n';
-      fs.appendFileSync(manifestPath, (isNewManifest ? header : '') + row + '\n', 'utf-8');
+      appendManifestRow(manifestPath, row);
 
       console.log(`[orders] archived epicor invoice image for ${order.reference} -> ${destPath}`);
     } catch (e) {
@@ -1190,15 +1268,13 @@ function archiveTransbecGmailAssets(archivedOrders) {
       }
 
       const manifestPath = path.join(destDir, 'invoices.csv');
-      const isNewManifest = !fs.existsSync(manifestPath);
       const row = [
         csvEscape(order.reference || ''),
         csvEscape(order.source_invoice || ''),
         csvEscape(order.billed_total ?? ''),
         csvEscape(order.archivedAt || ''),
       ].join(',');
-      const header = 'reference,invoice_number,billed_total,archived_at\n';
-      fs.appendFileSync(manifestPath, (isNewManifest ? header : '') + row + '\n', 'utf-8');
+      appendManifestRow(manifestPath, row);
 
       console.log(`[orders] archived Transbec invoice assets for ${order.reference} -> ${destDir}`);
     } catch (e) {
@@ -1239,15 +1315,13 @@ function archiveBestbuyGmailAssets(archivedOrders) {
       }
 
       const manifestPath = path.join(destDir, 'invoices.csv');
-      const isNewManifest = !fs.existsSync(manifestPath);
       const row = [
         csvEscape(order.reference || ''),
         csvEscape(order.source_invoice || ''),
         csvEscape(order.billed_total ?? ''),
         csvEscape(order.archivedAt || ''),
       ].join(',');
-      const header = 'reference,invoice_number,billed_total,archived_at\n';
-      fs.appendFileSync(manifestPath, (isNewManifest ? header : '') + row + '\n', 'utf-8');
+      appendManifestRow(manifestPath, row);
 
       console.log(`[orders] archived BestBuy invoice assets for ${order.reference} -> ${destDir}`);
     } catch (e) {
@@ -1721,48 +1795,10 @@ const {
   migrateBusinessFilesToShared,
 } = appConfigService;
 
-// Replacing an existing file on Windows needs delete access on the DESTINATION,
-// so anything holding it open without delete-sharing (antivirus mid-scan, an
-// editor, AHK's FileRead, a stale SMB oplock) fails the rename with
-// EPERM/EACCES/EBUSY. Those holders let go within milliseconds, so retry
-// briefly instead of failing the save outright.
-const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
-
-// Blocking pause that doesn't peg a core. This runs on the main process, but
-// only on a rare error path and for at most ~400ms across all retries.
+// Blocking pause that doesn't peg a core. Used only on rare error/contention
+// paths (a handful of ms to a few hundred ms total).
 function sleepSync(ms) {
   try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch {}
-}
-
-function renameWithRetry(tmp, filePath, attempts = 5) {
-  let lastErr = null;
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    try {
-      fs.renameSync(tmp, filePath);
-      if (attempt > 0)
-        console.warn('[writeJsonAtomic] rename succeeded on attempt', attempt + 1, filePath);
-      return;
-    } catch (e) {
-      lastErr = e;
-      if (!RENAME_RETRY_CODES.has(e?.code) || attempt === attempts - 1) break;
-      sleepSync(40 * (attempt + 1));
-    }
-  }
-  console.error('[writeJsonAtomic] rename failed after', attempts, 'attempts', filePath, lastErr);
-  throw lastErr;
-}
-
-function writeJsonAtomic(filePath, jsonString) {
-  const dir = path.dirname(filePath);
-  ensureDir(dir);
-  const tmp = path.join(dir, `${path.basename(filePath)}.tmp.${process.pid}.${Date.now()}`);
-  fs.writeFileSync(tmp, jsonString, 'utf-8');
-  try {
-    renameWithRetry(tmp, filePath);
-  } catch (e) {
-    try { fs.unlinkSync(tmp); } catch {}
-    throw e;
-  }
 }
 
 // ---- sales order numbering ----
@@ -2373,6 +2409,7 @@ function registerAllIpc() {
     writeSageLock,
     clearSageLock,
     sageLockIsLive,
+    tryAcquireSagePoLock,
     startSageHeartbeat,
     stopSageHeartbeat,
     getMachineId,

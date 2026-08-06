@@ -7,6 +7,7 @@
 // invoice ever arrives as a scan.
 const fs = require("fs");
 const path = require("path");
+const { writeJsonAtomic } = require("../../main/utils/atomicWrite");
 
 // pdf-parse is lazy-required inside the function: its index.js runs debug code at
 // require-time in some setups, and we only need it when actually parsing.
@@ -221,11 +222,19 @@ function loadInvoiceCache(cachePath) {
   return {};
 }
 
+// A run holds its own in-memory `cache` object across many minutes of Gmail
+// calls, so it can go stale relative to disk if another fetch (this vendor's
+// or another one's own cache file) writes meanwhile. Re-reading disk right
+// before writing and merging on top of it — rather than blindly overwriting
+// with the possibly-stale in-memory snapshot — means a concurrent writer's
+// entries survive; only a genuine same-key collision (astronomically rare)
+// can still be lost.
 function saveInvoiceCache(cachePath, cache) {
   try {
     if (!cachePath) return;
-    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-    fs.writeFileSync(cachePath, JSON.stringify(cache, null, 2), "utf8");
+    const fresh = loadInvoiceCache(cachePath);
+    const merged = { ...fresh, ...cache };
+    writeJsonAtomic(cachePath, JSON.stringify(merged, null, 2));
   } catch (e) {
     console.log(`[transbec-invoice] failed to save cache: ${e.message}`);
   }

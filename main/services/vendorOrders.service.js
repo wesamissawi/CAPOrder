@@ -6,6 +6,7 @@ const {
   invoiceCacheKey,
   cacheKeyToNumber,
 } = require('../../src/scrapers/epicor.actions');
+const { writeJsonAtomic } = require('../utils/atomicWrite');
 
 // Turn a raw epicor_invoice_cache.json entry (keyed by invoice #, or by a
 // CREDIT: prefix for credit memos) into the same invoice shape scanEpicorRange
@@ -470,6 +471,16 @@ const createVendorOrdersService = (deps) => {
     return { cachePath, cache };
   }
 
+  // Merges one key into whatever is CURRENTLY on disk, not the (possibly
+  // seconds-old, since rescanEpicorInvoice awaits an OCR pass in between) copy
+  // the caller read earlier — otherwise this write would blindly clobber any
+  // entry another scan/rescan/flag added to a different key in the meantime.
+  function writeEpicorCacheEntry(cachePath, key, entry) {
+    const { cache: fresh } = readEpicorCache();
+    fresh[key] = entry;
+    writeJsonAtomic(cachePath, JSON.stringify(fresh, null, 2));
+  }
+
   // Re-OCR a single document from its already-saved image (no browser, no Epicor,
   // no date). Refreshes the total, reference, EHC and parsed parts in the cache
   // and returns the updated document. Powers the per-row "Rescan this one" on
@@ -516,8 +527,7 @@ const createVendorOrdersService = (deps) => {
       };
       cache[key] = updated;
       try {
-        fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-        fs.writeFileSync(cachePath, JSON.stringify(cache, null, 2), 'utf8');
+        writeEpicorCacheEntry(cachePath, key, updated);
       } catch (e) {
         console.error('[rescan] cache save failed', e);
       }
@@ -582,8 +592,7 @@ const createVendorOrdersService = (deps) => {
       cache[key] = updated;
 
       try {
-        fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-        fs.writeFileSync(cachePath, JSON.stringify(cache, null, 2), 'utf8');
+        writeEpicorCacheEntry(cachePath, key, updated);
       } catch (e) {
         console.error('[epicor] unmatchable cache save failed', e);
         return { ok: false, error: e?.message || 'Failed to save the flag.' };

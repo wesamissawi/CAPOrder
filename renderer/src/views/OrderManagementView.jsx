@@ -26,12 +26,26 @@ function DismissibleMessage({ tone, onDismiss, children }) {
   );
 }
 
+// BestBuy specifically: order is already in Sage but its emailed invoice
+// hasn't been matched yet (see handleFetchBestbuyInvoices in App.jsx and the
+// "Get Invoice from Gmail" button below).
+function isWaitingOnInvoice(order) {
+  return (
+    (order?.source || "").toString().trim().toLowerCase() === "bestbuy" &&
+    Boolean(order?.enteredInSage) &&
+    !order?.bestbuyInvoiceFile &&
+    !order?.bestbuyCreditFile
+  );
+}
+
 // Only meaningful in the unfiltered "all" view — buckets orders by how far
 // along the arrival workflow they are so the most urgent ones (nothing done
-// yet) surface at the top. Checking "Arrived" always force-sets "Picked Up"
-// too (see handleOrderCheckboxChange in App.jsx), so these three buckets are
-// mutually exclusive and exhaustive.
+// yet) surface at the top, with BestBuy orders waiting on their emailed
+// invoice pulled out into their own bucket at the bottom. Checking "Arrived"
+// always force-sets "Picked Up" too (see handleOrderCheckboxChange in
+// App.jsx), so these four buckets are mutually exclusive and exhaustive.
 function orderPickupSection(order) {
+  if (isWaitingOnInvoice(order)) return "waiting-invoice";
   if (!order?.pickedUp) return "not-picked";
   if (!order?.inStore) return "not-arrived";
   return "rest";
@@ -41,6 +55,7 @@ const PICKUP_SECTION_LABELS = {
   "not-picked": "Not Picked Up",
   "not-arrived": "Picked Up, Not Arrived",
   rest: "Arrived",
+  "waiting-invoice": "Waiting on Invoice",
 };
 
 // sageDate is DDMMYY (e.g. "170726").
@@ -134,6 +149,10 @@ export default function OrderManagementView({
   proforceRunning,
   proforceStatus,
   proforceError,
+  onGetAllOrders,
+  getAllOrdersRunning,
+  getAllOrdersError,
+  getAllOrdersDisabledReason,
   onClearOrderFetchMessage,
   onClearInvoiceFetchMessage,
   onOpenEpicor,
@@ -422,7 +441,21 @@ export default function OrderManagementView({
       <section>
         <Card>
           <div className="text-sm uppercase tracking-wide text-slate-400 font-semibold">Order Fetcher</div>
-          <div className="mt-2 flex flex-wrap gap-3">
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={onGetAllOrders}
+              disabled={getAllOrdersRunning || Boolean(getAllOrdersDisabledReason)}
+              title={
+                getAllOrdersRunning
+                  ? "Fetching every vendor at once..."
+                  : getAllOrdersDisabledReason || "Fetch World, Transbec, BestBuy, CBK, Proforce and Tiger all at once"
+              }
+              className="px-5 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold disabled:opacity-60"
+            >
+              {getAllOrdersRunning ? "Fetching All..." : "Get All"}
+            </button>
+            <span className="w-px self-stretch bg-slate-200" />
             {orderFetchButtons.map((v) => (
               <button
                 key={v.key}
@@ -435,6 +468,19 @@ export default function OrderManagementView({
               </button>
             ))}
           </div>
+          {getAllOrdersError && (
+            <div className="mt-3 flex items-start gap-2 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+              <div className="flex-1 whitespace-pre-line">{getAllOrdersError}</div>
+              <button
+                type="button"
+                onClick={() => onClearOrderFetchMessage?.("get-all")}
+                className="shrink-0 text-red-400 hover:text-red-700 font-bold leading-none"
+                title="Dismiss"
+              >
+                ×
+              </button>
+            </div>
+          )}
           {orderFetchButtons.map((v) =>
             v.error ? (
               <div
@@ -726,8 +772,11 @@ export default function OrderManagementView({
               return (
                 <React.Fragment key={key}>
                   {showSectionHeader && (
-                    <div className="col-span-full mt-4 first:mt-0 flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-slate-500">
-                      {PICKUP_SECTION_LABELS[orderPickupSection(order)]}
+                    <div className="col-span-full mt-6 first:mt-0 flex items-center gap-3">
+                      <span className="whitespace-nowrap text-sm font-bold uppercase tracking-wide text-slate-600">
+                        {PICKUP_SECTION_LABELS[orderPickupSection(order)]}
+                      </span>
+                      <hr className="flex-1 border-t-2 border-slate-300" />
                     </div>
                   )}
                   <Card className={`${cardTone} ${sageLocked ? "sage-locked-card" : ""}`}>

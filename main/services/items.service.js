@@ -1,3 +1,5 @@
+const { writeFileAtomic } = require('../utils/atomicWrite');
+
 const createItemsService = (deps) => {
   // Item storage now lives in the replicated CRDT store (main/crdt/). This
   // service keeps what is genuinely its own job — deriving and appending the
@@ -38,6 +40,13 @@ const createItemsService = (deps) => {
 
   // Best-effort tail-trim once the log grows past HISTORY_MAX_BYTES. Only reads
   // + rewrites when the cheap size check trips, so ordinary appends stay O(1).
+  // This is a whole-file rewrite, unlike the lock-free appendFileSync above, so
+  // it's written through the temp+rename atomic helper: a plain writeFileSync
+  // here would let another machine's readHistory() see a truncated/half-written
+  // file mid-write. A single appendFileSync landing in the brief window between
+  // this read and the rename can still be lost — acceptable for a best-effort
+  // audit trail, same tradeoff the class comment above already accepts for two
+  // appends racing each other.
   function trimHistoryIfLarge(file) {
     try {
       if (!fs.existsSync(file)) return;
@@ -45,7 +54,7 @@ const createItemsService = (deps) => {
       if (size <= HISTORY_MAX_BYTES) return;
       const lines = fs.readFileSync(file, 'utf-8').split(/\r?\n/).filter((l) => l.trim());
       const kept = lines.slice(Math.max(0, lines.length - HISTORY_KEEP_LINES));
-      fs.writeFileSync(file, kept.join('\n') + '\n', 'utf-8');
+      writeFileAtomic(file, kept.join('\n') + '\n');
     } catch (e) {
       console.warn('[items] history trim failed', e?.message || e);
     }

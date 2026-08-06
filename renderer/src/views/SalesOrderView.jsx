@@ -324,6 +324,17 @@ function OrderCard({
           />
           Paid
         </label>
+        <label
+          className="flex items-center gap-1.5 text-xs font-semibold text-slate-600"
+          title="Hides this order from the quick-pick badges in Order Assignment's “Assign parts to” bar, so it stops showing up as somewhere to route newly arrived parts. Doesn't touch parts already assigned to it."
+        >
+          <input
+            type="checkbox"
+            checked={meta?.noNewParts === true}
+            onChange={(e) => onSetFlag(bubble.id, "noNewParts", e.target.checked)}
+          />
+          No New Parts
+        </label>
 
         <span className="flex-1" />
 

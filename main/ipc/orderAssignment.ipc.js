@@ -91,6 +91,27 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
     return names;
   }
 
+  // Bubble names whose "No New Parts" checkbox is checked on the Sales Order
+  // card — a deliberate signal that the order is done taking on newly arrived
+  // parts, so it shouldn't keep showing up as an arm-bar quick-pick here. It
+  // has no effect on parts already assigned to it.
+  function noNewPartsBubbleNames() {
+    const names = new Set();
+    try {
+      const shared = readSharedBubbleData ? readSharedBubbleData() : null;
+      const bubbles = shared?.bubbles;
+      if (!bubbles || typeof bubbles !== 'object') return names;
+      Object.values(bubbles).forEach((b) => {
+        if (b?.noNewParts !== true) return;
+        const name = upper(b?.name);
+        if (name) names.add(name);
+      });
+    } catch (e) {
+      console.error('[order-assignment] failed reading shared bubble data', e);
+    }
+    return names;
+  }
+
   // Locate an order by key across both the active list and the archive, and
   // report which one it came from — assignment has to write the line's
   // addedToOutstanding flag back to whichever file actually holds it.
@@ -271,6 +292,7 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
       // OUTSTANDING reads as a plain customer destination — but money has
       // already been collected against it either way.
       const paidNames = paidBubbleNames();
+      const noNewPartsNames = noNewPartsBubbleNames();
       const destCounts = new Map();
       items.forEach((it) => {
         const name = upper(it?.allocated_to);
@@ -282,6 +304,7 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
           return;
         }
         if (paidNames.has(name)) return;
+        if (noNewPartsNames.has(name)) return;
         const kind = classifyDestination(it);
         if (kind === 'cash') return;
         const prev = destCounts.get(name) || { name, items: 0, kind };

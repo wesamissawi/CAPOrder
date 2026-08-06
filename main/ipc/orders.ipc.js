@@ -31,9 +31,9 @@ const registerOrdersIpc = (ipcMain, deps) => {
     readOrdersArchive,
     writeOrdersArchive,
     readSageLock,
-    writeSageLock,
     clearSageLock,
     sageLockIsLive,
+    tryAcquireSagePoLock,
     startSageHeartbeat,
     stopSageHeartbeat,
     getMachineId,
@@ -115,16 +115,16 @@ const registerOrdersIpc = (ipcMain, deps) => {
       }
 
       // Block if another machine currently holds a live (still heartbeating) lock.
-      // A stale lock (owner crashed/closed) is fair game to take over.
-      const lock = readSageLock?.();
-      const ownId = getMachineId?.();
-      if (lock && lock.machineId && lock.machineId !== ownId && sageLockIsLive?.(lock)) {
-        console.warn('[sage] PO lock held by live machine', lock.machineId);
-        return { ok: false, error: 'sage-locked', lockedBy: lock.machineId, running: lock.running === true };
+      // A stale lock (owner crashed/closed) is fair game to take over. The
+      // read + liveness-check + write all happen atomically inside
+      // tryAcquireSagePoLock (guarded by an exclusive-create gate file), so two
+      // machines racing this call can never both believe they won.
+      const claim = tryAcquireSagePoLock?.();
+      if (!claim?.ok) {
+        console.warn('[sage] PO lock held by live machine', claim?.lockedBy);
+        return { ok: false, error: 'sage-locked', lockedBy: claim?.lockedBy, running: claim?.running === true };
       }
 
-      const now = Date.now();
-      writeSageLock?.({ machineId: ownId, lockedAt: now, heartbeatAt: now, running: false });
       startSageHeartbeat?.();
       setSagePoActive(true);
       scheduleSageProcessing();
