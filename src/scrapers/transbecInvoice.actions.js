@@ -1,9 +1,9 @@
 // src/scrapers/transbecInvoice.actions.js
 // Helpers for pulling Transbec invoices out of Gmail and parsing the attached PDF.
 //
-// Unlike the Epicor pipeline (which OCRs a scanned image), Transbec invoices are
+// Transbec invoices are
 // digitally-generated PDFs with a real text layer, so pdf-parse reads them
-// directly. We keep the Epicor rasterize+OCR path as a fallback in case a future
+// directly. We keep a rasterize+OCR path as a fallback in case a future
 // invoice ever arrives as a scan.
 const fs = require("fs");
 const path = require("path");
@@ -137,7 +137,7 @@ function parseInvoiceText(text) {
 }
 
 // Extract invoice fields from raw PDF bytes. Uses the text layer (pdf-parse);
-// only if that yields no usable text does it fall back to the Epicor-style
+// only if that yields no usable text does it fall back to the
 // rasterize-then-OCR path.
 async function extractInvoiceFromPdf(pdfBuffer) {
   let text = "";
@@ -172,7 +172,7 @@ async function extractInvoiceFromPdf(pdfBuffer) {
 }
 
 // Stable, filesystem-safe asset names keyed by invoice number (survives future
-// searches), mirroring the Epicor convention.
+// searches).
 function getInvoiceAssetName(invoiceNumber, ext) {
   const safe = String(invoiceNumber || "")
     .trim()

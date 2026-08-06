@@ -86,15 +86,8 @@ function registerAllIpc(ipcMain, deps) {
   });
 
   registerVendorIpc(ipcMain, {
-    openEpicor: deps.openEpicor,
-    scanEpicorRange: deps.scanEpicorRange,
-    scanEpicorCredits: deps.scanEpicorCredits,
-    rescanEpicorInvoice: deps.rescanEpicorInvoice,
-    setEpicorInvoiceUnmatchable: deps.setEpicorInvoiceUnmatchable,
-    getEpicorScannedInvoices: deps.getEpicorScannedInvoices,
-    getEpicorScannedCredits: deps.getEpicorScannedCredits,
     shell: deps.shell,
-    getEpicorAssetsDir: deps.getEpicorAssetsDir,
+    fetchWorldInvoices: deps.fetchWorldInvoices,
     fetchTransbecInvoices: deps.fetchTransbecInvoices,
     fetchBestbuyInvoices: deps.fetchBestbuyInvoices,
     fetchBestbuyCreditInvoices: deps.fetchBestbuyCreditInvoices,

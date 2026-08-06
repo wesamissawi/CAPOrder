@@ -78,8 +78,8 @@ export default function SettingsView() {
   const [proforceStore, setProforceStore] = useState("");
   const [proforceCustomer, setProforceCustomer] = useState("");
   const [proforcePass, setProforcePass] = useState("");
-  const [epicorUser, setEpicorUser] = useState("");
-  const [epicorPass, setEpicorPass] = useState("");
+  const [worldInvoiceSender, setWorldInvoiceSender] = useState("");
+  const [worldInvoiceSubject, setWorldInvoiceSubject] = useState("");
   const [gmailClientId, setGmailClientId] = useState("");
   const [gmailClientSecret, setGmailClientSecret] = useState("");
   const [transbecInvoiceSender, setTransbecInvoiceSender] = useState("");
@@ -226,8 +226,8 @@ export default function SettingsView() {
           setProforceStore(cfg.PROFORCE_STORE || "");
           setProforceCustomer(cfg.PROFORCE_CUSTOMER || "");
           setProforcePass(cfg.PROFORCE_PASS || "");
-          setEpicorUser(cfg.EPICOR_USER || "");
-          setEpicorPass(cfg.EPICOR_PASS || "");
+          setWorldInvoiceSender(cfg.WORLD_INVOICE_SENDER || "");
+          setWorldInvoiceSubject(cfg.WORLD_INVOICE_SUBJECT || "");
           setGmailClientId(cfg.GMAIL_CLIENT_ID || "");
           setGmailClientSecret(cfg.GMAIL_CLIENT_SECRET || "");
           setTransbecInvoiceSender(cfg.TRANSBEC_INVOICE_SENDER || "");
@@ -348,8 +348,8 @@ export default function SettingsView() {
         PROFORCE_STORE: proforceStore || "",
         PROFORCE_CUSTOMER: proforceCustomer || "",
         PROFORCE_PASS: proforcePass || "",
-        EPICOR_USER: epicorUser || "",
-        EPICOR_PASS: epicorPass || "",
+        WORLD_INVOICE_SENDER: worldInvoiceSender || "",
+        WORLD_INVOICE_SUBJECT: worldInvoiceSubject || "",
         GMAIL_CLIENT_ID: gmailClientId || "",
         GMAIL_CLIENT_SECRET: gmailClientSecret || "",
         TRANSBEC_INVOICE_SENDER: transbecInvoiceSender || "",
@@ -570,7 +570,7 @@ export default function SettingsView() {
             <div>
               <h2 className="text-xl font-semibold text-slate-800">Scraper Credentials</h2>
               <p className="text-sm text-slate-500">
-                Stored per-machine in app data. Used by World, Transbec, CBK, Tiger, BestBuy, Proforce, and Epicor scrapers.
+                Stored per-machine in app data. Used by World, Transbec, CBK, Tiger, BestBuy, and Proforce scrapers.
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -728,24 +728,6 @@ export default function SettingsView() {
                 className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
               />
             </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-xs uppercase tracking-wide text-slate-500">Epicor Username</label>
-              <input
-                type="text"
-                value={epicorUser}
-                onChange={(e) => setEpicorUser(e.target.value)}
-                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-xs uppercase tracking-wide text-slate-500">Epicor Password</label>
-              <input
-                type="password"
-                value={epicorPass}
-                onChange={(e) => setEpicorPass(e.target.value)}
-                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
-              />
-            </div>
           </div>
         </div>
       </Card>
@@ -784,6 +766,26 @@ export default function SettingsView() {
                 type="password"
                 value={gmailClientSecret}
                 onChange={(e) => setGmailClientSecret(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">World Sender (from:)</label>
+              <input
+                type="text"
+                placeholder="e.g. reports@groupe-monaco.ca"
+                value={worldInvoiceSender}
+                onChange={(e) => setWorldInvoiceSender(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">World Subject Contains</label>
+              <input
+                type="text"
+                placeholder="e.g. Invoice for 20605"
+                value={worldInvoiceSubject}
+                onChange={(e) => setWorldInvoiceSubject(e.target.value)}
                 className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
               />
             </div>
@@ -1064,8 +1066,7 @@ export default function SettingsView() {
                 <span>Run scraper logins headless (no visible browser window)</span>
               </label>
               <div className="text-xs text-slate-500">
-                Applies to World, Transbec, CBK, Tiger, BestBuy, and Proforce order fetches. Epicor
-                always opens visibly since you interact with it directly.
+                Applies to World, Transbec, CBK, Tiger, BestBuy, and Proforce order fetches.
               </div>
             </div>
             <div className="flex flex-col gap-1">

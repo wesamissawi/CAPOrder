@@ -101,7 +101,7 @@ async function getProforceOrders(options = {}) {
 
     // Normalize base fields. Proforce lists invoices and credit memos together
     // in #InvoiceTable, distinguished only by the "Type" column (docType) -
-    // there is no separate credit search like Epicor/BestBuy/Transbec have.
+    // there is no separate credit search like BestBuy/Transbec have.
     const orders = list.map((o) => {
       const { iso, sageDate } = parseProforceDate(o.orderDateRaw);
       const isCredit = isCreditDocType(o.docType);

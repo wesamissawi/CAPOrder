@@ -132,8 +132,11 @@ async function getPageRows(pdfBuffer) {
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
     const content = await page.getTextContent();
+    // `w` is carried so callers can compute a text item's centre; World invoices
+    // right-align their money columns and are assigned by nearest centre rather
+    // than by x-range containment (see worldInvoice.actions.js).
     const items = content.items
-      .map((it) => ({ str: it.str, x: it.transform[4], y: it.transform[5] }))
+      .map((it) => ({ str: it.str, x: it.transform[4], y: it.transform[5], w: it.width || 0 }))
       .filter((it) => it.str && it.str.trim());
     // Group into printed rows by rounding y (items on the same line share it).
     const rows = new Map();

@@ -1,6 +1,6 @@
 // src/scrapers/transbecInvoice.js
 // MAIN ENTRY for the Transbec-invoice-from-Gmail pipeline. Called from Electron
-// main via IPC. Mirrors epicorScraper.openEpicorSite: it discovers invoice data
+// main via IPC. It discovers invoice data
 // for EVERY candidate email (not just the order that was clicked) so the caller
 // can batch-fill every matching order in Order Management.
 const fs = require("fs");

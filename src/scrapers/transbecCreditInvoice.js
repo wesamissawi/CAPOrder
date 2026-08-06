@@ -4,7 +4,7 @@
 // site), a Transbec credit has NO pre-existing order in orders.json — the
 // credit memo email is the only record of it. So a discovery here is just
 // listed for the user; turning it into an order happens via a separate
-// "Create order" action (the Epicor view's Transbec Credits section), not
+// "Create order" action (the Credits view's Transbec Credits section), not
 // automatically here.
 const fs = require("fs");
 const path = require("path");

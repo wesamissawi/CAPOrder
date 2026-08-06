@@ -58,43 +58,6 @@ const PICKUP_SECTION_LABELS = {
   "waiting-invoice": "Waiting on Invoice",
 };
 
-// sageDate is DDMMYY (e.g. "170726").
-function parseSageDate(ddmmyy) {
-  const clean = String(ddmmyy || "").trim();
-  if (!/^\d{6}$/.test(clean)) return null;
-  const day = Number(clean.slice(0, 2));
-  const month = Number(clean.slice(2, 4));
-  const year = 2000 + Number(clean.slice(4, 6));
-  const date = new Date(year, month - 1, day);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function formatSageDate(date) {
-  const dd = String(date.getDate()).padStart(2, "0");
-  const mm = String(date.getMonth() + 1).padStart(2, "0");
-  const yy = String(date.getFullYear()).slice(-2);
-  return `${dd}${mm}${yy}`;
-}
-
-// Epicor search should span every World bill currently displayed that's still
-// missing an invoice, not just the one whose button was clicked — the OCR pass
-// discovers matches for every invoice in the range and applies them to every
-// order that needs one. The start is padded a day earlier than the earliest
-// bill since Epicor sometimes dates a scanned invoice a day before the order.
-function getEpicorSearchRange(orders, fallbackSageDate) {
-  const dates = (orders || [])
-    .filter((o) => o.source === "world" && !o.source_invoice)
-    .map((o) => parseSageDate(o.sageDate))
-    .filter(Boolean);
-  if (!dates.length) {
-    return { fromSageDate: fallbackSageDate, toSageDate: fallbackSageDate };
-  }
-  const minDate = new Date(Math.min(...dates.map((d) => d.getTime())));
-  const maxDate = new Date(Math.max(...dates.map((d) => d.getTime())));
-  minDate.setDate(minDate.getDate() - 1);
-  return { fromSageDate: formatSageDate(minDate), toSageDate: formatSageDate(maxDate) };
-}
-
 export default function OrderManagementView({
   ordersSourcePath,
   ordersSearch,
@@ -155,12 +118,13 @@ export default function OrderManagementView({
   getAllOrdersDisabledReason,
   onClearOrderFetchMessage,
   onClearInvoiceFetchMessage,
-  onOpenEpicor,
-  epicorOpening,
-  epicorStatus,
-  epicorError,
-  onViewEpicorInvoiceImage,
-  onVerifyEpicorInvoice,
+  onFetchWorldInvoices,
+  worldFetching,
+  worldStatus,
+  worldError,
+  onViewWorldInvoiceImage,
+  onVerifyWorldInvoice,
+  onPrintWorldInvoice,
   onFetchTransbecInvoices,
   transbecFetching,
   transbecStatus,
@@ -403,20 +367,22 @@ export default function OrderManagementView({
 
   const isInvoiceNotPrinted = (order) => {
     const vendor = (order?.source || "").toString().trim().toLowerCase();
-    if (!["bestbuy", "transbec", "cbk"].includes(vendor)) return false;
+    if (!["bestbuy", "transbec", "cbk", "world"].includes(vendor)) return false;
     const hasInvoiceFile = Boolean(
       order.transbecInvoiceFile ||
         order.transbecInvoiceImage ||
         order.bestbuyInvoiceFile ||
         order.bestbuyCreditFile ||
-        order.cbkInvoiceFile
+        order.cbkInvoiceFile ||
+        order.worldInvoiceFile
     );
     if (!hasInvoiceFile) return false;
     const printed = Boolean(
       order.transbecInvoicePrinted ||
         order.bestbuyInvoicePrinted ||
         order.bestbuyCreditInvoicePrinted ||
-        order.cbkInvoicePrinted
+        order.cbkInvoicePrinted ||
+        order.worldInvoicePrinted
     );
     return !printed;
   };
@@ -664,14 +630,14 @@ export default function OrderManagementView({
               {ordersError}
             </DismissibleMessage>
           )}
-          {epicorError && (
-            <DismissibleMessage tone="error" onDismiss={() => onClearInvoiceFetchMessage?.("epicor")}>
-              {epicorError}
+          {worldError && (
+            <DismissibleMessage tone="error" onDismiss={() => onClearInvoiceFetchMessage?.("world")}>
+              {worldError}
             </DismissibleMessage>
           )}
-          {epicorStatus && !epicorError && (
-            <DismissibleMessage tone="status" onDismiss={() => onClearInvoiceFetchMessage?.("epicor")}>
-              {epicorStatus}
+          {worldStatus && !worldError && (
+            <DismissibleMessage tone="status" onDismiss={() => onClearInvoiceFetchMessage?.("world")}>
+              {worldStatus}
             </DismissibleMessage>
           )}
           {transbecError && (
@@ -991,12 +957,15 @@ export default function OrderManagementView({
                           Archive Order
                         </button>
                       )}
+                      {/* epicorOnly is a legacy flag from the retired Epicor
+                          scrape — nothing sets it now, but existing orders that
+                          carry it still need a way to be removed. */}
                       {Boolean(order.epicorOnly) && !canArchiveOrder(order) && onDeleteOrder && (
                         <button
                           type="button"
                           onClick={() => onDeleteOrder(order)}
                           className="px-3 py-2 rounded-xl text-sm font-semibold border bg-white text-red-600 border-red-200 hover:bg-red-50"
-                          title="Permanently remove this Epicor-generated order from Order Management"
+                          title="Permanently remove this scan-generated order from Order Management"
                         >
                           Delete Order
                         </button>
@@ -1050,37 +1019,49 @@ export default function OrderManagementView({
                           Edit
                         </button>
                       </div>
-                      {order.source === "world" && !order.source_invoice && onOpenEpicor && (
+                      {order.source === "world" && !order.source_invoice && onFetchWorldInvoices && (
                         <button
                           type="button"
-                          onClick={() => {
-                            const { fromSageDate, toSageDate } = getEpicorSearchRange(filteredOrders, order.sageDate);
-                            onOpenEpicor(order.reference, fromSageDate, toSageDate);
-                          }}
-                          disabled={epicorOpening}
+                          onClick={() => onFetchWorldInvoices(order.reference)}
+                          disabled={worldFetching}
                           className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
                         >
-                          {epicorOpening ? "Opening Epicor..." : "Get Invoice from Epicor"}
+                          {worldFetching ? "Checking Gmail..." : "Get Invoice from Gmail"}
                         </button>
                       )}
-                      {order.epicorInvoiceImage && onViewEpicorInvoiceImage && (
+                      {order.worldInvoiceFile && onViewWorldInvoiceImage && (
                         <button
                           type="button"
-                          onClick={() => onViewEpicorInvoiceImage(order.epicorInvoiceImage)}
+                          onClick={() => onViewWorldInvoiceImage(order)}
                           className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-slate-700 border-slate-200 hover:bg-slate-50 self-start"
-                          title="Open the scanned invoice image to compare against the invoice # and total"
+                          title="Open the invoice PDF in your default viewer to compare against the invoice # and total"
                         >
-                          View Invoice Image
+                          View Invoice PDF
                         </button>
                       )}
-                      {order.epicorInvoiceImage && onVerifyEpicorInvoice && (
+                      {order.worldInvoiceFile && onVerifyWorldInvoice && (
                         <button
                           type="button"
-                          onClick={() => onVerifyEpicorInvoice(order)}
+                          onClick={() => onVerifyWorldInvoice(order)}
                           className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50 self-start"
-                          title="Review the scanned invoice side-by-side with the stored invoice # and total, and correct if needed"
+                          title="Review the invoice PDF side-by-side with the stored invoice # and total, and correct if needed"
                         >
                           {order.totalVerified ? "Verify Again" : "Verify Invoice"}
+                        </button>
+                      )}
+                      {order.worldInvoiceFile && onPrintWorldInvoice && (
+                        <button
+                          type="button"
+                          onClick={() => onPrintWorldInvoice(order)}
+                          disabled={invoicePrintingRef === `world:${order.reference}`}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
+                          title="Print page 1 of the invoice"
+                        >
+                          {invoicePrintingRef === `world:${order.reference}`
+                            ? "Printing..."
+                            : order.worldInvoicePrinted
+                            ? "Print Invoice Again"
+                            : "Print Invoice"}
                         </button>
                       )}
                       {order.source === "transbec" && !order.source_invoice && onFetchTransbecInvoices && (

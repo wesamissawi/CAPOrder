@@ -58,15 +58,8 @@ function looksRendered(image) {
 
 const registerVendorIpc = (ipcMain, deps) => {
   const {
-    openEpicor,
-    scanEpicorRange,
-    scanEpicorCredits,
-    rescanEpicorInvoice,
-    setEpicorInvoiceUnmatchable,
-    getEpicorScannedInvoices,
-    getEpicorScannedCredits,
     shell,
-    getEpicorAssetsDir,
+    fetchWorldInvoices,
     fetchTransbecInvoices,
     fetchBestbuyInvoices,
     fetchBestbuyCreditInvoices,
@@ -82,42 +75,17 @@ const registerVendorIpc = (ipcMain, deps) => {
     loadConfig,
   } = deps;
 
-  ipcMain.handle('vendor:open-epicor', async (_evt, payload) => {
-    return openEpicor(payload);
+  // --- World invoices from Gmail ---
+  ipcMain.handle('vendor:fetch-world-invoices', async (_evt, payload) => {
+    return fetchWorldInvoices(payload);
   });
 
-  ipcMain.handle('vendor:scan-epicor-range', async (_evt, payload) => {
-    return scanEpicorRange(payload);
+  ipcMain.handle('vendor:open-world-invoice-image', async (_evt, fileName) => {
+    return openVendorImage(getGmailAssetsDir(), fileName);
   });
 
-  ipcMain.handle('vendor:scan-epicor-credits', async (_evt, payload) => {
-    return scanEpicorCredits(payload);
-  });
-
-  ipcMain.handle('vendor:get-epicor-scanned', async () => {
-    return getEpicorScannedInvoices();
-  });
-
-  ipcMain.handle('vendor:get-epicor-scanned-credits', async () => {
-    return getEpicorScannedCredits();
-  });
-
-  ipcMain.handle('vendor:rescan-epicor-invoice', async (_evt, payload) => {
-    return rescanEpicorInvoice(payload);
-  });
-
-  // Flag a scanned document as matching no scraped order, so the assign picker
-  // stops offering it. Reversible — pass unmatchable: false to put it back.
-  ipcMain.handle('vendor:set-epicor-invoice-unmatchable', async (_evt, payload) => {
-    return setEpicorInvoiceUnmatchable(payload);
-  });
-
-  ipcMain.handle('vendor:open-epicor-invoice-image', async (_evt, fileName) => {
-    return openVendorImage(getEpicorAssetsDir(), fileName);
-  });
-
-  ipcMain.handle('vendor:read-epicor-invoice-image', async (_evt, fileName) => {
-    return readVendorImage(getEpicorAssetsDir(), fileName);
+  ipcMain.handle('vendor:read-world-invoice-image', async (_evt, fileName) => {
+    return readVendorImage(getGmailAssetsDir(), fileName);
   });
 
   // --- Transbec invoices from Gmail ---

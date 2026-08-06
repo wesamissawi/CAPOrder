@@ -44,7 +44,7 @@ const { getProforceOrders } = require('./src/scrapers/proforceScraper');
 const { getBestBuyOrders } = require('./src/scrapers/bestBuyScraper');
 const { getCbkOrders } = require('./src/scrapers/cbkScraper');
 const { getTigerOrders } = require('./src/scrapers/tigerScraper');
-const { openEpicorSite } = require('./src/scrapers/epicorScraper');
+const { fetchWorldInvoices } = require('./src/scrapers/worldInvoice');
 const { fetchTransbecInvoices } = require('./src/scrapers/transbecInvoice');
 const { fetchBestbuyInvoices } = require('./src/scrapers/bestbuyInvoice');
 const { fetchBestbuyCreditInvoices } = require('./src/scrapers/bestbuyCreditInvoice');
@@ -135,10 +135,6 @@ const VENDOR_PATHS = {
     dataDir: path.join(INSTANCE_DIR, 'tiger'),
     storageState: path.join(INSTANCE_DIR, 'tiger', 'tiger_storage_state.json'),
   },
-  epicor: {
-    // Playwright browser session (cookies) — machine-specific, stays local.
-    storageState: path.join(INSTANCE_DIR, 'epicor', 'epicor_storage_state.json'),
-  },
 };
 // Downloaded invoice assets (PDFs/images) and their caches are NOT
 // instance-local: they're referenced by filename from shared orders.json
@@ -146,9 +142,6 @@ const VENDOR_PATHS = {
 // from every machine, exactly like orders.json itself. Resolved fresh on every
 // call (not cached in a const) because the shared folder is a runtime Settings
 // value that can change without an app restart — see getSharedDataDir().
-function getEpicorAssetsDir() {
-  return path.join(getSharedDataDir(), 'epicor');
-}
 function getGmailAssetsDir() {
   return path.join(getSharedDataDir(), 'gmail');
 }
@@ -160,6 +153,9 @@ function getCloverDebugDir() {
 }
 function getTransbecInvoiceCachePath() {
   return path.join(getGmailAssetsDir(), 'transbec_invoice_cache.json');
+}
+function getWorldInvoiceCachePath() {
+  return path.join(getGmailAssetsDir(), 'world_invoice_cache.json');
 }
 function getBestbuyInvoiceCachePath() {
   return path.join(getGmailAssetsDir(), 'bestbuy_invoice_cache.json');
@@ -1138,7 +1134,7 @@ function appendManifestRow(manifestPath, row) {
 
 // Gather every vendor-invoice number we already have on file — from active
 // orders, the orders archive, and every <vendor>_YYYYMM/invoices.csv manifest —
-// so an Epicor range scan can flag invoices that are NOT yet in our records.
+// so a vendor scan can flag invoices that are NOT yet in our records.
 // Matches on invoice-number fields only (source_invoice / invoiceNum / manifest
 // invoice_number), never on order reference, so a truly-missing invoice is never
 // mistaken for one we already have.
@@ -1155,8 +1151,8 @@ function collectKnownInvoiceNumbers() {
       add(o.invoiceNum);
     });
   };
-  try { fromOrders(readOrders()); } catch (e) { console.error('[epicor-known] readOrders failed', e); }
-  try { fromOrders(readOrdersArchive()); } catch (e) { console.error('[epicor-known] readOrdersArchive failed', e); }
+  try { fromOrders(readOrders()); } catch (e) { console.error('[known-invoices] readOrders failed', e); }
+  try { fromOrders(readOrdersArchive()); } catch (e) { console.error('[known-invoices] readOrdersArchive failed', e); }
 
   // Every vendor's archive manifest shares one schema:
   // reference,invoice_number,billed_total,archived_at — invoice number is col 1.
@@ -1174,42 +1170,52 @@ function collectKnownInvoiceNumbers() {
       });
     });
   } catch (e) {
-    console.error('[epicor-known] manifest scan failed', e);
+    console.error('[known-invoices] manifest scan failed', e);
   }
   return known;
 }
 
-// When a World order that went through the Epicor invoice lookup gets
-// archived, move its scanned invoice image out of the per-machine instance
-// folder into a shared world_YYYYMM folder (creating it if needed), and
-// append a row to that folder's invoices.csv manifest.
-function archiveWorldEpicorAssets(archivedOrders) {
-  const candidates = (archivedOrders || []).filter((o) => o && o.source === 'world' && o.epicorInvoiceImage);
+// When a World order whose invoice came from Gmail gets archived, move its saved
+// invoice PDF out of the shared gmail folder into a shared world_YYYYMM folder
+// (creating it if needed) and append a row to that folder's invoices.csv
+// manifest. Same month-folder convention the retired Epicor scrape used, so
+// existing world_YYYYMM archives stay coherent.
+function archiveWorldGmailAssets(archivedOrders) {
+  // worldInvoiceFile holds the .pdf name. epicorInvoiceImage is the legacy field
+  // from the retired Epicor portal scrape: orders captured before this changeover
+  // still carry one, and its .png lives in the old epicor folder. We keep moving
+  // those so a pre-existing order's invoice image isn't orphaned on archive.
+  const assetOf = (o) =>
+    o.worldInvoiceFile
+      ? { fileName: o.worldInvoiceFile, dir: getGmailAssetsDir() }
+      : o.epicorInvoiceImage
+        ? { fileName: o.epicorInvoiceImage, dir: path.join(getSharedDataDir(), 'epicor') }
+        : null;
+  const candidates = (archivedOrders || []).filter((o) => o && o.source === 'world' && assetOf(o));
   if (!candidates.length) return;
 
   const sharedDir = getSharedDataDir();
-  const epicorDir = getEpicorAssetsDir();
 
   candidates.forEach((order) => {
     try {
-      const sourcePath = path.join(epicorDir, order.epicorInvoiceImage);
-      if (!fs.existsSync(sourcePath)) {
-        console.warn(`[orders] archive: epicor invoice image missing, skipping move: ${sourcePath}`);
-        return;
-      }
-
       const monthKey = getInvoiceMonthFolderKey(order);
       if (!monthKey) {
-        console.warn(`[orders] archive: could not determine invoice month for order ${order.reference}; leaving image in place`);
+        console.warn(`[orders] archive: could not determine invoice month for order ${order.reference}; leaving World assets in place`);
         return;
       }
 
       const destDir = path.join(sharedDir, `world_${monthKey}`);
       fs.mkdirSync(destDir, { recursive: true });
 
-      const destPath = path.join(destDir, order.epicorInvoiceImage);
-      fs.copyFileSync(sourcePath, destPath);
-      fs.unlinkSync(sourcePath);
+      const { fileName, dir } = assetOf(order);
+      const sourcePath = path.join(dir, fileName);
+      if (fs.existsSync(sourcePath)) {
+        const destPath = path.join(destDir, fileName);
+        fs.copyFileSync(sourcePath, destPath);
+        fs.unlinkSync(sourcePath);
+      } else {
+        console.warn(`[orders] archive: World invoice PDF missing for order ${order.reference}; recording manifest only`);
+      }
 
       const manifestPath = path.join(destDir, 'invoices.csv');
       const row = [
@@ -1220,14 +1226,14 @@ function archiveWorldEpicorAssets(archivedOrders) {
       ].join(',');
       appendManifestRow(manifestPath, row);
 
-      console.log(`[orders] archived epicor invoice image for ${order.reference} -> ${destPath}`);
+      console.log(`[orders] archived World invoice assets for ${order.reference} -> ${destDir}`);
     } catch (e) {
-      console.error(`[orders] failed to archive epicor invoice image for order ${order?.reference}`, e);
+      console.error(`[orders] failed to archive World invoice assets for order ${order?.reference}`, e);
     }
   });
 }
 
-// Transbec analog of archiveWorldEpicorAssets: when a Transbec order whose
+// Transbec analog of archiveWorldGmailAssets: when a Transbec order whose
 // invoice came from Gmail gets archived, move its saved invoice PDF out of the
 // per-machine gmail folder into a shared transbec_YYYYMM folder and append a row
 // to that folder's invoices.csv manifest.
@@ -1496,9 +1502,9 @@ function archiveCompletedOrders(options = {}) {
   const remainingActive = removeOrdersFromDisk(archivedSourceOrders);
 
   try {
-    archiveWorldEpicorAssets(newlyArchivedOrders);
+    archiveWorldGmailAssets(newlyArchivedOrders);
   } catch (e) {
-    console.error('[orders] archiveWorldEpicorAssets failed', e);
+    console.error('[orders] archiveWorldGmailAssets failed', e);
   }
   try {
     archiveTransbecGmailAssets(newlyArchivedOrders);
@@ -1666,9 +1672,9 @@ function archiveOrderByKey(refKeyRaw, source) {
 
   if (archivedOrder) {
     try {
-      archiveWorldEpicorAssets([archivedOrder]);
+      archiveWorldGmailAssets([archivedOrder]);
     } catch (e) {
-      console.error('[orders] archiveWorldEpicorAssets failed', e);
+      console.error('[orders] archiveWorldGmailAssets failed', e);
     }
     try {
       archiveTransbecGmailAssets([archivedOrder]);
@@ -1686,8 +1692,8 @@ function archiveOrderByKey(refKeyRaw, source) {
 }
 
 // Permanently drop an order from active orders.json (no archive, no invoice
-// manifest) — used to clean up throwaway orders such as ones created from an
-// Epicor scan by mistake. Matches on reference / invoice # / __row, scoped to
+// manifest) — used to clean up throwaway orders such as ones created from a
+// vendor scan by mistake. Matches on reference / invoice # / __row, scoped to
 // the given vendor source when supplied so a same-reference order from another
 // vendor is never removed by mistake.
 function deleteOrderByKey(refKeyRaw, source) {
@@ -1728,15 +1734,15 @@ const vendorOrdersService = createVendorOrdersService({
   getCbkOrders,
   getTigerOrders,
   getBestBuyOrders,
-  openEpicorSite,
+  fetchWorldInvoicesScraper: fetchWorldInvoices,
   fetchTransbecInvoicesScraper: fetchTransbecInvoices,
   fetchBestbuyInvoicesScraper: fetchBestbuyInvoices,
   fetchBestbuyCreditInvoicesScraper: fetchBestbuyCreditInvoices,
   fetchCbkInvoicesScraper: fetchCbkInvoices,
   fetchTransbecCreditInvoicesScraper: fetchTransbecCreditInvoices,
   fetchProforceCreditInvoicesScraper: fetchProforceCreditInvoices,
-  getEpicorAssetsDir,
   getGmailAssetsDir,
+  getWorldInvoiceCachePath,
   getTransbecInvoiceCachePath,
   getBestbuyInvoiceCachePath,
   getBestbuyCreditInvoiceCachePath,
@@ -1756,13 +1762,7 @@ const {
   fetchCbkOrders,
   fetchTigerOrders,
   fetchBestBuyOrders,
-  openEpicor,
-  scanEpicorRange,
-  scanEpicorCredits,
-  rescanEpicorInvoice,
-  setEpicorInvoiceUnmatchable,
-  getEpicorScannedInvoices,
-  getEpicorScannedCredits,
+  fetchWorldInvoices: fetchWorldInvoicesService,
   fetchTransbecInvoices: fetchTransbecInvoicesService,
   fetchBestbuyInvoices: fetchBestbuyInvoicesService,
   fetchBestbuyCreditInvoices: fetchBestbuyCreditInvoicesService,
@@ -2340,17 +2340,7 @@ function registerAllIpc() {
     fetchCbkOrders,
     fetchTigerOrders,
     fetchBestBuyOrders,
-    openEpicor,
-    scanEpicorRange,
-    scanEpicorCredits,
-    rescanEpicorInvoice,
-    setEpicorInvoiceUnmatchable,
-    getEpicorScannedInvoices,
-    getEpicorScannedCredits,
-    // Passed as functions, not static strings: the shared folder is a runtime
-    // Settings value, so this must resolve fresh on every image request rather
-    // than bake in whatever it was when the app started.
-    getEpicorAssetsDir,
+    fetchWorldInvoices: fetchWorldInvoicesService,
     fetchTransbecInvoices: fetchTransbecInvoicesService,
     fetchBestbuyInvoices: fetchBestbuyInvoicesService,
     fetchBestbuyCreditInvoices: fetchBestbuyCreditInvoicesService,

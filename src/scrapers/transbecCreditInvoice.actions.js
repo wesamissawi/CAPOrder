@@ -177,7 +177,7 @@ async function extractLineItemsFromCreditMemoPdf(pdfBuffer) {
         partNumber,
         partDescription,
         unit,
-        // "quantity" = INV QTY, same convention as the Epicor line-item parser.
+        // "quantity" = INV QTY, same convention as the other line-item parsers.
         // Kept signed (negative here) — this is a return, reducing stock.
         quantity: Number(invQty),
         orderedQty: Number(orderedQty),
