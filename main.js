@@ -26,6 +26,7 @@ const { createVendorOrdersService } = require('./main/services/vendorOrders.serv
 const { createSageService } = require('./main/services/sage.service');
 const { configureSageQueue } = require('./main/services/sage.actions');
 const { createAppConfigService } = require('./main/services/appConfig.service');
+const { createCredentialSyncService } = require('./main/services/credentialSync.service');
 const { createUpdatesService } = require('./main/services/updates.service');
 const { writeJsonAtomic } = require('./main/utils/atomicWrite');
 // Shared business data is replicated as a CRDT (see main/crdt/README.md).
@@ -206,6 +207,10 @@ function normalizeAppConfig(raw = {}) {
   const qtyTaxRateRaw = Number(raw.qtyDiscrepancyTaxRate);
   const qtyDiscrepancyTaxRate =
     Number.isFinite(qtyTaxRateRaw) && qtyTaxRateRaw >= 0 && qtyTaxRateRaw <= 1 ? qtyTaxRateRaw : 0.13;
+  // Ghost mode (renderer/src/utils/ghostMode.js) is per-machine and starts off
+  // everywhere: it is meant to run on ONE unattended machine while a different
+  // one drives Sage, so it must never arrive switched on with a new install.
+  const ghostMode = raw.ghostMode === true;
   return {
     sharedDataDir,
     ahkExePath,
@@ -214,6 +219,7 @@ function normalizeAppConfig(raw = {}) {
     scrapersHeadless,
     qtyDiscrepancyThreshold,
     qtyDiscrepancyTaxRate,
+    ghostMode,
     instanceDataDir: INSTANCE_DIR,
   };
 }
@@ -1337,10 +1343,17 @@ function archiveBestbuyGmailAssets(archivedOrders) {
 }
 
 // Auto-adds any order line items not yet in Outstanding to the NEW STOCK
-// bubble right before the order leaves active status — same effect as
-// clicking "Bubblify" on the order, but always targets the existing NEW STOCK
-// bubble instead of creating a fresh per-order one, and only touches items
-// that haven't already been added (mirrors orders:bubblify-order's own guard).
+// bubble right before the order leaves active status, touching only items that
+// haven't already been added.
+//
+// This is the BACKSTOP, not the main route. Assigning a line in Order
+// Assignment already materialises its parts straight from the line
+// (order-assignment:assign) and stamps addedToOutstanding, so what's left here
+// at archive time is only what nobody ever assigned — it lands in NEW STOCK
+// rather than being lost. The per-order "Bubblify" button, which created a
+// fresh bubble named after the order, was removed as redundant: every scraped
+// order reaches Order Assignment on its own, without being archived first.
+//
 // Runs for every archive path (single-order and bulk) since both funnel
 // through here rather than the renderer.
 function addOrderLineItemsToNewStock(order) {
@@ -1794,6 +1807,22 @@ const {
   maybeOfferMigrationToShared,
   migrateBusinessFilesToShared,
 } = appConfigService;
+
+// Scraper logins and Gmail auth stay instance-local by design — they are not
+// business data and do not belong in the replicated store. This is the escape
+// hatch for standing up a new workstation: a request/grant hand-off through the
+// share, with the payload locked to a pairing code read off the sending screen.
+const credentialSync = createCredentialSyncService({
+  fs,
+  path,
+  getSharedDataDir,
+  getSharedDirInfo,
+  getMachineId,
+  getUserConfigRaw,
+  readConfig,
+  writeConfig,
+  writeJsonAtomic,
+});
 
 // Blocking pause that doesn't peg a core. Used only on rare error/contention
 // paths (a handful of ms to a few hundred ms total).
@@ -2395,6 +2424,7 @@ function registerAllIpc() {
     getResolvedPathsSummary,
     getAhkExePath,
     validateAhkExePath,
+    credentialSync,
     readSageLock,
     writeSageLock,
     clearSageLock,

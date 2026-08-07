@@ -338,36 +338,6 @@ const registerOrdersIpc = (ipcMain, deps) => {
     }
   });
 
-  ipcMain.handle('orders:bubblify-order', (_evt, refKey, bubbleName) => {
-    try {
-      const orders = readOrders();
-      const items = readItems();
-      const newItems = [];
-
-      const updatedOrders = orders.map((order) => {
-        if (!orderMatchesKey(order, refKey)) return order;
-        if (!Array.isArray(order.lineItems)) return order;
-        const updatedLineItems = order.lineItems.map((line, idx) => {
-          if (!line || line.addedToOutstanding === true) return line;
-          const outItem = { ...makeOutstandingFromLine(order, line, idx), allocated_to: bubbleName };
-          newItems.push(outItem);
-          return { ...line, addedToOutstanding: true };
-        });
-        return { ...order, lineItems: updatedLineItems };
-      });
-
-      if (newItems.length > 0) {
-        writeItems(items.concat(newItems));
-        writeOrders(updatedOrders);
-      }
-
-      return { ok: true, added: newItems.length };
-    } catch (e) {
-      console.error('[orders:bubblify-order]', e);
-      return { ok: false, error: e?.message || 'Failed to bubblify order.' };
-    }
-  });
-
   ipcMain.handle('orders:fetch-world', async () => {
     return fetchWorldOrders();
   });

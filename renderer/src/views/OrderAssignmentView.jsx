@@ -80,6 +80,134 @@ const DEST_STYLES = {
 
 const EMPTY_ORDERS = [];
 
+// ---------------------------------------------------------------------------
+// Sectioning
+//
+// Two clocks, deliberately. The top two sections answer "what just arrived", so
+// they run on SCRAPE time — when the order landed here. The day sections answer
+// "what was ordered when", so they run on the vendor's ORDER date, which is
+// also what the card face shows and what the archive-window dropdown filters
+// on. Each section sorts by its own clock.
+//
+// The consequence to know: an order the vendor dated three days ago but that
+// only reached us in the last scrape shows up at the top, not under Earlier.
+// That is the intent — the top sections are an inbox.
+const scrapeMs = (o) => {
+  for (const c of [o?.scrapedAt, o?.orderDate, o?.archivedAt]) {
+    const t = Date.parse(c);
+    if (!Number.isNaN(t)) return t;
+  }
+  return 0;
+};
+
+// Order date first, falling back to arrival for the rows that carry no vendor
+// date at all (Tiger orders, some older archive rows) — they still have to land
+// in some day bucket.
+const orderMs = (o) => {
+  for (const c of [o?.orderDate, o?.scrapedAt, o?.archivedAt]) {
+    const t = Date.parse(c);
+    if (!Number.isNaN(t)) return t;
+  }
+  return 0;
+};
+
+// Nothing stamps a scrape RUN id on an order, so the batch is recovered by
+// clustering: walk from the newest order down, taking each while it's within
+// this gap of the one before it. Vendors are scraped concurrently and finish
+// seconds apart, so one run collapses into a single cluster; the run before it
+// is typically hours back, well clear of the gap.
+const SCRAPE_GAP_MS = 10 * 60 * 1000;
+
+const fmtScrapeTime = (ms) =>
+  new Date(ms).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+
+function buildSections(orders) {
+  const sorted = [...orders].sort((a, b) => scrapeMs(b) - scrapeMs(a));
+  if (!sorted.length) return [];
+
+  const latest = [];
+  let prev = null;
+  let i = 0;
+  for (; i < sorted.length; i += 1) {
+    const t = scrapeMs(sorted[i]);
+    if (!t) break;
+    if (prev !== null && prev - t > SCRAPE_GAP_MS) break;
+    latest.push(sorted[i]);
+    prev = t;
+  }
+
+  const now = Date.now();
+  const hourAgo = now - 3600000;
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const todayMs = startOfToday.getTime();
+  const yesterdayMs = todayMs - 86400000;
+
+  const hour = [];
+  const dayBuckets = [];
+  sorted.slice(i).forEach((o) => {
+    if (scrapeMs(o) >= hourAgo) hour.push(o);
+    else dayBuckets.push(o);
+  });
+
+  // Day sections run on the vendor's order date and sort by it, so the reading
+  // order inside a day matches the dates printed on the cards.
+  const today = [];
+  const yesterday = [];
+  const earlier = [];
+  dayBuckets
+    .sort((a, b) => orderMs(b) - orderMs(a))
+    .forEach((o) => {
+      const t = orderMs(o);
+      if (t >= todayMs) today.push(o);
+      else if (t >= yesterdayMs) yesterday.push(o);
+      else earlier.push(o);
+    });
+
+  // The newest cluster is always shown as "Latest scrape" even when it's days
+  // old (an archive-only window, say) — the timestamp in the header says so, and
+  // burying it under "Earlier" would lose the one section you asked for first.
+  const latestAt = latest.length ? scrapeMs(latest[0]) : 0;
+
+  return [
+    {
+      id: "latest",
+      label: "Latest scrape",
+      sub: latestAt ? fmtScrapeTime(latestAt) : "",
+      tone: "bg-indigo-600 text-white border-indigo-600",
+      orders: latest,
+    },
+    { id: "hour", label: "Last hour", sub: "", tone: "bg-emerald-100 text-emerald-800 border-emerald-300", orders: hour },
+    { id: "today", label: "Today", sub: "", tone: "bg-sky-100 text-sky-800 border-sky-300", orders: today },
+    { id: "yesterday", label: "Yesterday", sub: "", tone: "bg-amber-100 text-amber-900 border-amber-300", orders: yesterday },
+    { id: "earlier", label: "Earlier", sub: "", tone: "bg-slate-100 text-slate-600 border-slate-300", orders: earlier },
+  ].filter((s) => s.orders.length > 0);
+}
+
+function SectionHeader({ label, sub, tone, count }) {
+  return (
+    // Sticky so the section you're assigning into stays named while you scroll
+    // a long day. The page background is a gradient, so it needs its own
+    // translucent backing (same white/blur language as Card) or the cards
+    // sliding under it would show through.
+    <div className="sticky top-0 z-10 flex items-center gap-2 rounded-xl bg-white/70 px-2 py-1.5 backdrop-blur">
+      <span className={`rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-wide ${tone}`}>
+        {label}
+      </span>
+      {sub && <span className="text-xs font-semibold text-slate-500">{sub}</span>}
+      <span className="text-xs text-slate-400">
+        {count} order{count === 1 ? "" : "s"}
+      </span>
+      <span className="h-px flex-1 bg-slate-300/60" />
+    </div>
+  );
+}
+
 const FILTERS = [
   { id: "all", label: "All" },
   { id: "needs", label: "Needs attention" },
@@ -397,7 +525,7 @@ export default function OrderAssignmentView() {
   const [scope, setScope] = useState("all");
   const [search, setSearch] = useState("");
   const [searchDraft, setSearchDraft] = useState("");
-  const [days, setDays] = useState(30);
+  const [days, setDays] = useState(7);
   const [filter, setFilter] = useState("all");
   const [includeResolved, setIncludeResolved] = useState(false);
   // Credits (money coming back, not parts going out) are noise in a view about
@@ -471,6 +599,8 @@ export default function OrderAssignmentView() {
       return true;
     });
   }, [orders, filter]);
+
+  const sections = useMemo(() => buildSections(shown), [shown]);
 
   // Clearing the pre-tracking backlog. Bulk and hard to eyeball afterwards, so
   // it states the exact cutoff and count before doing anything.
@@ -925,24 +1055,35 @@ export default function OrderAssignmentView() {
         </Card>
       )}
 
-      {/* Same grid as Order Management, going one column denser on very wide
-          screens since these cards carry less per line. Grid items stretch by
-          default, so every card in a row matches the tallest one — combined with
-          `h-full flex flex-col` on the card itself, that gives an even bottom
-          edge instead of a ragged one. */}
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-        {shown.map((o) => (
-          <OrderCard
-            key={`${o.orderKey}|${o.reference}|${o.archived}`}
-            order={o}
-            onToggleResolved={(resolved) => handleToggleResolved(o.orderKey, resolved)}
-            activeDest={activeDest}
-            onAssign={(lineIdx, qty) => handleAssign(o.orderKey, lineIdx, qty)}
-            onUnassign={(lineIdx, dest) => handleUnassign(o.orderKey, lineIdx, dest)}
-            busy={busy}
+      {/* One grid per section, so a section's cards row up against each other
+          and not against the next section's. Same grid as Order Management,
+          going one column denser on very wide screens since these cards carry
+          less per line. Grid items stretch by default, so every card in a row
+          matches the tallest one — combined with `h-full flex flex-col` on the
+          card itself, that gives an even bottom edge instead of a ragged one. */}
+      {sections.map((section) => (
+        <div key={section.id} className="space-y-2">
+          <SectionHeader
+            label={section.label}
+            sub={section.sub}
+            tone={section.tone}
+            count={section.orders.length}
           />
-        ))}
-      </div>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+            {section.orders.map((o) => (
+              <OrderCard
+                key={`${o.orderKey}|${o.reference}|${o.archived}`}
+                order={o}
+                onToggleResolved={(resolved) => handleToggleResolved(o.orderKey, resolved)}
+                activeDest={activeDest}
+                onAssign={(lineIdx, qty) => handleAssign(o.orderKey, lineIdx, qty)}
+                onUnassign={(lineIdx, dest) => handleUnassign(o.orderKey, lineIdx, dest)}
+                busy={busy}
+              />
+            ))}
+          </div>
+        </div>
+      ))}
 
       {stopReview && (
         <StopAssignModal

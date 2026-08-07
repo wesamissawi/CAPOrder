@@ -1,7 +1,11 @@
 ﻿// src/App.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import api from "./api";
-import InvoicePreview, { INVOICE_DOCUMENT_DEFAULTS } from "./components/InvoicePreview";
+import InvoicePreview, {
+  INVOICE_DOCUMENT_DEFAULTS,
+  QUOTE_DOCUMENT_TITLE,
+} from "./components/InvoicePreview";
+import DraftInput from "./components/DraftInput";
 import QtyConfirmModal from "./components/QtyConfirmModal";
 import ConflictReview from "./components/ConflictReview";
 import DashboardView from "./views/DashboardView";
@@ -23,10 +27,27 @@ import {
   groupItemsByBubble,
   uniqueName,
   makeUid,
+  bubbleIdForName,
   computeBubblePrintSignature,
 } from "./utils/inventory";
+import { computeDiscountedItemPrices, computeDocumentTotals } from "./utils/quote";
 import { isOrderSageLocked, orderKeyMatches } from "./utils/sageLock";
 import { applyInvoiceEnvironmentalFees } from "./utils/environmentalFee";
+import {
+  GHOST_SAGE_POLL_MS,
+  GHOST_SAGE_WAIT_MS,
+  GHOST_TICK_MS,
+  foreignSagePoMachine,
+  ghostDayKey,
+  ghostOrderKey,
+  ghostPrintTargets,
+  ghostQueuedKeys,
+  ghostSagePendingCount,
+  ghostSageQueueTargets,
+  ghostSlotKey,
+  isWithinGhostHours,
+  shouldFetchBestbuyInvoices,
+} from "./utils/ghostMode";
 
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
 
@@ -77,6 +98,28 @@ function isWaitingOnInvoice(order) {
     !order?.bestbuyInvoiceFile &&
     !order?.bestbuyCreditFile
   );
+}
+
+// Identity for the pickup pin (see pinnedPickup below). Prefers __uid so the
+// pin survives a reference being corrected mid-session, and otherwise falls
+// back to the same reference/__row key the order cards use.
+function orderPinKey(order) {
+  const uid = (order?.__uid || "").toString().trim();
+  if (uid) return `uid:${uid}`;
+  return `ref:${(order?.reference || order?.__row || "").toString().trim().toUpperCase()}`;
+}
+
+// The order as the list should sort and filter it right now. Checking "Picked
+// Up"/"Arrived" saves immediately (handleOrderCheckboxChange), which used to
+// re-bucket the card the instant it was clicked — yanking it out from under
+// the cursor, or off the page entirely when the current pickup filter excludes
+// it. While a pin is held these two fields read as they were when the pin was
+// taken, so the card stays put. Only the list position is frozen; the checkbox
+// itself, the card body and the badge counts all still show live values.
+function pinnedOrderView(order, pinnedPickup) {
+  const pin = pinnedPickup?.get(orderPinKey(order));
+  if (!pin) return order;
+  return { ...order, pickedUp: pin.pickedUp, inStore: pin.inStore };
 }
 
 function matchesOrdersPickupFilter(order, value) {
@@ -356,6 +399,11 @@ export default function App() {
   const [ordersSearch, setOrdersSearch] = useState("");
   const [ordersPickupFilter, setOrdersPickupFilter] = useState("all");
   const [ordersTodayOnly, setOrdersTodayOnly] = useState(false);
+  // Map<orderPinKey, {pickedUp, inStore}> | null. Non-null once a Picked Up /
+  // Arrived checkbox has been clicked: it holds every card's pickup standing as
+  // it was at that moment so the list stops re-sorting under the user. Cleared
+  // on an explicit Refresh or pickup-filter change (see pinPickupPositions).
+  const [pinnedPickup, setPinnedPickup] = useState(null);
   const [ordersArchiveRunning, setOrdersArchiveRunning] = useState(false);
   const [ordersArchiveStatus, setOrdersArchiveStatus] = useState("");
   const [ordersArchiveError, setOrdersArchiveError] = useState("");
@@ -414,6 +462,20 @@ export default function App() {
   // what's actually on disk before the config load below completes.
   const [qtyDiscrepancyThreshold, setQtyDiscrepancyThreshold] = useState(15);
   const [qtyDiscrepancyTaxRate, setQtyDiscrepancyTaxRate] = useState(0.13);
+  // Ghost mode (see utils/ghostMode.js and runGhostCycle below): this machine
+  // clicks its own way through Order Management every half hour. Per-machine
+  // setting, off until switched on in Settings.
+  const [ghostMode, setGhostMode] = useState(false);
+  const [ghostBusy, setGhostBusy] = useState(""); // the step running right now
+  const [ghostLog, setGhostLog] = useState(""); // what the last cycle did
+  const ghostRunningRef = useRef(false);
+  // Seeded with the half-hour the app STARTED in, so launching at 10:05 waits
+  // for 10:30 rather than firing a full cycle on startup — and so restarting
+  // repeatedly can never re-run the same slot.
+  const ghostSlotRef = useRef(ghostSlotKey());
+  const ghostCycleRef = useRef(null);
+  // The day the once-daily BestBuy invoice check last ran on.
+  const ghostBestbuyDayRef = useRef("");
   const [qtyConfirmModal, setQtyConfirmModal] = useState(null); // { order, refKey }
   const [invoiceReviewOrder, setInvoiceReviewOrder] = useState(null);
   const [invoiceReviewImageDataUrl, setInvoiceReviewImageDataUrl] = useState("");
@@ -477,6 +539,11 @@ export default function App() {
 
   const [printBubbleId, setPrintBubbleId] = useState(null);
   const [printGeneratedAt, setPrintGeneratedAt] = useState(null);
+  // "salesOrder" or "quote". The same preview modal draws both — a quote is the
+  // same sheet with the tax folded into the line prices — but the two confirm
+  // paths are deliberately different: a quote draws no Sales Order number,
+  // marks nothing sold, and doesn't touch the printed-signature badge.
+  const [printMode, setPrintMode] = useState("salesOrder");
 
   const pendingItemsRefreshRef = useRef(false);
   const printPreviewRef = useRef(null);
@@ -493,6 +560,7 @@ export default function App() {
         if (Number.isFinite(thresholdNum)) setQtyDiscrepancyThreshold(thresholdNum);
         const taxRateNum = Number(cfg.qtyDiscrepancyTaxRate);
         if (Number.isFinite(taxRateNum)) setQtyDiscrepancyTaxRate(taxRateNum);
+        setGhostMode(cfg.ghostMode === true);
       })
       .catch(() => {});
   }, []);
@@ -778,7 +846,7 @@ export default function App() {
     // same pattern as paymentIds above: only sent when this call is actually
     // the one changing them, otherwise carried forward from what's cached
     // locally so an unrelated save (e.g. a notes edit) doesn't blank them out.
-    ["createdAt", "delivered", "counter", "paid", "noNewParts", "printedSignature", "printedAt", "salesOrderNumber", "sageInvoiceNumber", "sageSentAt", "sageRunId"].forEach((key) => {
+    ["createdAt", "delivered", "counter", "paid", "noNewParts", "printedSignature", "printedAt", "salesOrderNumber", "quoteDiscount", "quoteDiscountApplied", "quoteDiscountPriorPrices", "sageInvoiceNumber", "sageSentAt", "sageRunId"].forEach((key) => {
       const has = Object.prototype.hasOwnProperty.call(overrides, key);
       const val = has ? overrides[key] : meta[key];
       if (val !== undefined) payload[key] = val;
@@ -855,10 +923,17 @@ export default function App() {
 
       entries.forEach((entry) => {
         if (!entry || entry.deleted) return;
-        const id = entry.id || entry.bubbleId || entry.name || makeUid();
-        const name = (entry.name || id || "").toString().trim().toUpperCase();
-        const lower = norm(name);
+        const name = (entry.name || entry.id || entry.bubbleId || "")
+          .toString()
+          .trim()
+          .toUpperCase();
         if (!name) return;
+        // Re-derived rather than taken from the entry, so a record published by
+        // a machine still on a build that mints uuids lands under the same key
+        // as everything else here instead of splitting this order in two on
+        // screen. The store-side collapse folds the record itself at startup.
+        const id = bubbleIdForName(name);
+        const lower = norm(name);
         const existingIdx =
           (id && indexById.has(id) && indexById.get(id) !== undefined
             ? indexById.get(id)
@@ -878,6 +953,11 @@ export default function App() {
           if (typeof entry.printedSignature === "string") som.printedSignature = entry.printedSignature;
           if (typeof entry.printedAt === "string") som.printedAt = entry.printedAt;
           if (typeof entry.salesOrderNumber === "string") som.salesOrderNumber = entry.salesOrderNumber;
+          if (typeof entry.quoteDiscount === "number") som.quoteDiscount = entry.quoteDiscount;
+          if (typeof entry.quoteDiscountApplied === "boolean")
+            som.quoteDiscountApplied = entry.quoteDiscountApplied;
+          if (Array.isArray(entry.quoteDiscountPriorPrices))
+            som.quoteDiscountPriorPrices = entry.quoteDiscountPriorPrices;
           if (typeof entry.sageInvoiceNumber === "string") som.sageInvoiceNumber = entry.sageInvoiceNumber;
           if (typeof entry.sageSentAt === "string") som.sageSentAt = entry.sageSentAt;
           if (typeof entry.sageRunId === "string") som.sageRunId = entry.sageRunId;
@@ -971,7 +1051,9 @@ export default function App() {
     const base = baseRaw.toUpperCase();
     const names = new Set(bubbles.map((b) => (b.name || "").toUpperCase()));
     const finalName = uniqueName(base, names);
-    const id = makeUid();
+    // Derived, not minted — see bubbleIdForName. `uniqueName` has already made
+    // sure this name isn't taken, so the key it produces is free too.
+    const id = bubbleIdForName(finalName);
     const nb = { id, name: finalName, notes: "" };
     // The order's own clock. Sales Orders bands cards by this into
     // Urgent/Regular/Stale, so it's stamped once at creation and never touched
@@ -1265,7 +1347,10 @@ export default function App() {
       const additions = toAdd.map((name) => {
         const finalName = uniqueName(name, names);
         names.add(finalName);
-        return { id: makeUid(), name: finalName, notes: "" };
+        // The path that caused the duplicates: every machine runs this the
+        // moment it sees a part pointing at a name it has no bubble for, so a
+        // minted id gave one order as many records as there were machines.
+        return { id: bubbleIdForName(finalName), name: finalName, notes: "" };
       });
       // persist new bubbles to shared
       additions.forEach((b) => {
@@ -1372,6 +1457,34 @@ export default function App() {
     if (!printBubble) return [];
     return printExtraLinesByBubble[printBubble.id] || [];
   }, [printBubble, printExtraLinesByBubble]);
+  // The "make it 240 even" concession, in tax-in dollars. Kept on the bubble so
+  // a reprint says the same thing, and so the flag below can stop it being
+  // pushed into the prices twice.
+  const printQuoteMeta = useMemo(() => {
+    if (!printBubble) return { discount: 0, applied: false, priorPrices: null };
+    const meta = bubbleMeta[printBubble.id] || bubbleMeta[printBubble.name] || {};
+    return {
+      discount: Number(meta.quoteDiscount) || 0,
+      applied: meta.quoteDiscountApplied === true,
+      // What each part cost before the discount was pushed into the prices.
+      priorPrices: Array.isArray(meta.quoteDiscountPriorPrices)
+        ? meta.quoteDiscountPriorPrices
+        : null,
+    };
+  }, [printBubble, bubbleMeta]);
+  // The discount belongs on the QUOTE as its own line — full prices above, then
+  // Total / Discount / Post-Discount. Only the Sales Order swallows it into the
+  // line prices. So once it's been applied, the quote has to go on showing what
+  // the parts cost BEFORE the drop, or the column would stop adding up to the
+  // Total printed under it. The prices are stashed at apply time for exactly
+  // this; parts added since simply show their current price.
+  const printQuoteItems = useMemo(() => {
+    if (!printQuoteMeta.applied || !printQuoteMeta.priorPrices) return printItems;
+    const prior = new Map(printQuoteMeta.priorPrices.map((p) => [p.uid, p.allocated_for]));
+    return printItems.map((it) =>
+      prior.has(it.uid) ? { ...it, allocated_for: prior.get(it.uid) } : it
+    );
+  }, [printItems, printQuoteMeta]);
   const bubblePaymentAssignments = useMemo(() => {
     const map = {};
     bubbles.forEach((b) => {
@@ -2089,7 +2202,7 @@ export default function App() {
       const label = `${(payment.type || 'PAYMENT').toUpperCase()} $${toAmt(payment.amount).toFixed(2)}`;
       const bubbleName = uniqueName(label, existingNames);
       existingNames.add(bubbleName.toUpperCase());
-      const bubbleId = makeUid();
+      const bubbleId = bubbleIdForName(bubbleName);
       const meta = { accountingPath: ACCOUNTING_PATHS.CASH_SALE, paymentIds: [payment.id] };
       newBubbles.push({ id: bubbleId, name: bubbleName, notes: '' });
       newMetaEntries[bubbleId] = meta;
@@ -2413,8 +2526,9 @@ export default function App() {
     }
   }
 
-  function handleOpenPrint(bubble) {
+  function handleOpenPrint(bubble, mode = "salesOrder") {
     if (!bubble || DEFAULT_BUBBLE_NAMES.has(bubble.name)) return;
+    setPrintMode(mode === "quote" ? "quote" : "salesOrder");
     setPrintBubbleId(bubble.id);
     setPrintGeneratedAt(new Date());
   }
@@ -2462,6 +2576,227 @@ export default function App() {
     }
     setPrintBubbleId(null);
     setPrintGeneratedAt(null);
+  }
+
+  // Writes the discount straight through to the bubble so both machines and a
+  // later reprint see the same number. Applying it to the prices is a separate,
+  // explicit action — see handleApplyQuoteDiscount.
+  function handleSetQuoteDiscount(value) {
+    if (!printBubble) return;
+    const amount = Math.max(0, Math.round((Number(value) || 0) * 100) / 100);
+    const nameKey = printBubble.name;
+    const meta = bubbleMeta[printBubble.id] || bubbleMeta[nameKey] || {};
+    const nextMeta = { ...meta, quoteDiscount: amount };
+    const nextBubbleMeta = {
+      ...bubbleMeta,
+      ...(nameKey ? { [nameKey]: nextMeta } : {}),
+      [printBubble.id]: nextMeta,
+    };
+    setBubbleMeta(nextBubbleMeta);
+    persistUIState(nextBubbleMeta);
+    persistSharedBubbleSnapshot(printBubble.id, { quoteDiscount: amount });
+  }
+
+  // Pushes an agreed discount down into the individual sell prices, so the
+  // Sales Order's own footer lands on the number the customer accepted without
+  // the word "discount" ever appearing on it.
+  //
+  // Deliberately a button rather than a side effect of printing the quote:
+  // this rewrites the price on every part in the order, and printing a quote to
+  // show someone shouldn't silently do that. Flagged once done so a second
+  // click can't stack the same concession twice.
+  async function handleApplyQuoteDiscount() {
+    if (!printBubble) return;
+    const { discount, applied } = printQuoteMeta;
+    if (applied || !(discount > 0)) return;
+
+    const plan = computeDiscountedItemPrices(
+      printItems,
+      printExtraLines,
+      discount,
+      INVOICE_DOCUMENT_DEFAULTS.taxRate
+    );
+    if (!plan.ok) {
+      alert(plan.error);
+      return;
+    }
+
+    const n = plan.updates.length;
+    // The footer rounds the subtotal and the tax separately, so as the subtotal
+    // moves by a cent the total moves by one or two — which leaves some totals
+    // simply unreachable. When the asked-for discount lands on one of those, the
+    // DISCOUNT is what gives, not the agreement between the two documents: the
+    // quote is re-stated as the concession actually made, so its Post-Discount
+    // and the Sales Order's Total stay the same number.
+    const effectiveDiscount = Math.round((plan.before - plan.achieved) * 100) / 100;
+
+    const ok = await api.confirm(
+      `Take $${discount.toFixed(2)} off "${printBubble.name}"?`,
+      `The Sales Order total goes from $${plan.before.toFixed(2)} to ` +
+        `$${plan.achieved.toFixed(2)} taxes in. The Quotation is unchanged — it keeps the full ` +
+        `prices with the discount on its own line.\n\n` +
+        `It comes out of margin: each of the ${n} part${n === 1 ? "" : "s"} gives up a share of ` +
+        `what it makes, so nothing is sold below cost and a part coming back as a return ` +
+        `refunds only what it was invoiced. $${plan.marginLeft.toFixed(2)} of margin is left ` +
+        `on the order.\n\n` +
+        `This overwrites the sell price on ${n} part${n === 1 ? "" : "s"} — but the Quotation ` +
+        `remembers what they were.` +
+        (plan.noCostCount
+          ? `\n\n${plan.noCostCount} part${plan.noCostCount === 1 ? " has" : "s have"} no cost ` +
+            `recorded, so ${plan.noCostCount === 1 ? "it stays" : "they stay"} at full price — ` +
+            `there's no way to know what ${plan.noCostCount === 1 ? "it can" : "they can"} give up.`
+          : "") +
+        (effectiveDiscount !== discount
+          ? `\n\n$${discount.toFixed(2)} isn't reachable — the tax rounding skips it — so this ` +
+            `takes off $${effectiveDiscount.toFixed(2)} and the quote will say that too, keeping ` +
+            `both documents on $${plan.achieved.toFixed(2)}.`
+          : "")
+    );
+    if (!ok) return;
+
+    // Captured BEFORE the writes — this is what the quote goes on printing, so
+    // the discount stays a visible line on it rather than disappearing into the
+    // prices the way it does on the sales order.
+    const priorPrices = plan.updates.map((u) => ({
+      uid: u.uid,
+      allocated_for: String(printItems.find((it) => it.uid === u.uid)?.allocated_for ?? ""),
+    }));
+
+    plan.updates.forEach((u) => updateItemByKey(u.uid, { allocated_for: u.allocated_for }));
+
+    const nameKey = printBubble.name;
+    const meta = bubbleMeta[printBubble.id] || bubbleMeta[nameKey] || {};
+    const nextMeta = {
+      ...meta,
+      quoteDiscount: effectiveDiscount,
+      quoteDiscountApplied: true,
+      quoteDiscountPriorPrices: priorPrices,
+    };
+    const nextBubbleMeta = {
+      ...bubbleMeta,
+      ...(nameKey ? { [nameKey]: nextMeta } : {}),
+      [printBubble.id]: nextMeta,
+    };
+    setBubbleMeta(nextBubbleMeta);
+    persistUIState(nextBubbleMeta);
+    persistSharedBubbleSnapshot(printBubble.id, {
+      quoteDiscount: effectiveDiscount,
+      quoteDiscountApplied: true,
+      quoteDiscountPriorPrices: priorPrices,
+    });
+  }
+
+  // The preview node is the printed page — same DOM, so what's on screen and
+  // what comes out of the printer can't drift. Shared by both confirm paths.
+  function openPrintWindow(title) {
+    setTimeout(() => {
+      if (!printPreviewRef.current) return;
+      const contents = printPreviewRef.current.innerHTML;
+      const printWindow = window.open("", "PRINT", "width=900,height=1100");
+      if (!printWindow) return;
+      printWindow.document.write(`
+        <!doctype html>
+        <html>
+          <head>
+            <title>${title}</title>
+            <style>
+              body {
+                margin: 0;
+                padding: 24px;
+                background: #e2e8f0;
+                font-family: 'Inter', 'Segoe UI', sans-serif;
+              }
+              @page { size: letter; margin: 0.5in; }
+              @media print {
+                body {
+                  padding: 0;
+                  background: white;
+                }
+                /* The sheet is sized for the screen preview (8.5x11 with its
+                   own margin baked in as padding). On paper the printer's own
+                   0.5in margin supplies that, so drop the padding and shrink to
+                   the printable area — otherwise the sheet overflows onto a
+                   second, near-empty page. */
+                .invoice-sheet {
+                  width: auto !important;
+                  min-height: 0 !important;
+                  height: 9.9in !important;
+                  padding: 0 !important;
+                  border-radius: 0 !important;
+                  box-shadow: none !important;
+                }
+                /* Keep the header/table fills — printers strip backgrounds by
+                   default, which would flatten the whole grid to plain white. */
+                * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+              }
+              .page {
+                width: 8.5in;
+                min-height: 11in;
+                margin: 0 auto;
+              }
+            </style>
+          </head>
+          <body>${contents}</body>
+        </html>
+      `);
+      printWindow.document.close();
+      printWindow.focus();
+      printWindow.print();
+      printWindow.close();
+    }, 100);
+  }
+
+  // Nothing has been ordered yet, so this deliberately does NONE of what a
+  // Sales Order print does: no number off the shared counter, no `sold_date` on
+  // the parts, no printedSignature. Stamping any of those would mark unsold
+  // stock as sold and flip the card's "Printed" badge for paperwork that was
+  // never issued.
+  async function handleConfirmQuotePrint() {
+    if (!printBubble || (printItems.length === 0 && printExtraLines.length === 0)) return;
+    const printedAt = new Date().toISOString();
+    setPrintGeneratedAt(new Date());
+
+    const rowsForTotal = [
+      ...printQuoteItems.map((it) => ({
+        extension: (Number(it.quantity) || 0) * (Number(it.allocated_for) || 0),
+        taxable: true,
+      })),
+      ...printExtraLines.map((l) => ({
+        extension: (Number(l.quantity) || 0) * (Number(l.unitPrice) || 0),
+        taxable: l.taxable !== false,
+      })),
+    ];
+    const gross = computeDocumentTotals(rowsForTotal, INVOICE_DOCUMENT_DEFAULTS.taxRate).total;
+
+    // Same reasoning as the Sales Order snapshot: never fatal. The paper is
+    // going out either way, so a failed record is a warning, not an abort.
+    try {
+      const res = await api?.appendPrintSnapshot?.({
+        kind: "QUOTE",
+        salesOrderNumber: "",
+        printedAt,
+        bubbleId: printBubble.id,
+        bubbleName: printBubble.name,
+        notes: printBubble.notes || "",
+        items: printQuoteItems,
+        extraLines: printExtraLines,
+        discount: printQuoteMeta.discount,
+        quoteTotal: Math.round((gross - printQuoteMeta.discount) * 100) / 100,
+        document: {
+          title: QUOTE_DOCUMENT_TITLE,
+          companyName: INVOICE_DOCUMENT_DEFAULTS.companyName,
+          companyAddress: INVOICE_DOCUMENT_DEFAULTS.companyAddress,
+          companyContact: INVOICE_DOCUMENT_DEFAULTS.companyContact,
+          taxLabel: INVOICE_DOCUMENT_DEFAULTS.taxLabel,
+          taxRate: INVOICE_DOCUMENT_DEFAULTS.taxRate,
+        },
+      });
+      if (res?.ok === false) console.warn("[quote] snapshot not recorded", res.error);
+    } catch (e) {
+      console.warn("[quote] snapshot not recorded", e?.message || e);
+    }
+
+    openPrintWindow(`Quotation - ${printBubble.name}`);
   }
 
   async function handleConfirmPrint() {
@@ -2549,61 +2884,7 @@ export default function App() {
     } catch (e) {
       console.warn("[print] snapshot not recorded", e?.message || e);
     }
-    setTimeout(() => {
-      if (!printPreviewRef.current) return;
-      const contents = printPreviewRef.current.innerHTML;
-      const printWindow = window.open("", "PRINT", "width=900,height=1100");
-      if (!printWindow) return;
-      printWindow.document.write(`
-        <!doctype html>
-        <html>
-          <head>
-            <title>Sales Order ${salesOrderNumber} - ${printBubble.name}</title>
-            <style>
-              body {
-                margin: 0;
-                padding: 24px;
-                background: #e2e8f0;
-                font-family: 'Inter', 'Segoe UI', sans-serif;
-              }
-              @page { size: letter; margin: 0.5in; }
-              @media print {
-                body {
-                  padding: 0;
-                  background: white;
-                }
-                /* The sheet is sized for the screen preview (8.5x11 with its
-                   own margin baked in as padding). On paper the printer's own
-                   0.5in margin supplies that, so drop the padding and shrink to
-                   the printable area — otherwise the sheet overflows onto a
-                   second, near-empty page. */
-                .invoice-sheet {
-                  width: auto !important;
-                  min-height: 0 !important;
-                  height: 9.9in !important;
-                  padding: 0 !important;
-                  border-radius: 0 !important;
-                  box-shadow: none !important;
-                }
-                /* Keep the header/table fills — printers strip backgrounds by
-                   default, which would flatten the whole grid to plain white. */
-                * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-              }
-              .page {
-                width: 8.5in;
-                min-height: 11in;
-                margin: 0 auto;
-              }
-            </style>
-          </head>
-          <body>${contents}</body>
-        </html>
-      `);
-      printWindow.document.close();
-      printWindow.focus();
-      printWindow.print();
-      printWindow.close();
-    }, 100);
+    openPrintWindow(`Sales Order ${salesOrderNumber} - ${printBubble.name}`);
   }
 
   // "editing anything" flags for all text inputs
@@ -2647,6 +2928,9 @@ export default function App() {
       const normalized = Array.isArray(list) ? list : [];
       adoptSavedOrders(normalized);
       setOrdersDirty(false);
+      // A reload is the moment the list is allowed to re-sort: drop any pickup
+      // pin so cards land in the sections their saved state actually says.
+      setPinnedPickup(null);
       if (pathRes?.path) setOrdersSourcePath(pathRes.path);
       setOrdersInitialized(true);
     } catch (e) {
@@ -2821,11 +3105,40 @@ export default function App() {
     }
     await loadOrders();
   }
+  // Take the pickup pin if we don't already hold one. Taking it once and then
+  // leaving it alone is the whole point: re-snapshotting on every click would
+  // let the card move on the second toggle, and the pin has to cover every
+  // order (not just the clicked one) so nothing else shuffles around it either.
+  function pinPickupPositions() {
+    setPinnedPickup((prev) => {
+      if (prev) return prev;
+      const snap = new Map();
+      (ordersRef.current || []).forEach((o) => {
+        snap.set(orderPinKey(o), {
+          pickedUp: Boolean(o?.pickedUp),
+          inStore: Boolean(o?.inStore),
+        });
+      });
+      return snap;
+    });
+  }
+  // Let the list catch up with reality. Called from an explicit Refresh and
+  // from a pickup-filter change — both are the user deliberately asking for a
+  // re-scoped list, so holding cards in stale positions there would be wrong.
+  function releasePickupPin() {
+    setPinnedPickup(null);
+  }
+  function handleOrdersPickupFilterChange(value) {
+    releasePickupPin();
+    setOrdersPickupFilter(value);
+  }
   function handleOrderCheckboxChange(referenceKey, field, checked) {
     if (field === "inStore") {
       // Marking as arrived should also mark as picked up.
+      pinPickupPositions();
       updateOrderByKeyAndSave(referenceKey, { inStore: checked, pickedUp: checked || false });
     } else if (field === "pickedUp") {
+      pinPickupPositions();
       updateOrderByKeyAndSave(referenceKey, { [field]: checked });
     } else if (field === "totalVerified" && checked) {
       updateOrderByKey(referenceKey, { [field]: checked, valueCheckAlert: false });
@@ -2917,38 +3230,6 @@ export default function App() {
       qtyDiscrepancyAckDiff: Number(diff),
       qtyDiscrepancyAckAt: new Date().toISOString(),
     });
-  }
-
-  async function handleBubblifyOrder(refKey) {
-    const base = (refKey || 'ORDER').toUpperCase();
-    const existingNames = new Set(bubbles.map((b) => (b.name || '').toUpperCase()));
-    const bubbleName = uniqueName(base, existingNames);
-    const id = makeUid();
-    const nb = { id, name: bubbleName, notes: '' };
-    setBubbles((prev) => [...prev, nb]);
-    setBubbleMeta((prev) => ({
-      ...prev,
-      [id]: { ...(prev[id] || {}), accountingPath: ACCOUNTING_PATHS.OUTSTANDING },
-    }));
-    if (api?.writeSharedBubbleData) {
-      api.writeSharedBubbleData({ bubbleId: id, name: bubbleName, notes: '', extraLines: [] })
-        .catch((e) => console.warn('[shared-bubble] write failed', e));
-    }
-    const res = await api.bubblifyOrder(refKey, bubbleName);
-    if (!res?.ok) {
-      alert(res?.error || 'Failed to bubblify order.');
-      setBubbles((prev) => prev.filter((b) => b.id !== id));
-      setBubbleMeta((prev) => { const n = { ...prev }; delete n[id]; return n; });
-      return;
-    }
-    if (res.added === 0) {
-      alert('All items in this order have already been added to outstanding.');
-      setBubbles((prev) => prev.filter((b) => b.id !== id));
-      setBubbleMeta((prev) => { const n = { ...prev }; delete n[id]; return n; });
-      return;
-    }
-    const freshItems = await api.readItems();
-    if (Array.isArray(freshItems)) adoptPushedItems(freshItems);
   }
 
   async function handleReconcileTotals(referenceKey) {
@@ -3057,6 +3338,10 @@ export default function App() {
       // corrected in there.
       adoptSavedOrders(Array.isArray(res.orders) ? res.orders : normalized);
       setOrdersDirty(false);
+      // Pressing Save (toolbar or card) is a "done clicking" signal, so let the
+      // list re-sort. Only on success — a failed save leaves the cards where
+      // they are, since nothing has been committed to sort by.
+      setPinnedPickup(null);
       if (res.blocked?.length) {
         setOrdersError(
           `Skipped ${res.blocked.length} order(s) currently being processed in Sage: ${res.blocked.join(", ")}.`
@@ -4942,6 +5227,186 @@ export default function App() {
     }
   }
 
+  // ---- Ghost mode ---------------------------------------------------------
+  //
+  // The current orders straight off the share, without touching React state —
+  // for the poll below, which has to see another machine's writes land and must
+  // not re-render the whole order list twenty times to do it.
+  async function readOrdersFromDisk() {
+    const res = await api?.readOrders?.();
+    if (Array.isArray(res)) return res;
+    return Array.isArray(res?.state) ? res.state : [];
+  }
+
+  // One cycle of the routine, in the order a person would click it: Get All,
+  // then the World and Transbec "Get Invoice from Gmail" runs (plus BestBuy's,
+  // once a day from noon), then the Sage queue — and only once Sage has
+  // actually finished entering that queue, the printer. Every step is the
+  // handler its button already calls; ghost mode decides WHEN and on WHICH
+  // orders, never HOW.
+  //
+  // It is deliberately not autonomous about Sage: this machine only fills the
+  // queue and releases it, and refuses to run at all unless another machine is
+  // holding the Sage PO lock to do the typing (see foreignSagePoMachine).
+  async function runGhostCycle() {
+    if (ghostRunningRef.current) return;
+    const startedAt = new Date();
+    const at = startedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+    // Read the lock off disk rather than trusting sageLockInfo: half an hour
+    // has passed since the last push, and the machine running Sage may have
+    // been switched off in between.
+    let sageMachine = "";
+    try {
+      sageMachine = foreignSagePoMachine(await api?.getSageLock?.());
+    } catch (e) {
+      console.error("[ghost] failed to read the Sage lock", e);
+    }
+    if (!sageMachine) {
+      setGhostLog(`${at} - skipped: no other machine is running Sage purchase orders.`);
+      return;
+    }
+    if (getAllOrdersRunning || anyVendorFetchRunning || printAllRunning || sagePoRunningHere) {
+      setGhostLog(`${at} - skipped: this machine was already busy.`);
+      return;
+    }
+
+    ghostRunningRef.current = true;
+    const done = [];
+    try {
+      setGhostBusy("Fetching every vendor's orders...");
+      await handleGetAllOrders();
+
+      setGhostBusy("Checking Gmail for World invoices...");
+      await handleFetchWorldInvoices();
+      setGhostBusy("Checking Gmail for Transbec invoices...");
+      await handleFetchTransbecInvoices();
+      // BestBuy emails a day's invoices the following day, so it gets one check
+      // a day rather than one every half hour.
+      const bestbuyDue = shouldFetchBestbuyInvoices(startedAt, ghostBestbuyDayRef.current);
+      if (bestbuyDue) {
+        ghostBestbuyDayRef.current = ghostDayKey(startedAt);
+        setGhostBusy("Checking Gmail for BestBuy invoices (daily)...");
+        await handleFetchBestbuyInvoices();
+      }
+      // Each fetch reports its own failure in its own banner, so this only
+      // claims the steps ran — not that every vendor answered.
+      done.push(
+        `Ran every vendor fetch and the World/Transbec${bestbuyDue ? "/BestBuy" : ""} Gmail checks.`
+      );
+
+      // Work from disk, not from whatever this window was holding when the
+      // cycle started — the fetches have just rewritten orders.json.
+      setGhostBusy("Queueing orders for Sage...");
+      await loadOrders();
+      const sageTargets = ghostSageQueueTargets(ordersRef.current, {
+        taxRate: qtyDiscrepancyTaxRate,
+        threshold: qtyDiscrepancyThreshold,
+      });
+      let queued = 0;
+      for (const order of sageTargets) {
+        try {
+          const res = await api?.triggerOrderSage?.(ghostOrderKey(order), "purchase");
+          if (res?.ok) queued += 1;
+          else console.warn("[ghost] could not queue", ghostOrderKey(order), res?.error);
+        } catch (e) {
+          console.error("[ghost] queue failed for", ghostOrderKey(order), e);
+        }
+      }
+      // Snapshot the waiting room BEFORE releasing it: that is precisely the set
+      // "Send to Sage" is about to hand to the Sage machine, and precisely what
+      // the printing step below has to wait for.
+      const releasedKeys = ghostQueuedKeys(await readOrdersFromDisk());
+      const sentRes = await api?.sendSageQueue?.();
+      const sent = Number(sentRes?.sent) || 0;
+      done.push(
+        `Queued ${queued} order(s); released ${sent} to ${sageMachine}.` +
+          (sentRes?.ok === false ? ` (${sentRes.error || "send failed"})` : "")
+      );
+
+      // Nothing prints until Sage is finished. The Sage machine works through
+      // the queue one AHK run at a time and reports each order back as entered;
+      // this watches orders.json until every released order has come back (or
+      // the wait runs out, in which case the bills wait for a later cycle
+      // rather than being printed for orders that never reached Sage).
+      let sageDrained = true;
+      if (releasedKeys.length) {
+        const deadline = Date.now() + GHOST_SAGE_WAIT_MS;
+        for (;;) {
+          const pending = ghostSagePendingCount(await readOrdersFromDisk(), releasedKeys);
+          if (!pending) break;
+          if (Date.now() >= deadline) {
+            sageDrained = false;
+            done.push(`Gave up waiting on Sage with ${pending} order(s) still going.`);
+            break;
+          }
+          // The Sage machine being switched off mid-queue is the one case where
+          // the remaining orders are never coming back — stop waiting on it now
+          // rather than sitting out the deadline.
+          if (!foreignSagePoMachine(await api?.getSageLock?.())) {
+            sageDrained = false;
+            done.push(`${sageMachine} stopped running Sage with ${pending} order(s) left.`);
+            break;
+          }
+          setGhostBusy(`Waiting for Sage to finish ${pending} order(s) on ${sageMachine}...`);
+          await new Promise((resolve) => setTimeout(resolve, GHOST_SAGE_POLL_MS));
+        }
+        if (sageDrained) done.push("Sage finished the queue.");
+      }
+
+      if (!sageDrained) {
+        done.push("Skipped printing this cycle.");
+      } else {
+        setGhostBusy("Printing invoices...");
+        await loadOrders();
+        const printTargets = ghostPrintTargets(ordersRef.current);
+        for (const { order, vendor } of printTargets) {
+          await handlePrintVendorInvoice(order, vendor);
+        }
+        done.push(
+          printTargets.length
+            ? `Printed ${printTargets.length} invoice(s).`
+            : "Nothing needed printing."
+        );
+      }
+    } catch (e) {
+      console.error("[ghost] cycle failed", e);
+      done.push(`Stopped: ${e?.message || "unknown error"}`);
+    } finally {
+      ghostRunningRef.current = false;
+      setGhostBusy("");
+      setGhostLog(`${at} - ${done.join(" ")}`);
+    }
+  }
+  // Always-current, so the once-only interval below never calls a stale copy.
+  ghostCycleRef.current = runGhostCycle;
+
+  // The schedule. Ticks every minute and does nothing at all until the wall
+  // clock crosses a half hour inside working hours; the enabled flag is re-read
+  // from disk at that point rather than polled, so switching ghost mode on in
+  // Settings takes effect at the next cycle without a restart.
+  useEffect(() => {
+    const id = setInterval(async () => {
+      const now = new Date();
+      const slot = ghostSlotKey(now);
+      if (slot === ghostSlotRef.current) return;
+      ghostSlotRef.current = slot;
+      if (!isWithinGhostHours(now)) return;
+      let enabled = false;
+      try {
+        const res = await api?.getAppConfig?.();
+        enabled = res?.ok ? res.config?.ghostMode === true : false;
+      } catch (e) {
+        console.error("[ghost] failed to read the app config", e);
+        return;
+      }
+      setGhostMode(enabled);
+      if (!enabled) return;
+      ghostCycleRef.current?.();
+    }, GHOST_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
+
   const todayRangeMs = () => {
     const now = new Date();
     return {
@@ -4957,7 +5422,7 @@ export default function App() {
     return time >= todayStart && time < todayEnd;
   };
 
-  const { filteredOrders, orderFilterCounts } = useMemo(() => {
+  const { filteredOrders, filteredOrderSections, orderFilterCounts } = useMemo(() => {
     const q = ordersSearch.trim().toLowerCase();
     const filtered = !q
       ? orders
@@ -4983,7 +5448,9 @@ export default function App() {
       // filter other than "Credit".
       if (order?.isCredit === true) return ordersPickupFilter === "credit";
       if (order?._localDirty) return true;
-      return matchesOrdersPickupFilter(order, ordersPickupFilter);
+      // Pinned view, so a just-clicked Picked Up / Arrived cannot drop the card
+      // out of the filter the user is standing in.
+      return matchesOrdersPickupFilter(pinnedOrderView(order, pinnedPickup), ordersPickupFilter);
     });
 
     const { start: todayStart, end: todayEnd } = todayRangeMs();
@@ -5010,24 +5477,29 @@ export default function App() {
     // invoice are pulled out of the pickup-status buckets entirely and shown
     // in their own bucket at the very bottom. Any other pickup filter keeps a
     // single flat sort, since the buckets would collapse to one group anyway.
+    // Bucketing reads the pinned view too, so a card clicked to "Arrived" holds
+    // its place (and its section header) until the next Refresh.
     let sorted;
+    let sections;
     if (ordersPickupFilter === "all") {
-      const waitingInvoice = (todayFiltered || []).filter((o) => isWaitingOnInvoice(o));
-      const notPickedUp = (todayFiltered || []).filter((o) => !isWaitingOnInvoice(o) && !o.pickedUp);
-      const pickedNotArrived = (todayFiltered || []).filter(
-        (o) => !isWaitingOnInvoice(o) && o.pickedUp && !o.inStore
-      );
-      const rest = (todayFiltered || []).filter(
-        (o) => !isWaitingOnInvoice(o) && o.pickedUp && o.inStore
-      );
+      const bucketOf = (order) => {
+        if (isWaitingOnInvoice(order)) return "waiting-invoice";
+        const view = pinnedOrderView(order, pinnedPickup);
+        if (!view.pickedUp) return "not-picked";
+        if (!view.inStore) return "not-arrived";
+        return "rest";
+      };
+      const inBucket = (name) => (todayFiltered || []).filter((o) => bucketOf(o) === name);
       sorted = [
-        ...byDateDesc(notPickedUp),
-        ...byDateDesc(pickedNotArrived),
-        ...byDateDesc(rest),
-        ...byDateDesc(waitingInvoice),
+        ...byDateDesc(inBucket("not-picked")),
+        ...byDateDesc(inBucket("not-arrived")),
+        ...byDateDesc(inBucket("rest")),
+        ...byDateDesc(inBucket("waiting-invoice")),
       ];
+      sections = sorted.map(bucketOf);
     } else {
       sorted = byDateDesc(todayFiltered);
+      sections = sorted.map(() => null);
     }
 
     // Badge counts for the filter buttons: scoped by search + Today (same as
@@ -5050,8 +5522,23 @@ export default function App() {
       counts[value] = countScope.filter((order) => matchesOrdersPickupFilter(order, value)).length;
     });
 
-    return { filteredOrders: sorted, orderFilterCounts: counts };
-  }, [orders, ordersSearch, ordersPickupFilter, ordersTodayOnly]);
+    return { filteredOrders: sorted, filteredOrderSections: sections, orderFilterCounts: counts };
+  }, [orders, ordersSearch, ordersPickupFilter, ordersTodayOnly, pinnedPickup]);
+
+  // How many cards the pin is currently holding out of place — i.e. their live
+  // pickup state no longer matches the position they're sitting in. Drives the
+  // "Re-sort list" pill; 0 means the pin is held but nothing has actually moved
+  // yet, so there is nothing to tidy and the pill stays hidden.
+  const pinnedOutOfPlaceCount = useMemo(() => {
+    if (!pinnedPickup) return 0;
+    return (orders || []).reduce((n, o) => {
+      const pin = pinnedPickup.get(orderPinKey(o));
+      if (!pin) return n;
+      const moved =
+        Boolean(o?.pickedUp) !== pin.pickedUp || Boolean(o?.inStore) !== pin.inStore;
+      return moved ? n + 1 : n;
+    }, 0);
+  }, [orders, pinnedPickup]);
 
   const hasSearch = ordersSearch.trim().length > 0;
 
@@ -5222,6 +5709,16 @@ export default function App() {
             // the parts become unassigned returns stock that Returns Management
             // can rake onto a requisition slip, and the order itself is gone.
             onSendToReturns={(bubbleId) => handleDeleteBubble(bubbleId, "RETURNS")}
+            // Same ending, reached one part at a time: once the last part has
+            // been sent out of an order there is nothing left for the card to
+            // describe, so the order goes with it. `destination` is passed as
+            // the fallback because the part has already been moved there by the
+            // main process — if that write hasn't been pushed back yet, this
+            // sends the stale local copy to the same place rather than
+            // silently rerouting it to New Stock.
+            onRemoveEmptiedOrder={(bubbleId, destination) =>
+              handleDeleteBubble(bubbleId, destination)
+            }
             // "Delivered and Complete" — the accounting is finished, so the sale
             // takes the same archive route Cash Sales uses (parts filed as sold,
             // bubble removed), just with its own confirm wording.
@@ -5234,7 +5731,7 @@ export default function App() {
             ordersSearch={ordersSearch}
             setOrdersSearch={setOrdersSearch}
             ordersPickupFilter={ordersPickupFilter}
-            setOrdersPickupFilter={setOrdersPickupFilter}
+            setOrdersPickupFilter={handleOrdersPickupFilterChange}
             ordersTodayOnly={ordersTodayOnly}
             setOrdersTodayOnly={setOrdersTodayOnly}
             ordersDirty={ordersDirty}
@@ -5244,6 +5741,9 @@ export default function App() {
             loadOrders={loadOrders}
             handleSaveOrders={handleSaveOrders}
             filteredOrders={filteredOrders}
+            filteredOrderSections={filteredOrderSections}
+            pinnedOutOfPlaceCount={pinnedOutOfPlaceCount}
+            onReleasePickupPin={releasePickupPin}
             orderFilterCounts={orderFilterCounts}
             handleOrderCheckboxChange={handleOrderCheckboxChange}
             handleOrderFieldChange={handleOrderFieldChange}
@@ -5253,7 +5753,6 @@ export default function App() {
             onSendSageQueue={handleSendSageQueue}
             sageQueueSending={sageQueueSending}
             onReleaseSageLock={handleReleaseSageLock}
-            onBubblifyOrder={handleBubblifyOrder}
             onMarkComplete={handleMarkComplete}
             onReconcileTotals={handleReconcileTotals}
             onArchiveOrder={handleArchiveOrderWithConfirm}
@@ -5287,6 +5786,9 @@ export default function App() {
             getAllOrdersRunning={getAllOrdersRunning}
             getAllOrdersError={getAllOrdersError}
             getAllOrdersDisabledReason={getAllOrdersDisabledReason}
+            ghostMode={ghostMode}
+            ghostBusy={ghostBusy}
+            ghostLog={ghostLog}
             onClearOrderFetchMessage={clearOrderFetchMessage}
             onClearInvoiceFetchMessage={clearInvoiceFetchMessage}
             onConfirmOrderEdit={(key) => updateOrderByKeyAndSave(key, {})}
@@ -5414,8 +5916,9 @@ export default function App() {
           <div className="bg-white rounded-3xl shadow-2xl w-full max-w-[95vw] p-6 flex flex-col gap-4 max-h-[95vh]">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-semibold text-slate-800">
-                Sales Order Preview - {printBubble.name}
-                {printSalesOrderNumber && (
+                {printMode === "quote" ? "Quotation Preview" : "Sales Order Preview"} -{" "}
+                {printBubble.name}
+                {printMode !== "quote" && printSalesOrderNumber && (
                   <span className="ml-2 text-base font-bold text-indigo-700">
                     {printSalesOrderNumber}
                   </span>
@@ -5429,7 +5932,9 @@ export default function App() {
               </button>
             </div>
             <p className="text-sm text-slate-500">
-              Bubble items stay read-only while printing. Use extra lines to add print-only charges or notes.
+              {printMode === "quote"
+                ? "Prices are shown taxes in, per part — no Sales Order number is drawn and nothing is marked sold."
+                : "Bubble items stay read-only while printing. Use extra lines to add print-only charges or notes."}
             </p>
             <div className="flex justify-end gap-3">
               <button
@@ -5440,13 +5945,61 @@ export default function App() {
               </button>
               <button
                 className="px-5 py-2 rounded-full bg-indigo-600 text-white shadow hover:bg-indigo-700"
-                onClick={handleConfirmPrint}
+                onClick={printMode === "quote" ? handleConfirmQuotePrint : handleConfirmPrint}
               >
-                Print
+                {printMode === "quote" ? "Print Quotation" : "Print"}
               </button>
             </div>
             <div className="grid gap-4 lg:grid-cols-[420px,1fr]">
-              <div className="max-h-[80vh] overflow-auto rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="max-h-[80vh] overflow-auto space-y-4">
+              {printMode === "quote" && (
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50/70 p-4">
+                  <div className="text-sm font-semibold text-slate-800">
+                    Closing discount (taxes in)
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    For splitting the difference — "$243? make it $240 even." Shown on the quote as
+                    Total / Discount / Post-Discount. Applying it takes the money out of each part's
+                    margin, never below cost.
+                  </p>
+                  <div className="mt-3 flex items-center gap-2">
+                    <span className="text-sm font-semibold text-slate-600">$</span>
+                    <DraftInput
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      commitOnEnter
+                      value={printQuoteMeta.discount ? String(printQuoteMeta.discount) : ""}
+                      onCommit={handleSetQuoteDiscount}
+                      placeholder="0.00"
+                      disabled={printQuoteMeta.applied}
+                      className="w-28 rounded-lg border border-slate-300 px-3 py-2 text-sm text-right disabled:bg-slate-100 disabled:text-slate-400"
+                    />
+                    <button
+                      className="rounded-full border border-emerald-400 bg-white px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                      onClick={handleApplyQuoteDiscount}
+                      disabled={printQuoteMeta.applied || !(printQuoteMeta.discount > 0)}
+                      title="Drop every priced part in this order proportionally so the Sales Order total matches the discounted quote"
+                    >
+                      Apply to item prices
+                    </button>
+                  </div>
+                  {printQuoteMeta.applied ? (
+                    <p className="mt-2 text-xs font-semibold text-emerald-800">
+                      Applied — every priced part dropped by its own share, so the Sales Order lands
+                      on the agreed total by itself. This quote still shows the full prices with the
+                      discount on its own line; only the Sales Order absorbs it.
+                    </p>
+                  ) : (
+                    <p className="mt-2 text-xs text-slate-500">
+                      Printing the quote does not change any prices. Use "Apply to item prices" once
+                      the customer accepts — it rewrites the sell price on every part and can only
+                      be done once.
+                    </p>
+                  )}
+                </div>
+              )}
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                 <div className="flex items-start justify-between gap-2">
                   <div>
                     <div className="text-sm font-semibold text-slate-800">
@@ -5539,6 +6092,7 @@ export default function App() {
                   </div>
                 )}
               </div>
+              </div>
               <div
                 ref={printPreviewRef}
                 className="max-h-[80vh] overflow-auto rounded-2xl border border-slate-200 bg-slate-50 p-4 flex justify-center"
@@ -5546,10 +6100,12 @@ export default function App() {
                 <InvoicePreview
                   bubbleName={printBubble.name}
                   bubbleNotes={printBubble.notes}
-                  items={printItems}
+                  items={printMode === "quote" ? printQuoteItems : printItems}
                   extraLines={printExtraLines}
                   generatedDate={printGeneratedAt || new Date()}
                   salesOrderNumber={printSalesOrderNumber}
+                  variant={printMode === "quote" ? "quote" : "salesOrder"}
+                  discount={printQuoteMeta.discount}
                 />
               </div>
             </div>

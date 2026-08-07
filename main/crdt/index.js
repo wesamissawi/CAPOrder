@@ -25,6 +25,7 @@ const fs = require('fs');
 
 const { createStore, CRDT_DIRNAME } = require('./store');
 const { seedIfNeeded } = require('./migrate');
+const { collapseBubbleIds } = require('./bubbleIds');
 const { assignLineKey, assignRecordKey } = require('./entities');
 
 function createCrdtLayer(deps) {
@@ -94,6 +95,10 @@ function createCrdtLayer(deps) {
       store,
     });
     store.refresh();
+    // After the refresh, so it sees what every machine has published, and
+    // before the projection, so bubble_shared.json is written already collapsed
+    // rather than showing duplicates for one write cycle.
+    collapseBubbleIds(store);
     store.project();
     return seeded;
   }
@@ -180,12 +185,42 @@ function createCrdtLayer(deps) {
     }
   }
 
+  // Deletes by id OR by name, and takes out EVERY record that matches.
+  //
+  // A bubble record is keyed by whatever id the machine that first saw the
+  // bubble happened to mint, and every machine mints its own — the renderer's
+  // "ensure a bubble exists for each allocated_to" effect calls makeUid()
+  // locally, so one order name routinely exists here as two or three records
+  // with different ids. Removing only the id the calling machine holds left the
+  // other machines' records alive, and the renderer keeps any bubble whose name
+  // is still in the shared set — which is how an order that was sent to CashPad
+  // or Returns came straight back as an empty card. The renderer has always
+  // passed the name as a second delete for exactly this reason; keyed by id, it
+  // silently matched nothing.
+  //
+  // Safe to be this broad because every caller is a user-initiated "this order
+  // stops existing" — and they all exclude the default bubbles (NEW STOCK,
+  // SHELF, RETURNS, CASH SALES) before they get here.
   function deleteSharedBubbleData(bubbleId) {
     if (!bubbleId) return { ok: false, error: 'bubbleId required' };
     try {
-      store.read('bubble');
-      store.remove('bubble', [bubbleId]);
-      return { ok: true };
+      const records = store.read('bubble');
+      const nameOf = (b) => String(b?.name || '').trim().toLowerCase();
+      // The key may be an id or a name — callers send both. Either way, resolve
+      // it to the NAME being closed, then take out every record carrying it, so
+      // one call is enough and this doesn't depend on the caller also thinking
+      // to pass the name separately.
+      const wanted = new Set([String(bubbleId).trim().toLowerCase()]);
+      records.forEach((b) => {
+        if (b && b.id === bubbleId && nameOf(b)) wanted.add(nameOf(b));
+      });
+      const keys = records
+        .filter((b) => b && (b.id === bubbleId || wanted.has(nameOf(b))))
+        .map((b) => b.id)
+        .filter(Boolean);
+      if (!keys.length) return { ok: true, removed: 0 };
+      store.remove('bubble', keys);
+      return { ok: true, removed: keys.length };
     } catch (e) {
       console.error('[crdt] shared bubble delete failed', e);
       return { ok: false, error: e?.message || 'Failed to delete shared bubble data' };

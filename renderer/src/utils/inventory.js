@@ -7,14 +7,37 @@ export function makeUid() {
 
 export const itemKey = (it) => it.uid;
 
-export const DEFAULT_BUBBLES = [
-  { id: "new", name: "NEW STOCK", notes: "" },
-  { id: "cash", name: "CASH SALES", notes: "" },
-  { id: "shelf", name: "SHELF", notes: "" },
-  { id: "returns", name: "RETURNS", notes: "" },
-];
-
 const normalizeName = (name) => (name || "").trim().toLowerCase();
+
+// A bubble's id is DERIVED FROM ITS NAME, never minted.
+//
+// The name is what actually identifies an order: items point at a bubble
+// through `allocated_to`, a plain name string, and every lookup here — grouping
+// parts onto cards, de-duplicating the shared set, enforcing uniqueness — has
+// always matched on the name. The id was a leftover from the draggable-bubble
+// workspace, where `bubbles` was local state and the id was just a React key.
+// Once bubble notes and print extras became shared, that machine-local id was
+// doing the job of a cross-machine primary key, so two machines that both saw
+// the same order name each minted a uuid for it and the share ended up holding
+// one order as two or three records.
+//
+// Deriving it means both machines compute the same key with no coordination, so
+// there is only ever one record to begin with. Safe because bubbles can't be
+// renamed and `uniqueName` below already keeps names unique case-insensitively.
+//
+// main/crdt/bubbleIds.js holds the identical implementation for the store side;
+// the two must agree exactly.
+export function bubbleIdForName(name) {
+  const norm = normalizeName(name);
+  return norm ? `b:${norm}` : "";
+}
+
+export const DEFAULT_BUBBLES = [
+  { id: bubbleIdForName("NEW STOCK"), name: "NEW STOCK", notes: "" },
+  { id: bubbleIdForName("CASH SALES"), name: "CASH SALES", notes: "" },
+  { id: bubbleIdForName("SHELF"), name: "SHELF", notes: "" },
+  { id: bubbleIdForName("RETURNS"), name: "RETURNS", notes: "" },
+];
 
 export function uniqueName(baseName, existingNames) {
   const lowerExisting = new Set(Array.from(existingNames || []).map((n) => normalizeName(n)));
@@ -75,6 +98,14 @@ export function normalizeItems(arr) {
       reference_num: String(it.reference_num ?? ""),
       sold_date: String(it.sold_date ?? ""),
       sold_status: String(it.sold_status ?? ""),
+      // The price this part was quoted at WITH tax on it — what the customer
+      // was actually told, kept verbatim rather than re-derived, because
+      // grossing the sell price back up is a calculation and this is a promise.
+      // Empty means it was never quoted that way, which is what decides whether
+      // the order can print a Quotation at all. Part of the whitelist for the
+      // same reason as the fields above: everything round-trips through here, so
+      // an unlisted field is silently erased the first time anyone saves.
+      tax_in_price: String(it.tax_in_price ?? ""),
       // Back-link to the order line this part came from (Order Assignment).
       // This object is a whitelist — every save round-trips through it, so
       // dropping these would strip the stamp off every item the first time
@@ -105,7 +136,7 @@ export function ensureBubblesForItems(items, setBubblesFn) {
       const lower = normalizeName(name);
       if (name && !knownLower.has(lower)) {
         knownLower.add(lower);
-        extra.push({ id: makeUid(), name: name.toUpperCase(), notes: "" });
+        extra.push({ id: bubbleIdForName(name), name: name.toUpperCase(), notes: "" });
       }
     }
 

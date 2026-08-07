@@ -28,6 +28,9 @@ function PrintedCopyModal({ snapshots, bubbleName, onClose }) {
   if (!snapshot) return null;
 
   const doc = snapshot.document || {};
+  // Rows written before quotes existed carry no `kind` — they're all sales
+  // orders, so the absence of the field has to read as SALES_ORDER.
+  const isQuote = snapshot.kind === "QUOTE";
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 p-4 overflow-auto">
@@ -35,7 +38,9 @@ function PrintedCopyModal({ snapshots, bubbleName, onClose }) {
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4">
           <div>
             <div className="text-lg font-semibold text-slate-800">
-              Printed copy — Sales Order {snapshot.salesOrderNumber || "—"}
+              {isQuote
+                ? "Printed copy — Quotation"
+                : `Printed copy — Sales Order ${snapshot.salesOrderNumber || "—"}`}
             </div>
             <div className="text-xs text-slate-500">
               {bubbleName ? `${bubbleName} · ` : ""}
@@ -81,6 +86,8 @@ function PrintedCopyModal({ snapshots, bubbleName, onClose }) {
             extraLines={snapshot.extraLines || []}
             generatedDate={snapshot.printedAt ? new Date(snapshot.printedAt) : new Date()}
             salesOrderNumber={snapshot.salesOrderNumber}
+            variant={isQuote ? "quote" : "salesOrder"}
+            discount={isQuote ? Number(snapshot.discount) || 0 : 0}
             documentTitle={doc.title || undefined}
             companyName={doc.companyName || undefined}
             companyAddress={doc.companyAddress || undefined}

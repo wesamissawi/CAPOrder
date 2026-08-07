@@ -74,6 +74,17 @@ export default function OrderManagementView({
   loadOrders,
   handleSaveOrders,
   filteredOrders,
+  // Parallel to filteredOrders (same length, same order): the section each card
+  // belongs to, as decided by App's sorting memo. It comes from there rather
+  // than being recomputed here because the memo may be holding a pickup pin —
+  // a card clicked to "Arrived" keeps its old section until the next Refresh,
+  // and the header has to agree with the position or the list looks broken.
+  filteredOrderSections,
+  // How many cards are being held out of place by the pickup pin, and the way
+  // to let go of it. Refreshing releases the pin too, but that re-reads
+  // orders.json — this is the cheap "tidy the list up" version.
+  pinnedOutOfPlaceCount = 0,
+  onReleasePickupPin,
   orderFilterCounts,
   handleOrderCheckboxChange,
   handleOrderFieldChange,
@@ -83,7 +94,6 @@ export default function OrderManagementView({
   onSendSageQueue,
   sageQueueSending = false,
   onReleaseSageLock,
-  onBubblifyOrder,
   onMarkComplete,
   onReconcileTotals,
   onArchiveOrder,
@@ -117,6 +127,9 @@ export default function OrderManagementView({
   getAllOrdersRunning,
   getAllOrdersError,
   getAllOrdersDisabledReason,
+  ghostMode,
+  ghostBusy,
+  ghostLog,
   onClearOrderFetchMessage,
   onClearInvoiceFetchMessage,
   onFetchWorldInvoices,
@@ -368,22 +381,21 @@ export default function OrderManagementView({
 
   const isInvoiceNotPrinted = (order) => {
     const vendor = (order?.source || "").toString().trim().toLowerCase();
-    if (!["bestbuy", "transbec", "cbk", "world"].includes(vendor)) return false;
+    // World invoices do not have to be printed before archiving.
+    if (!["bestbuy", "transbec", "cbk"].includes(vendor)) return false;
     const hasInvoiceFile = Boolean(
       order.transbecInvoiceFile ||
         order.transbecInvoiceImage ||
         order.bestbuyInvoiceFile ||
         order.bestbuyCreditFile ||
-        order.cbkInvoiceFile ||
-        order.worldInvoiceFile
+        order.cbkInvoiceFile
     );
     if (!hasInvoiceFile) return false;
     const printed = Boolean(
       order.transbecInvoicePrinted ||
         order.bestbuyInvoicePrinted ||
         order.bestbuyCreditInvoicePrinted ||
-        order.cbkInvoicePrinted ||
-        order.worldInvoicePrinted
+        order.cbkInvoicePrinted
     );
     return !printed;
   };
@@ -435,6 +447,15 @@ export default function OrderManagementView({
               </button>
             ))}
           </div>
+          {ghostMode && (
+            <div className="mt-3 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-700">
+              <span className="font-semibold">Ghost mode</span> - this machine runs the fetch,
+              Gmail, Sage and print steps by itself every 30 minutes between 8am and 5pm.
+              <div className="mt-0.5 text-xs text-violet-600 whitespace-pre-line">
+                {ghostBusy || ghostLog || "Waiting for the next half hour."}
+              </div>
+            </div>
+          )}
           {getAllOrdersError && (
             <div className="mt-3 flex items-start gap-2 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
               <div className="flex-1 whitespace-pre-line">{getAllOrdersError}</div>
@@ -561,6 +582,22 @@ export default function OrderManagementView({
                 <span className="text-xs px-3 py-1 rounded-full bg-amber-100 text-amber-700 border border-amber-200">
                   Unsaved changes
                 </span>
+              )}
+              {/* Picked Up / Arrived save on click but deliberately leave the
+                  card where it is (see pinPickupPositions in App.jsx). This is
+                  the way to ask for the list to catch up without a full
+                  Refresh — no disk read, no data change, just a re-sort. */}
+              {pinnedOutOfPlaceCount > 0 && onReleasePickupPin && (
+                <button
+                  type="button"
+                  onClick={onReleasePickupPin}
+                  className="text-xs px-3 py-1 rounded-full bg-sky-50 text-sky-700 border border-sky-200 hover:bg-sky-100 font-semibold"
+                  title={`${pinnedOutOfPlaceCount} card${
+                    pinnedOutOfPlaceCount === 1 ? " is" : "s are"
+                  } being held in place so they don't move while you work. Click to re-sort them into their sections.`}
+                >
+                  Re-sort list ({pinnedOutOfPlaceCount})
+                </button>
               )}
               <button
                 onClick={handleSaveOrders}
@@ -720,10 +757,6 @@ export default function OrderManagementView({
                 qtyDiscrepancyThreshold
               );
               const hasQtyDiscrepancy = Boolean(qtyDiscrepancy?.overThreshold);
-              const allBubblified =
-                Array.isArray(order.lineItems) &&
-                order.lineItems.length > 0 &&
-                order.lineItems.every((li) => li?.addedToOutstanding === true);
               const cardTone = needsValueCheck
                 ? "value-check-alert border-indigo-400"
                 : isDirty
@@ -733,15 +766,17 @@ export default function OrderManagementView({
                       : "border-amber-500 bg-amber-50 ring-2 ring-amber-300"
                   }`
                 : "border-indigo-100";
+              const sectionOf = (i) =>
+                filteredOrderSections?.[i] ?? orderPickupSection(filteredOrders[i]);
+              const section = sectionOf(idx);
               const showSectionHeader =
-                ordersPickupFilter === "all" &&
-                (idx === 0 || orderPickupSection(filteredOrders[idx - 1]) !== orderPickupSection(order));
+                ordersPickupFilter === "all" && (idx === 0 || sectionOf(idx - 1) !== section);
               return (
                 <React.Fragment key={key}>
                   {showSectionHeader && (
                     <div className="col-span-full mt-6 first:mt-0 flex items-center gap-3">
                       <span className="whitespace-nowrap text-sm font-bold uppercase tracking-wide text-slate-600">
-                        {PICKUP_SECTION_LABELS[orderPickupSection(order)]}
+                        {PICKUP_SECTION_LABELS[section]}
                       </span>
                       <hr className="flex-1 border-t-2 border-slate-300" />
                     </div>
@@ -807,20 +842,6 @@ export default function OrderManagementView({
                         )}
                       </div>
                       <div className="flex flex-row items-center gap-2">
-                        {onBubblifyOrder && (
-                          <button
-                            type="button"
-                            disabled={allBubblified}
-                            onClick={() => !allBubblified && onBubblifyOrder(refKey)}
-                            className={`px-3 py-1 rounded-full text-xs font-semibold border ${
-                              allBubblified
-                                ? "bg-teal-50 text-teal-600 border-teal-200 cursor-default opacity-75"
-                                : "bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50"
-                            }`}
-                          >
-                            {allBubblified ? "Bubblified" : "Bubblify"}
-                          </button>
-                        )}
                         {!order.enteredInSage && hasQtyDiscrepancy && (
                           <button
                             type="button"

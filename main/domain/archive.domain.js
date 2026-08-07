@@ -21,8 +21,14 @@ function searchArchiveEntries(entries, query) {
     // one that settles an argument. Indexed by uid so each matched line can
     // carry the price its own printed row showed.
     const prints = Array.isArray(entry?.prints) ? entry.prints : [];
+    // Quotes are printed on the same machinery but settle nothing — the price
+    // that ends an argument is the one on the paperwork the customer bought
+    // from. Rows written before quotes existed have no `kind` and are all
+    // sales orders. Both lists below therefore read sales orders only, or a
+    // quote printed after the order would blank its number.
+    const orderPrints = prints.filter((s) => (s?.kind || 'SALES_ORDER') === 'SALES_ORDER');
     const printedByUid = new Map();
-    for (const snap of prints) {
+    for (const snap of orderPrints) {
       for (const line of snap?.items || []) {
         if (!line?.uid || printedByUid.has(line.uid)) continue;
         printedByUid.set(line.uid, {
@@ -58,7 +64,7 @@ function searchArchiveEntries(entries, query) {
       bubbleId: entry?.id || entry?.bubble?.id || '',
       bubbleName: bubbleName || 'Archived Bubble',
       archivedAt,
-      salesOrderNumber: entry?.meta?.salesOrderNumber || prints[0]?.salesOrderNumber || '',
+      salesOrderNumber: entry?.meta?.salesOrderNumber || orderPrints[0]?.salesOrderNumber || '',
       items: matchedItems,
       prints,
     });

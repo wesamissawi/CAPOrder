@@ -68,6 +68,18 @@ contextBridge.exposeInMainWorld('api', {
   getResolvedPathsSummary: () => ipcRenderer.invoke('app-config:resolved-paths'),
   validateSharedFolderWritable: (dir) => ipcRenderer.invoke('app-config:validate-shared', dir),
   migrateBusinessFilesToShared: (payload) => ipcRenderer.invoke('app-config:migrate-business', payload),
+  // Credential hand-off between workstations. The pairing code exists only in
+  // the return value of sendCredentials and the argument to redeemCredentials —
+  // there is deliberately no channel that broadcasts it.
+  requestCredentials: () => ipcRenderer.invoke('cred-sync:request'),
+  cancelCredentialRequest: () => ipcRenderer.invoke('cred-sync:cancel-request'),
+  getCredentialInboundStatus: () => ipcRenderer.invoke('cred-sync:inbound-status'),
+  redeemCredentials: (code) => ipcRenderer.invoke('cred-sync:redeem', code),
+  listCredentialRequests: () => ipcRenderer.invoke('cred-sync:list-requests'),
+  sendCredentials: (machineId) => ipcRenderer.invoke('cred-sync:send', machineId),
+  revokeCredentialGrant: (machineId) => ipcRenderer.invoke('cred-sync:revoke', machineId),
+  previewOutgoingCredentials: () => ipcRenderer.invoke('cred-sync:preview-outgoing'),
+
   readOrders: () => ipcRenderer.invoke('orders:read'),
   getOrderArrivalMap: () => ipcRenderer.invoke('orders:get-arrival-map'),
   writeOrders: (orders) => ipcRenderer.invoke('orders:write', orders),
@@ -122,7 +134,6 @@ contextBridge.exposeInMainWorld('api', {
   listPrinters: () => ipcRenderer.invoke('printers:list'),
   reconcileTotals: (refKey, order) => ipcRenderer.invoke('orders:reconcile-totals', refKey, order),
   addOrdersToOutstanding: () => ipcRenderer.invoke('orders:add-to-outstanding'),
-  bubblifyOrder: (refKey, bubbleName) => ipcRenderer.invoke('orders:bubblify-order', refKey, bubbleName),
   archiveOrders: (payload) => ipcRenderer.invoke('orders:archive-completed', payload),
   archiveOrder: (refKey, source) => ipcRenderer.invoke('orders:archive-one', refKey, source),
   deleteOrder: (refKey, source) => ipcRenderer.invoke('orders:delete-one', refKey, source),

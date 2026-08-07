@@ -262,6 +262,12 @@ function buildOrderAssignment(order, itemsByRef, ledgerEntry, opts = {}) {
     warehouse: order?.warehouse || order?.seller || '',
     orderDate: order?.orderDate || '',
     orderDateRaw: order?.orderDateRaw || '',
+    // When this order LANDED here, as opposed to when the vendor placed it.
+    // detailFetchedAt is stamped by the scraper on the run that pulled the
+    // order's detail, so orders from one run cluster within seconds of each
+    // other — that is what lets the view recover "the last scrape" as a batch.
+    // Older rows predate the stamp (~1%), hence the fallbacks.
+    scrapedAt: order?.detailFetchedAt || order?.orderDate || order?.lastUpdatedAt || '',
     total: order?.total ?? null,
     isCredit: order?.isCredit === true,
     enteredInSage: order?.enteredInSage === true,

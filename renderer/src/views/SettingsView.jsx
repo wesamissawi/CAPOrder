@@ -57,6 +57,7 @@ export default function SettingsView() {
   const [scrapersHeadless, setScrapersHeadless] = useState(false);
   const [qtyDiscrepancyThreshold, setQtyDiscrepancyThreshold] = useState(15);
   const [qtyDiscrepancyTaxRatePercent, setQtyDiscrepancyTaxRatePercent] = useState(13);
+  const [ghostMode, setGhostMode] = useState(false);
   const [updateStatus, setUpdateStatus] = useState("idle");
   const [updateMessage, setUpdateMessage] = useState("");
   const [updateVersion, setUpdateVersion] = useState("");
@@ -99,6 +100,17 @@ export default function SettingsView() {
   const [credStatus, setCredStatus] = useState("");
   const [credError, setCredError] = useState("");
   const [credSaving, setCredSaving] = useState(false);
+  // Credential hand-off between machines. `sentGrant` holds the pairing code
+  // for the machine that just sent — it is the only copy that will ever exist,
+  // so it stays on screen until dismissed.
+  const [syncRequests, setSyncRequests] = useState([]);
+  const [syncInbound, setSyncInbound] = useState(null);
+  const [syncOutgoingCount, setSyncOutgoingCount] = useState(0);
+  const [sentGrant, setSentGrant] = useState(null);
+  const [redeemCode, setRedeemCode] = useState("");
+  const [syncBusy, setSyncBusy] = useState("");
+  const [syncMsg, setSyncMsg] = useState("");
+  const [syncError, setSyncError] = useState("");
   const [timeoutError, setTimeoutError] = useState("");
   const [invoicePrinter, setInvoicePrinter] = useState("");
   const [printerOptions, setPrinterOptions] = useState([]);
@@ -172,6 +184,7 @@ export default function SettingsView() {
       setScrapersHeadless(res.config?.scrapersHeadless === true);
       const qtyThresholdRaw = Number(res.config?.qtyDiscrepancyThreshold);
       setQtyDiscrepancyThreshold(Number.isFinite(qtyThresholdRaw) && qtyThresholdRaw >= 0 ? qtyThresholdRaw : 15);
+      setGhostMode(res.config?.ghostMode === true);
       const qtyTaxRateRaw = Number(res.config?.qtyDiscrepancyTaxRate);
       setQtyDiscrepancyTaxRatePercent(
         Number.isFinite(qtyTaxRateRaw) && qtyTaxRateRaw >= 0 && qtyTaxRateRaw <= 1
@@ -316,6 +329,7 @@ export default function SettingsView() {
           Number.isFinite(Number(qtyDiscrepancyTaxRatePercent)) && Number(qtyDiscrepancyTaxRatePercent) >= 0
             ? Number(qtyDiscrepancyTaxRatePercent) / 100
             : 0.13,
+        ghostMode: Boolean(ghostMode),
       });
       if (!res?.ok) throw new Error(res?.error || "Failed to save app config.");
       setStatus("Saved.");
@@ -374,6 +388,81 @@ export default function SettingsView() {
     } finally {
       setCredSaving(false);
     }
+  }
+
+  // ---- credential hand-off between machines --------------------------------
+
+  // One poll for both sides of the exchange: this machine may be waiting on a
+  // grant AND holding somebody else's request at the same time.
+  async function refreshCredSync() {
+    try {
+      const [reqs, inbound, outgoing] = await Promise.all([
+        api.listCredentialRequests?.(),
+        api.getCredentialInboundStatus?.(),
+        api.previewOutgoingCredentials?.(),
+      ]);
+      if (reqs?.ok) setSyncRequests(reqs.requests || []);
+      if (inbound?.ok) setSyncInbound(inbound);
+      if (outgoing?.ok) setSyncOutgoingCount(outgoing.count || 0);
+    } catch (e) {
+      console.warn("[settings] credential sync refresh failed", e);
+    }
+  }
+
+  async function runCredSync(key, fn, onDone) {
+    setSyncBusy(key);
+    setSyncError("");
+    setSyncMsg("");
+    try {
+      const res = await fn();
+      if (res?.ok) {
+        onDone?.(res);
+      } else {
+        setSyncError(res?.error || "Failed.");
+      }
+    } catch (e) {
+      setSyncError(e?.message || "Failed.");
+    } finally {
+      setSyncBusy("");
+      await refreshCredSync();
+    }
+  }
+
+  function handleRequestCreds() {
+    return runCredSync("request", () => api.requestCredentials?.(), () =>
+      setSyncMsg("Request posted. Ask someone at a configured machine to open Settings and send.")
+    );
+  }
+
+  function handleCancelRequest() {
+    return runCredSync("cancel", () => api.cancelCredentialRequest?.(), () =>
+      setSyncMsg("Request withdrawn.")
+    );
+  }
+
+  // The code comes back exactly once, in this response. It is not stored on the
+  // share and cannot be re-read — losing it means sending again.
+  function handleSendCreds(machineId) {
+    return runCredSync(`send:${machineId}`, () => api.sendCredentials?.(machineId), (res) =>
+      setSentGrant(res)
+    );
+  }
+
+  function handleRevokeGrant(machineId) {
+    return runCredSync(`revoke:${machineId}`, () => api.revokeCredentialGrant?.(machineId), () => {
+      setSentGrant(null);
+      setSyncMsg("Transfer cancelled.");
+    });
+  }
+
+  function handleRedeem() {
+    return runCredSync("redeem", () => api.redeemCredentials?.(redeemCode), (res) => {
+      setRedeemCode("");
+      setSyncMsg(`Imported ${res.count} setting(s) from ${res.from || "the other machine"}.`);
+      // Pull the freshly imported values into the fields above, and re-check
+      // Gmail — the refresh token may have just arrived.
+      load();
+    });
   }
 
   async function refreshGmailStatus() {
@@ -488,6 +577,16 @@ export default function SettingsView() {
       setUpdateMessage(e?.message || "Failed to restart to update.");
     }
   }
+
+  // Credential requests arrive as files another machine drops on the share.
+  // Polling while this view is open is enough — a hand-off is a two-person
+  // operation that both people are already watching, so it doesn't warrant a
+  // watcher and an IPC push channel.
+  useEffect(() => {
+    refreshCredSync();
+    const id = setInterval(refreshCredSync, 10000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     load();
@@ -917,6 +1016,201 @@ export default function SettingsView() {
       </Card>
 
       <Card>
+        <div className="space-y-4">
+          <div>
+            <h2 className="text-xl font-semibold text-slate-800">Share Credentials With Another Machine</h2>
+            <p className="text-sm text-slate-500">
+              Copies the scraper logins and Gmail connection above to another workstation, so you
+              don't retype them. The invoice printer stays per-machine and is never sent.
+            </p>
+          </div>
+
+          {(syncError || syncMsg) && (
+            <div
+              className={`rounded-lg border px-3 py-2 text-sm ${
+                syncError
+                  ? "border-red-200 bg-red-50 text-red-700"
+                  : "border-emerald-200 bg-emerald-50 text-emerald-700"
+              }`}
+            >
+              {syncError || syncMsg}
+            </div>
+          )}
+
+          {syncInbound && syncInbound.sharedConfigured === false && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              Set a shared data folder above before machines can hand credentials to each other.
+            </div>
+          )}
+
+          {/* The pairing code. Shown once, never written down by the app. */}
+          {sentGrant && (
+            <div className="rounded-xl border-2 border-indigo-300 bg-indigo-50 p-4 space-y-2">
+              <div className="text-sm font-semibold text-indigo-900">
+                Read this code to whoever is at {sentGrant.to}
+              </div>
+              <div className="font-mono text-4xl tracking-[0.3em] text-indigo-900">
+                {String(sentGrant.code).slice(0, 3)} {String(sentGrant.code).slice(3)}
+              </div>
+              <div className="text-xs text-indigo-800">
+                {sentGrant.count} setting(s) sent, encrypted. They cannot be read without this code,
+                and it is not stored anywhere — if it's lost, just send again. Expires{" "}
+                {sentGrant.expiresAt ? new Date(sentGrant.expiresAt).toLocaleTimeString() : "shortly"}.
+              </div>
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setSentGrant(null)}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700"
+                >
+                  Done
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRevokeGrant(sentGrant.to)}
+                  disabled={syncBusy === `revoke:${sentGrant.to}`}
+                  className="px-3 py-1.5 rounded-lg border border-indigo-300 text-indigo-700 text-xs font-semibold hover:bg-white disabled:opacity-60"
+                >
+                  Cancel transfer
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Sending side: requests other machines have posted. */}
+          <div className="space-y-2">
+            <div className="text-xs uppercase tracking-wide text-slate-500">
+              Requests from other machines
+            </div>
+            {syncRequests.length === 0 ? (
+              <div className="text-sm text-slate-400">None waiting.</div>
+            ) : (
+              syncRequests.map((req) => (
+                <div
+                  key={req.machineId}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2"
+                >
+                  <div>
+                    <div className="text-sm font-semibold text-slate-800">{req.machineId}</div>
+                    <div className="text-xs text-slate-500">
+                      Asked {req.requestedAt ? new Date(req.requestedAt).toLocaleString() : "recently"}
+                      {req.missingKeys?.length ? ` · missing ${req.missingKeys.length} setting(s)` : ""}
+                      {req.awaitingCode ? " · sent, waiting for them to enter the code" : ""}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {req.awaitingCode && (
+                      <button
+                        type="button"
+                        onClick={() => handleRevokeGrant(req.machineId)}
+                        disabled={syncBusy === `revoke:${req.machineId}`}
+                        className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-slate-50 disabled:opacity-60"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleSendCreds(req.machineId)}
+                      disabled={syncBusy === `send:${req.machineId}` || syncOutgoingCount === 0}
+                      title={
+                        syncOutgoingCount === 0
+                          ? "This machine has no saved credentials to send."
+                          : `Sends ${syncOutgoingCount} setting(s)`
+                      }
+                      className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 disabled:opacity-60"
+                    >
+                      {syncBusy === `send:${req.machineId}`
+                        ? "Sending…"
+                        : req.awaitingCode
+                        ? "Send again"
+                        : `Send ${syncOutgoingCount} setting(s)`}
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          {/* Receiving side. */}
+          <div className="space-y-2 border-t border-slate-200 pt-4">
+            <div className="text-xs uppercase tracking-wide text-slate-500">This machine</div>
+
+            {syncInbound?.grant ? (
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 space-y-2">
+                <div className="text-sm text-emerald-900">
+                  <span className="font-semibold">{syncInbound.grant.from}</span> sent{" "}
+                  {syncInbound.grant.keys?.length || 0} setting(s). Enter the 6-digit code shown on
+                  that machine.
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={7}
+                    value={redeemCode}
+                    onChange={(e) => setRedeemCode(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleRedeem();
+                    }}
+                    placeholder="000000"
+                    className="w-32 rounded-lg border border-emerald-300 px-3 py-2 font-mono text-lg tracking-widest text-slate-800"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleRedeem}
+                    disabled={syncBusy === "redeem"}
+                    className="px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 disabled:opacity-60"
+                  >
+                    {syncBusy === "redeem" ? "Importing…" : "Import"}
+                  </button>
+                  <span className="text-xs text-emerald-800">
+                    {syncInbound.grant.attemptsLeft} attempt(s) left · expires{" "}
+                    {syncInbound.grant.expiresAt
+                      ? new Date(syncInbound.grant.expiresAt).toLocaleTimeString()
+                      : "shortly"}
+                  </span>
+                </div>
+              </div>
+            ) : syncInbound?.request ? (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                <div className="text-sm text-slate-700">
+                  Waiting for another machine to send. Asked{" "}
+                  {syncInbound.request.requestedAt
+                    ? new Date(syncInbound.request.requestedAt).toLocaleString()
+                    : "just now"}
+                  .
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCancelRequest}
+                  disabled={syncBusy === "cancel"}
+                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 text-xs font-semibold hover:bg-white disabled:opacity-60"
+                >
+                  Withdraw
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleRequestCreds}
+                  disabled={syncBusy === "request" || syncInbound?.sharedConfigured === false}
+                  className="px-4 py-2 rounded-lg border border-indigo-200 bg-white text-indigo-700 text-sm font-semibold hover:bg-indigo-50 disabled:opacity-60"
+                >
+                  {syncBusy === "request" ? "Requesting…" : "Request Credentials"}
+                </button>
+                <span className="text-xs text-slate-500">
+                  Posts a request other machines see here. They send; you enter the code they read
+                  you.
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      </Card>
+
+      <Card>
         <div className="space-y-3">
           <div className="flex items-center justify-between gap-3">
             <div>
@@ -1101,6 +1395,35 @@ export default function SettingsView() {
               <div className="text-xs text-slate-500">
                 Tax rate used only to estimate the expected total from line items for the check
                 above (default 13%, Ontario HST).
+              </div>
+            </div>
+            <div className="flex flex-col gap-1 sm:col-span-2">
+              <label className="text-xs uppercase tracking-wide text-slate-500">
+                Ghost Mode
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={ghostMode}
+                  onChange={(e) => setGhostMode(e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                <span>
+                  Run the Order Management routine by itself, every 30 minutes between 8am and 5pm
+                </span>
+              </label>
+              <div className="text-xs text-slate-500">
+                Each cycle runs strictly in order: Get All (every vendor), check Gmail for World
+                and Transbec invoices, queue every order that now has an invoice and isn't in Sage
+                yet and send the queue, wait for Sage to actually finish entering it, and only
+                then print. BestBuy's invoice email arrives the next day, so it gets one Gmail
+                check a day from noon. Printing covers Transbec and BestBuy invoices that have
+                never been printed — never World.
+              </div>
+              <div className="text-xs text-slate-500">
+                Only runs while ANOTHER machine has Sage purchase orders ("Run Sage") switched on
+                — this machine fills the queue, that one types it in. Off on every machine until
+                you turn it on here, and it only runs while this app is open.
               </div>
             </div>
           </div>

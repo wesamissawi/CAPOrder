@@ -109,8 +109,15 @@ const createSalesOrderPrintsService = (deps) => {
   // more than the record of it.
   function appendPrintSnapshot(payload) {
     try {
+      // Quotes are the same record with nothing ordered yet: no number drawn,
+      // no parts marked sold. They're kept here anyway because "what did I
+      // quote them?" is the same kind of question as "what did the invoice
+      // say?", and it gets asked weeks before the sales order exists.
+      const kind = str(payload?.kind) === 'QUOTE' ? 'QUOTE' : 'SALES_ORDER';
       const salesOrderNumber = str(payload?.salesOrderNumber);
-      if (!salesOrderNumber) return { ok: false, error: 'Missing sales order number' };
+      if (kind === 'SALES_ORDER' && !salesOrderNumber) {
+        return { ok: false, error: 'Missing sales order number' };
+      }
 
       const items = (Array.isArray(payload?.items) ? payload.items : []).map(normalizeItem);
       const extraLines = (Array.isArray(payload?.extraLines) ? payload.extraLines : [])
@@ -120,7 +127,8 @@ const createSalesOrderPrintsService = (deps) => {
       // defaults at render time, so a future address change or HST change would
       // otherwise silently rewrite every old snapshot when replayed.
       const document = {
-        title: str(payload?.document?.title) || 'Sales Order',
+        title:
+          str(payload?.document?.title) || (kind === 'QUOTE' ? 'Quotation' : 'Sales Order'),
         companyName: str(payload?.document?.companyName),
         companyAddress: str(payload?.document?.companyAddress),
         companyContact: str(payload?.document?.companyContact),
@@ -129,14 +137,22 @@ const createSalesOrderPrintsService = (deps) => {
       };
 
       // Reprints share the Sales Order number, so version is what tells two
-      // rows apart. Counting costs a full read, but prints are rare.
-      const priorForNumber = readPrintSnapshots()
-        .filter((s) => str(s?.salesOrderNumber) === salesOrderNumber).length;
+      // rows apart. Counting costs a full read, but prints are rare. Quotes
+      // have no number to group by, so they version per order instead — a
+      // second quote for the same customer is v2 of that conversation.
+      const prior = readPrintSnapshots().filter((s) => {
+        const sKind = str(s?.kind) === 'QUOTE' ? 'QUOTE' : 'SALES_ORDER';
+        if (sKind !== kind) return false;
+        return kind === 'QUOTE'
+          ? str(s?.bubbleId) === str(payload?.bubbleId)
+          : str(s?.salesOrderNumber) === salesOrderNumber;
+      }).length;
 
       const record = {
         id: randomUUID(),
+        kind,
         salesOrderNumber,
-        version: priorForNumber + 1,
+        version: prior + 1,
         printedAt: str(payload?.printedAt) || new Date().toISOString(),
         bubbleId: str(payload?.bubbleId),
         bubbleName: str(payload?.bubbleName),
@@ -146,6 +162,10 @@ const createSalesOrderPrintsService = (deps) => {
         items,
         extraLines,
         totals: computeTotals(items, extraLines, document.taxRate),
+        // Tax-in dollars taken off to close the sale. Stored on quotes only —
+        // the sales order carries the same concession inside its line prices,
+        // so it has no separate discount to record.
+        discount: kind === 'QUOTE' ? num(payload?.discount) : 0,
       };
 
       const file = getPrintsFile();
@@ -166,8 +186,12 @@ const createSalesOrderPrintsService = (deps) => {
     const bubbleId = str(query?.bubbleId).trim();
     const bubbleName = str(query?.bubbleName).trim().toLowerCase();
     const itemcode = str(query?.itemcode).trim().toLowerCase();
+    // Rows written before quotes existed carry no `kind` — they're all sales
+    // orders, so the default has to be SALES_ORDER, not "unknown".
+    const kind = str(query?.kind).trim().toUpperCase();
 
     const rows = readPrintSnapshots().filter((s) => {
+      if (kind && (str(s?.kind) || 'SALES_ORDER') !== kind) return false;
       if (salesOrderNumber && str(s?.salesOrderNumber).toLowerCase() !== salesOrderNumber) return false;
       if (bubbleId && str(s?.bubbleId) !== bubbleId) return false;
       if (bubbleName && str(s?.bubbleName).toLowerCase() !== bubbleName) return false;

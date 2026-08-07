@@ -20,6 +20,7 @@ const registerSettingsIpc = (ipcMain, deps) => {
     getResolvedPathsSummary,
     getAhkExePath,
     validateAhkExePath,
+    credentialSync,
     INSTANCE_PATHS,
     INSTANCE_DIR,
     fs,
@@ -148,6 +149,31 @@ const registerSettingsIpc = (ipcMain, deps) => {
       return { ok: false, error: e?.message || 'Failed to validate AHK path.' };
     }
   });
+
+  // ---- credential hand-off between machines -------------------------------
+  //
+  // Thin pass-throughs: every decision, including what a grant is allowed to
+  // contain, lives in main/services/credentialSync.service.js. The one rule
+  // enforced here is that a pairing code only ever travels main -> renderer as
+  // the direct return of the send call, and only ever renderer -> main as the
+  // argument to redeem. It is never broadcast, never stored, never logged.
+  const credSync = (fn, label) => (_evt, arg) => {
+    try {
+      return credentialSync[fn](arg);
+    } catch (e) {
+      console.error(`[cred-sync:${label}]`, e);
+      return { ok: false, error: e?.message || 'Credential transfer failed.' };
+    }
+  };
+
+  ipcMain.handle('cred-sync:request', credSync('requestCredentials', 'request'));
+  ipcMain.handle('cred-sync:cancel-request', credSync('cancelRequest', 'cancel-request'));
+  ipcMain.handle('cred-sync:inbound-status', credSync('getInboundStatus', 'inbound-status'));
+  ipcMain.handle('cred-sync:redeem', credSync('redeemGrant', 'redeem'));
+  ipcMain.handle('cred-sync:list-requests', credSync('listRequests', 'list-requests'));
+  ipcMain.handle('cred-sync:send', credSync('sendCredentials', 'send'));
+  ipcMain.handle('cred-sync:revoke', credSync('revokeGrant', 'revoke'));
+  ipcMain.handle('cred-sync:preview-outgoing', credSync('previewOutgoing', 'preview-outgoing'));
 
   ipcMain.handle('app:get-version', () => {
     try {

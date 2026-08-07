@@ -1,8 +1,34 @@
 import React from "react";
+import {
+  DEFAULT_TAX_RATE,
+  applyQuoteDiscount,
+  computeDocumentTotals,
+  computeQuoteRows,
+} from "../utils/quote";
 
 const currencyFormatter = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
+});
+
+// Unit prices are stored to four decimals so a tax-in quote lands on a round
+// figure (see utils/quote.js). Printing them rounded to cents would leave rows
+// that don't multiply out — 3 × $88.50 shown against a $265.49 extension — so
+// the column shows the price that was actually used.
+//
+// It's all-or-nothing per document rather than per row: letting each price show
+// only the decimals it needs gives a column of $97.4544 / $40.606 / $18.68,
+// which reads as sloppy rather than precise. So one sheet with any sub-cent
+// price prints the whole column at four, and an ordinary sheet stays at two.
+const centsFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+});
+const preciseFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 4,
+  maximumFractionDigits: 4,
 });
 
 const toNumber = (value) => {
@@ -226,8 +252,13 @@ export const INVOICE_DOCUMENT_DEFAULTS = {
   companyAddress: "2562 St Clair Ave West\nToronto, Ontario M6N 1L7",
   companyContact: "Canada\nconsumerautoparts@gmail.com\nTEL: 416-763-5696",
   taxLabel: "HST",
-  taxRate: 0.13,
+  taxRate: DEFAULT_TAX_RATE,
 };
+
+// The Quotation is the same sheet with the tax folded into the numbers rather
+// than broken out under them — it answers "what do I pay?", which is the only
+// question a customer asks before they've bought anything.
+export const QUOTE_DOCUMENT_TITLE = "Quotation";
 
 export default function InvoicePreview({
   bubbleName,
@@ -236,13 +267,24 @@ export default function InvoicePreview({
   extraLines = [],
   generatedDate = new Date(),
   salesOrderNumber = "",
-  documentTitle = INVOICE_DOCUMENT_DEFAULTS.documentTitle,
+  // "salesOrder" prints unit prices pretax with Subtotal/HST/Total underneath.
+  // "quote" prints them tax-in with a single Total — no document number, since
+  // nothing has been ordered yet.
+  variant = "salesOrder",
+  // Tax-in dollars knocked off to close the sale ("make it 240 even"). Quote
+  // only: the Sales Order carries the discount inside its line prices instead,
+  // so it never prints the word.
+  discount = 0,
+  documentTitle,
   companyName = INVOICE_DOCUMENT_DEFAULTS.companyName,
   companyAddress = INVOICE_DOCUMENT_DEFAULTS.companyAddress,
   companyContact = INVOICE_DOCUMENT_DEFAULTS.companyContact,
   taxLabel = INVOICE_DOCUMENT_DEFAULTS.taxLabel,
   taxRate = INVOICE_DOCUMENT_DEFAULTS.taxRate,
 }) {
+  const isQuote = variant === "quote";
+  const title =
+    documentTitle || (isQuote ? QUOTE_DOCUMENT_TITLE : INVOICE_DOCUMENT_DEFAULTS.documentTitle);
   const itemRows = (items || []).map((it) => {
     const qty = toNumber(it.quantity);
     const price = toNumber(it.allocated_for);
@@ -275,15 +317,27 @@ export default function InvoicePreview({
     };
   });
 
-  const rows = [...itemRows, ...normalizedExtraLines];
+  const baseRows = [...itemRows, ...normalizedExtraLines];
 
-  const subtotal = rows.reduce((sum, row) => sum + row.extension, 0);
-  const taxableBase = rows.reduce(
-    (sum, row) => (row.taxable ? sum + row.extension : sum),
-    0
-  );
-  const tax = taxableBase * taxRate;
-  const total = subtotal + tax;
+  const { subtotal, tax, total } = computeDocumentTotals(baseRows, taxRate);
+
+  // The Quotation's total is the Sales Order's total — not a figure recomputed
+  // from its own tax-in rows. The rows are fitted to it (see computeQuoteRows),
+  // which is what keeps the two sheets agreeing when the customer holds them up
+  // side by side.
+  const quote = isQuote ? computeQuoteRows(baseRows, taxRate) : null;
+  const quoteDiscount = isQuote ? applyQuoteDiscount({ total }, discount) : null;
+  const showDiscount = Boolean(quoteDiscount && quoteDiscount.discount > 0);
+
+  const rows = isQuote
+    ? quote.rows.map((r) => ({ ...r, price: r.quoteUnit, extension: r.quoteExtension }))
+    : baseRows;
+
+  const unitPriceFormatter = rows.some(
+    (r) => Math.round(r.price * 10000) !== Math.round(r.price * 100) * 100
+  )
+    ? preciseFormatter
+    : centsFormatter;
 
   const formattedDate = new Date(generatedDate).toLocaleDateString("en-CA", {
     year: "numeric",
@@ -300,15 +354,20 @@ export default function InvoicePreview({
           <div style={{ ...styles.address, marginTop: 0 }}>{companyContact}</div>
         </div>
         <div>
-          <div style={styles.docTitle}>{documentTitle}</div>
+          <div style={styles.docTitle}>{title}</div>
           <table style={styles.docMeta}>
             <tbody>
-              <tr>
-                <td style={styles.docMetaLabel}>{documentTitle} #</td>
-                <td style={styles.docMetaValue}>
-                  {salesOrderNumber || "assigned on print"}
-                </td>
-              </tr>
+              {/* A quote isn't an order, so there's no number to put on it —
+                  the row is dropped rather than left blank, which would read as
+                  a number that failed to print. */}
+              {!isQuote && (
+                <tr>
+                  <td style={styles.docMetaLabel}>{title} #</td>
+                  <td style={styles.docMetaValue}>
+                    {salesOrderNumber || "assigned on print"}
+                  </td>
+                </tr>
+              )}
               <tr>
                 <td style={styles.docMetaLabel}>Date</td>
                 <td style={styles.docMetaValue}>{formattedDate}</td>
@@ -382,7 +441,7 @@ export default function InvoicePreview({
                       backgroundColor: tint,
                     }}
                   >
-                    {currencyFormatter.format(row.price)}
+                    {unitPriceFormatter.format(row.price)}
                   </td>
                   <td
                     style={{
@@ -407,28 +466,55 @@ export default function InvoicePreview({
             </tr>
           </tbody>
           <tfoot>
-            <tr>
-              <td style={styles.totalsLabel} colSpan={3}>
-                Subtotal
-              </td>
-              <td style={styles.totalsValue}>
-                {currencyFormatter.format(subtotal)}
-              </td>
-            </tr>
-            <tr>
-              <td style={styles.totalsLabel} colSpan={3}>
-                {taxLabel} ({Math.round(taxRate * 100)}%)
-              </td>
-              <td style={styles.totalsValue}>
-                {currencyFormatter.format(tax)}
-              </td>
-            </tr>
+            {/* Every unit price above already has the tax in it, so breaking
+                out a subtotal and an HST line here would be double-counting
+                what the customer is looking at. */}
+            {!isQuote && (
+              <>
+                <tr>
+                  <td style={styles.totalsLabel} colSpan={3}>
+                    Subtotal
+                  </td>
+                  <td style={styles.totalsValue}>
+                    {currencyFormatter.format(subtotal)}
+                  </td>
+                </tr>
+                <tr>
+                  <td style={styles.totalsLabel} colSpan={3}>
+                    {taxLabel} ({Math.round(taxRate * 100)}%)
+                  </td>
+                  <td style={styles.totalsValue}>
+                    {currencyFormatter.format(tax)}
+                  </td>
+                </tr>
+              </>
+            )}
+            {showDiscount && (
+              <>
+                <tr>
+                  <td style={styles.totalsLabel} colSpan={3}>
+                    Total
+                  </td>
+                  <td style={styles.totalsValue}>
+                    {currencyFormatter.format(quoteDiscount.gross)}
+                  </td>
+                </tr>
+                <tr>
+                  <td style={styles.totalsLabel} colSpan={3}>
+                    Discount
+                  </td>
+                  <td style={styles.totalsValue}>
+                    -{currencyFormatter.format(quoteDiscount.discount)}
+                  </td>
+                </tr>
+              </>
+            )}
             <tr>
               <td style={styles.grandLabel} colSpan={3}>
-                Total
+                {showDiscount ? "Post-Discount" : "Total"}
               </td>
               <td style={styles.grandValue}>
-                {currencyFormatter.format(total)}
+                {currencyFormatter.format(showDiscount ? quoteDiscount.net : total)}
               </td>
             </tr>
           </tfoot>

@@ -170,6 +170,7 @@ function registerAllIpc(ipcMain, deps) {
     getResolvedPathsSummary: deps.getResolvedPathsSummary,
     getAhkExePath: deps.getAhkExePath,
     validateAhkExePath: deps.validateAhkExePath,
+    credentialSync: deps.credentialSync,
     INSTANCE_PATHS: deps.INSTANCE_PATHS,
     INSTANCE_DIR: deps.INSTANCE_DIR,
     fs: deps.fs,

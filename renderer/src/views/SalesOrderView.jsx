@@ -255,6 +255,12 @@ function OrderCard({
     (it) => arrivalMap[String(it.order_key || "").toUpperCase()] ?? arrivalMap[String(it.reference_num || "").toUpperCase()]
   ).length;
 
+  // A Quotation only means something if this order was actually quoted taxes
+  // in — that figure is a promise made to a customer, not something to be
+  // reconstructed from a sell price after the fact. One part carrying one is
+  // enough; the rest of the sheet follows from the prices either way.
+  const quotable = items.some((it) => String(it.tax_in_price || "").trim() !== "");
+
   return (
     <Card className={`relative hover:z-20 h-full flex flex-col ${band?.cardCls || ""}`}>
       <button onClick={handleToggle} className="w-full flex items-start justify-between gap-2 text-left">
@@ -344,6 +350,21 @@ function OrderCard({
         >
           {printBadge.label}
         </span>
+        {/* Same sheet, tax folded into the line prices and a single Total —
+            what a customer wants before they've committed to anything. Prints
+            no order number and marks nothing sold, so it's safe to hand out. */}
+        <button
+          onClick={() => onRequestPrint(bubble, "quote")}
+          disabled={!quotable}
+          className="rounded-lg border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-emerald-50"
+          title={
+            quotable
+              ? "Print a Quotation — prices taxes in, one Total, no Sales Order number"
+              : "Nothing on this order was quoted taxes in. Enter the tax-in price in Order Assignment's Review or Stop screen to unlock this."
+          }
+        >
+          Print Quotation
+        </button>
         <button
           onClick={() => onRequestPrint(bubble)}
           className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
@@ -538,6 +559,7 @@ export default function SalesOrderView({
   onUpdateItem,
   onSendToCashPad,
   onSendToReturns,
+  onRemoveEmptiedOrder,
   onArchiveOrder,
   onSageSalesInvoice,
 }) {
@@ -651,12 +673,16 @@ export default function SalesOrderView({
     onUpdateItem,
     onSendToCashPad,
     onSendToReturns,
+    onRemoveEmptiedOrder,
     onArchiveOrder,
     onSageSalesInvoice,
   };
   const stableUpdateBubbleNotes = useCallback((id, notes) => handlersRef.current.onUpdateBubbleNotes(id, notes), []);
   const stableNotesCommit = useCallback((id, notes) => handlersRef.current.onBubbleNotesBlur(id, notes), []);
-  const stableRequestPrint = useCallback((bubble) => handlersRef.current.onRequestPrint(bubble), []);
+  const stableRequestPrint = useCallback(
+    (bubble, mode) => handlersRef.current.onRequestPrint(bubble, mode),
+    []
+  );
   // `flag` is either a key ("paid") or a whole patch ({ counter, delivered }) —
   // App.jsx accepts both, and the patch form is what keeps Counter/Delivered
   // from clobbering each other. Only a patch touching counter/delivered can
@@ -830,9 +856,19 @@ export default function SalesOrderView({
 
   const handleMoveItem = useCallback(async (item, fromName, destination) => {
     const label = MOVE_TARGETS[destination]?.label || destination;
+    // Is this the last part in a real customer order? `orders` holds only those
+    // — the stock pools and the CashPad panel are built separately and never
+    // appear in it — so a move out of a holding area never matches here and
+    // never takes anything with it.
+    const source = ordersRef.current.find((o) => o.bubble.name === fromName);
+    const emptiesOrder =
+      Boolean(source) && source.items.length === 1 && source.items[0].uid === item.uid;
     const ok = await api.confirm(
       `Send ${item.itemcode} from ${fromName} to ${label}?`,
-      MOVE_BLURB[destination] || ""
+      (MOVE_BLURB[destination] || "") +
+        (emptiesOrder
+          ? `\n\nThat's the last part in "${fromName}", so the order goes too — an empty order has nothing left to describe. Its notes and this card go away.`
+          : "")
     );
     if (!ok) return;
     setError("");
@@ -840,6 +876,10 @@ export default function SalesOrderView({
     try {
       const res = await api.unassignOrderItem({ uid: item.uid, destination });
       if (!res?.ok) setError(res?.error || `Failed to send this part to ${label}.`);
+      // Only once the part is actually out. A failed move leaves the order
+      // holding it, and deleting the card would strand it under a name nothing
+      // on screen shows any more.
+      else if (emptiesOrder) handlersRef.current.onRemoveEmptiedOrder?.(source.bubble.id, destination);
     } finally {
       setRemovingUids((prev) => {
         const next = new Set(prev);
