@@ -10,8 +10,14 @@ const { registerRulesIpc } = require('./rules.ipc');
 const { registerOrderAssignmentIpc } = require('./orderAssignment.ipc');
 const { registerSageRunsIpc } = require('./sageRuns.ipc');
 const { registerCrdtIpc } = require('./crdt.ipc');
+const { registerAutomationIpc } = require('./automation.ipc');
 
 function registerAllIpc(ipcMain, deps) {
+  registerAutomationIpc(ipcMain, {
+    automation: deps.automation,
+    getMachineId: deps.getMachineId,
+  });
+
   registerCrdtIpc(ipcMain, {
     listCrdtConflicts: deps.listCrdtConflicts,
     ackCrdtConflict: deps.ackCrdtConflict,

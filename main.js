@@ -27,6 +27,7 @@ const { createSageService } = require('./main/services/sage.service');
 const { configureSageQueue } = require('./main/services/sage.actions');
 const { createAppConfigService } = require('./main/services/appConfig.service');
 const { createCredentialSyncService } = require('./main/services/credentialSync.service');
+const { createAutomationService } = require('./main/services/automation.service');
 const { createUpdatesService } = require('./main/services/updates.service');
 const { writeJsonAtomic } = require('./main/utils/atomicWrite');
 // Shared business data is replicated as a CRDT (see main/crdt/README.md).
@@ -2016,6 +2017,17 @@ const {
   resetSageQueue,
 } = sageService;
 
+// Who is on the share, who does what, and the jobs they run for each other.
+const automation = createAutomationService({
+  fs,
+  path,
+  getSharedDataDir,
+  getMachineId,
+  ensureDir,
+  getAppVersion: () => app.getVersion(),
+  randomUUID,
+});
+
 // Wire AHK queue running-state into the shared lock file
 configureSageQueue({
   onStart: () => {
@@ -2262,6 +2274,14 @@ app.whenReady().then(async () => {
   } catch (e) {
     console.warn('[orders] startup archive failed', e);
   }
+  // Announce this machine on the share so it can be given an automation role.
+  // Heartbeat only — being present grants nothing on its own.
+  try {
+    automation.startPresenceHeartbeat();
+    automation.purgePresence();
+  } catch (e) {
+    console.error('[automation] presence startup failed', e);
+  }
   createWindow();
 });
 
@@ -2276,6 +2296,14 @@ app.on('before-quit', () => {
     if (sagePoActive) clearSageLock();
   } catch (e) {
     console.error('[sage-lock] release on quit failed', e);
+  }
+  // Drop out of the roster immediately rather than looking online for another
+  // half minute — a machine that is closing cannot be given a job.
+  try {
+    automation.stopPresenceHeartbeat();
+    automation.clearPresence();
+  } catch (e) {
+    console.error('[automation] presence release on quit failed', e);
   }
   try {
     stopAutoUpdater();
@@ -2322,6 +2350,7 @@ function registerAllIpc() {
     ackCrdtConflict: (id) => crdt.ackConflict(id),
     ackAllCrdtConflicts: () => crdt.ackAllConflicts(),
     getCrdtStats: () => crdt.stats(),
+    automation,
     appendPrintSnapshot,
     findPrintSnapshots,
     getPrintsFile,

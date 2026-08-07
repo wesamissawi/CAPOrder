@@ -29,6 +29,25 @@ const fallbackApi = {
   dismissConflict: warnAsync("dismissConflict", async () => ({ ok: true, conflicts: [] })),
   dismissAllConflicts: warnAsync("dismissAllConflicts", async () => ({ ok: true, conflicts: [] })),
   readStoreStats: warnAsync("readStoreStats", async () => ({ ok: false })),
+
+  // Cross-machine automation. The fallbacks report an empty, role-less world so
+  // a browser-only render shows "no machines" rather than throwing.
+  listAutomationMachines: warnAsync("listAutomationMachines", async () => ({
+    ok: false,
+    machines: [],
+    ownMachineId: null,
+  })),
+  getAutomationRoles: warnAsync("getAutomationRoles", async () => ({
+    ok: false,
+    roles: { fetch: "", print: "", sage: "" },
+    ownMachineId: null,
+  })),
+  setAutomationRoles: warnAsync("setAutomationRoles"),
+  createAutomationJob: warnAsync("createAutomationJob"),
+  claimableAutomationJobs: warnAsync("claimableAutomationJobs", async () => ({ ok: false, jobs: [] })),
+  readAutomationJob: warnAsync("readAutomationJob", async () => ({ ok: false, job: null })),
+  updateAutomationJob: warnAsync("updateAutomationJob"),
+  deleteAutomationJob: warnAsync("deleteAutomationJob"),
   onConflicts: warnEvent("onConflicts"),
   onPaymentsUpdated: warnEvent("onPaymentsUpdated"),
   getDataPath: warnAsync("getDataPath", async () => ({ path: "(not in Electron)" })),

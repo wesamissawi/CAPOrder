@@ -130,6 +130,9 @@ export default function OrderManagementView({
   ghostMode,
   ghostBusy,
   ghostLog,
+  ghostRunning,
+  onRunGhostCycleNow,
+  automationJobBusy,
   onClearOrderFetchMessage,
   onClearInvoiceFetchMessage,
   onFetchWorldInvoices,
@@ -447,13 +450,31 @@ export default function OrderManagementView({
               </button>
             ))}
           </div>
+          {automationJobBusy && (
+            <div className="mt-3 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800">
+              <span className="font-semibold">Working for another machine</span> - {automationJobBusy}
+            </div>
+          )}
           {ghostMode && (
-            <div className="mt-3 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-700">
-              <span className="font-semibold">Ghost mode</span> - this machine runs the fetch,
-              Gmail, Sage and print steps by itself every 30 minutes between 8am and 5pm.
-              <div className="mt-0.5 text-xs text-violet-600 whitespace-pre-line">
-                {ghostBusy || ghostLog || "Waiting for the next half hour."}
+            <div className="mt-3 flex items-start gap-3 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-700">
+              <div className="flex-1">
+                <span className="font-semibold">Ghost mode</span> - this machine runs the fetch,
+                Gmail, Sage and print steps by itself every 30 minutes between 8am and 5pm.
+                <div className="mt-0.5 text-xs text-violet-600 whitespace-pre-line">
+                  {ghostBusy || ghostLog || "Waiting for the next half hour."}
+                </div>
               </div>
+              {onRunGhostCycleNow && (
+                <button
+                  type="button"
+                  onClick={onRunGhostCycleNow}
+                  disabled={ghostRunning}
+                  title="Run one full cycle right now instead of waiting for the next half hour. Same checks as a scheduled run."
+                  className="shrink-0 px-3 py-1.5 rounded-full border border-violet-300 bg-white text-xs font-semibold text-violet-700 hover:bg-violet-100 disabled:opacity-60"
+                >
+                  {ghostRunning ? "Running..." : "Run one now"}
+                </button>
+              )}
             </div>
           )}
           {getAllOrdersError && (

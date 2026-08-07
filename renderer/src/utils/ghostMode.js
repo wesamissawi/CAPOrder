@@ -16,6 +16,10 @@ export const GHOST_TICK_MS = 60 * 1000;
 // BestBuy emails the day's invoices the NEXT day, so checking every half hour
 // is 17 wasted Gmail runs. Once a day, from noon, is enough.
 export const GHOST_BESTBUY_HOUR = 12;
+// Tiger's order pull is slow and its orders don't move much through the day, so
+// it runs twice: once in the morning and once from noon, rather than on all 18
+// cycles. Every other vendor still goes every cycle.
+export const GHOST_TIGER_NOON_HOUR = 12;
 // How long a cycle will wait for the Sage machine to work through the queue it
 // just released before giving up on printing (printing is what waits — see
 // runGhostCycle). Long enough for a full queue of AHK runs, short enough that a
@@ -41,6 +45,23 @@ export function ghostDayKey(date = new Date()) {
   return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
 }
 
+// When the next cycle is due — the next :00/:30 inside working hours, rolling
+// over to tomorrow morning after the last one of the day. Settings shows this so
+// switching the toggle on answers "and then what?" by itself.
+export function nextGhostCycleAt(date = new Date()) {
+  const next = new Date(date.getTime());
+  next.setSeconds(0, 0);
+  // setMinutes(60) rolls the hour over for us.
+  next.setMinutes(date.getMinutes() < 30 ? 30 : 60);
+  if (next.getHours() < GHOST_START_HOUR) {
+    next.setHours(GHOST_START_HOUR, 0, 0, 0);
+  } else if (next.getHours() >= GHOST_END_HOUR) {
+    next.setDate(next.getDate() + 1);
+    next.setHours(GHOST_START_HOUR, 0, 0, 0);
+  }
+  return next;
+}
+
 // The BestBuy invoice check runs once a day, on the first cycle that actually
 // gets going at or after noon — not strictly the 12:00 slot, so a noon cycle
 // skipped because Sage was off (or this machine was busy) doesn't cost the day's
@@ -50,17 +71,47 @@ export function shouldFetchBestbuyInvoices(date = new Date(), lastDayKey = "") {
   return ghostDayKey(date) !== lastDayKey;
 }
 
-// The machine currently holding the Sage purchase-order lock, if it is somebody
-// else. Ghost mode never types into Sage itself — it fills the queue and
-// releases it — so with no other machine running Sage the orders it sends would
-// just sit there triggered, and the printing step would be working against
-// orders nobody is entering. Takes the result of api.getSageLock().
-export function foreignSagePoMachine(lockRes) {
+// Which of the day's two Tiger slots a moment falls in: the morning one opens
+// with ghost hours at 8:00 and the noon one at 12:00. Tiger runs on the first
+// cycle inside each — same reasoning as BestBuy's daily check, so an 8:00 cycle
+// skipped because nothing was ready doesn't cost the morning's pull.
+export function ghostTigerSlot(date = new Date()) {
+  const hour = date.getHours();
+  if (hour >= GHOST_TIGER_NOON_HOUR) return "noon";
+  if (hour >= GHOST_START_HOUR) return "morning";
+  return "";
+}
+
+// The value to remember once a Tiger pull has run, and to compare against next
+// time — day plus slot, so it runs again at noon but not twice in one slot.
+export function ghostTigerRunKey(date = new Date()) {
+  const slot = ghostTigerSlot(date);
+  return slot ? `${ghostDayKey(date)}:${slot}` : "";
+}
+
+export function shouldFetchTigerOrders(date = new Date(), lastRunKey = "") {
+  const key = ghostTigerRunKey(date);
+  return Boolean(key) && key !== lastRunKey;
+}
+
+// Whichever machine currently holds the live Sage purchase-order lock — this
+// one or another. Ghost mode never types into Sage itself: it fills the queue
+// and releases it, and the Sage machine (assigned by the `sage` automation
+// role, enforced by the lock) does the typing. With nobody holding the lock the
+// orders it sends would sit there triggered and the printing step would be
+// working against orders nobody is entering, so a cycle with no Sage machine is
+// no cycle at all. Takes the result of api.getSageLock().
+export function sagePoMachine(lockRes) {
   if (!lockRes?.ok || !lockRes.lockIsLive) return "";
-  const owner = (lockRes.lock?.machineId || "").toString().trim();
-  const own = (lockRes.ownMachineId || "").toString().trim();
-  if (!owner || owner === own) return "";
-  return owner;
+  return (lockRes.lock?.machineId || "").toString().trim();
+}
+
+// True when the Sage machine is somebody else — the Settings panel words itself
+// differently for "GIRLSBOYS is doing the typing" vs "this machine is".
+export function isForeignSageMachine(lockRes) {
+  const owner = sagePoMachine(lockRes);
+  const own = (lockRes?.ownMachineId || "").toString().trim();
+  return Boolean(owner) && owner !== own;
 }
 
 // The key sage:trigger-order resolves an order by — the same one the card's

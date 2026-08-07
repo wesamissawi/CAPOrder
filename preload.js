@@ -32,6 +32,17 @@ contextBridge.exposeInMainWorld('api', {
   dismissConflict: (id) => ipcRenderer.invoke('crdt:ack-conflict', id),
   dismissAllConflicts: () => ipcRenderer.invoke('crdt:ack-all-conflicts'),
   readStoreStats: () => ipcRenderer.invoke('crdt:stats'),
+
+  // Cross-machine automation: the roster, the role assignments, and the jobs
+  // machines run for each other (see main/services/automation.service.js).
+  listAutomationMachines: () => ipcRenderer.invoke('automation:machines'),
+  getAutomationRoles: () => ipcRenderer.invoke('automation:get-roles'),
+  setAutomationRoles: (partial) => ipcRenderer.invoke('automation:set-roles', partial),
+  createAutomationJob: (payload) => ipcRenderer.invoke('automation:create-job', payload),
+  claimableAutomationJobs: () => ipcRenderer.invoke('automation:claimable-jobs'),
+  readAutomationJob: (id) => ipcRenderer.invoke('automation:read-job', id),
+  updateAutomationJob: (id, patch) => ipcRenderer.invoke('automation:update-job', id, patch),
+  deleteAutomationJob: (id) => ipcRenderer.invoke('automation:delete-job', id),
   onConflicts: (cb) => {
     const listener = (_e, data) => cb(data);
     ipcRenderer.on('crdt:conflicts', listener);

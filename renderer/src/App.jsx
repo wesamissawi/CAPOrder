@@ -34,10 +34,18 @@ import { computeDiscountedItemPrices, computeDocumentTotals } from "./utils/quot
 import { isOrderSageLocked, orderKeyMatches } from "./utils/sageLock";
 import { applyInvoiceEnvironmentalFees } from "./utils/environmentalFee";
 import {
+  JOB_CLAIM_POLL_MS,
+  JOB_LABELS,
+  JOB_POLL_MS,
+  isTerminalJob,
+  jobTimeoutMs,
+  resolveRoleTarget,
+} from "./utils/automation";
+import {
   GHOST_SAGE_POLL_MS,
   GHOST_SAGE_WAIT_MS,
   GHOST_TICK_MS,
-  foreignSagePoMachine,
+  sagePoMachine,
   ghostDayKey,
   ghostOrderKey,
   ghostPrintTargets,
@@ -45,8 +53,10 @@ import {
   ghostSagePendingCount,
   ghostSageQueueTargets,
   ghostSlotKey,
+  ghostTigerRunKey,
   isWithinGhostHours,
   shouldFetchBestbuyInvoices,
+  shouldFetchTigerOrders,
 } from "./utils/ghostMode";
 
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
@@ -468,14 +478,38 @@ export default function App() {
   const [ghostMode, setGhostMode] = useState(false);
   const [ghostBusy, setGhostBusy] = useState(""); // the step running right now
   const [ghostLog, setGhostLog] = useState(""); // what the last cycle did
+  const [ghostRunning, setGhostRunning] = useState(false);
+  // The ref is what the cycle itself tests (state is a render behind); the
+  // state above is only for disabling the "Run one now" button.
   const ghostRunningRef = useRef(false);
   // Seeded with the half-hour the app STARTED in, so launching at 10:05 waits
   // for 10:30 rather than firing a full cycle on startup — and so restarting
   // repeatedly can never re-run the same slot.
   const ghostSlotRef = useRef(ghostSlotKey());
   const ghostCycleRef = useRef(null);
-  // The day the once-daily BestBuy invoice check last ran on.
+  // The day the once-daily BestBuy invoice check last ran on, and the day+slot
+  // of the last twice-daily Tiger order pull.
   const ghostBestbuyDayRef = useRef("");
+  const ghostTigerRunRef = useRef("");
+  // Cross-machine automation: the roster and who has which role. Kept in state
+  // for the admin screen; every dispatch re-reads them fresh, because a machine
+  // can go offline between one cycle and the next.
+  const [automationMachines, setAutomationMachines] = useState([]);
+  const [automationRoles, setAutomationRoles] = useState({ fetch: "", print: "", sage: "" });
+  const [ownMachineId, setOwnMachineId] = useState("");
+  // Non-empty while this machine is running a job for another machine.
+  const [automationJobBusy, setAutomationJobBusy] = useState("");
+  const automationJobBusyRef = useRef(false);
+  const automationExecRef = useRef(null);
+  // Whether this machine's PO toggle was switched on by the `sage` role rather
+  // than by a person, so giving the role away can switch it back off without
+  // ever countermanding somebody's own click.
+  const sageRoleAutoEnabledRef = useRef(false);
+  // The sage assignment this machine has already acted on, and a render-current
+  // mirror of the PO toggle — see the role-follower effect for why it reads the
+  // toggle through a ref instead of depending on it.
+  const sageRoleAppliedRef = useRef("");
+  const sagePoEnabledRef = useRef(false);
   const [qtyConfirmModal, setQtyConfirmModal] = useState(null); // { order, refKey }
   const [invoiceReviewOrder, setInvoiceReviewOrder] = useState(null);
   const [invoiceReviewImageDataUrl, setInvoiceReviewImageDataUrl] = useState("");
@@ -5207,25 +5241,229 @@ export default function App() {
   // same time don't stomp each other's results. Blocked only while this
   // machine is itself mid-keystroke in Sage (see sagePoRunningHere above); the
   // Sage-PO machine is otherwise free to use it like any other.
-  async function handleGetAllOrders() {
+  // `options.skipTiger` is for ghost mode, which pulls Tiger only twice a day
+  // (see shouldFetchTigerOrders). The button passes a click event here, which
+  // has no such field, so a click always fetches everything.
+  async function handleGetAllOrders(options) {
     if (getAllOrdersRunning || anyVendorFetchRunning || sagePoRunningHere) return;
     setGetAllOrdersError("");
     setGetAllOrdersRunning(true);
     try {
-      await Promise.all([
+      const fetches = [
         handleGetWorldOrders(),
         handleGetTransbecOrders(),
         handleGetBestBuyOrders(),
         handleGetCbkOrders(),
         handleGetProforceOrders(),
-        handleGetTigerOrders(),
-      ]);
+      ];
+      if (options?.skipTiger !== true) fetches.push(handleGetTigerOrders());
+      await Promise.all(fetches);
     } catch (e) {
       setGetAllOrdersError(e?.message || "Failed to fetch all vendor orders.");
     } finally {
       setGetAllOrdersRunning(false);
     }
   }
+
+  // ---- Cross-machine automation -------------------------------------------
+  //
+  // A machine can be given a role — vendor fetching, printing, Sage entry — and
+  // then does that part of the routine for whoever asks. The asking is a job
+  // file on the share (main/services/automation.service.js); this side is the
+  // half that actually does the work, because the work is these handlers.
+
+  sagePoEnabledRef.current = sagePoEnabled;
+
+  async function refreshAutomationState() {
+    try {
+      const [rolesRes, machinesRes] = await Promise.all([
+        api?.getAutomationRoles?.(),
+        api?.listAutomationMachines?.(),
+      ]);
+      if (rolesRes?.ok) setAutomationRoles(rolesRes.roles || { fetch: "", print: "", sage: "" });
+      if (machinesRes?.ok) {
+        setAutomationMachines(machinesRes.machines || []);
+        if (machinesRes.ownMachineId) setOwnMachineId(machinesRes.ownMachineId);
+      }
+      return {
+        roles: rolesRes?.roles || {},
+        machines: machinesRes?.machines || [],
+        own: machinesRes?.ownMachineId || rolesRes?.ownMachineId || "",
+      };
+    } catch (e) {
+      console.error("[automation] failed to read roles/machines", e);
+      return { roles: {}, machines: [], own: "" };
+    }
+  }
+
+  useEffect(() => {
+    refreshAutomationState();
+    const id = setInterval(refreshAutomationState, 20 * 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  async function setAutomationRole(role, machineId) {
+    const res = await api?.setAutomationRoles?.({ [role]: machineId || "" });
+    if (res?.ok) setAutomationRoles(res.roles);
+    else console.error("[automation] failed to set role", role, res?.error);
+    return res;
+  }
+
+  // One job, run here. Each branch is the handler its button already calls —
+  // that is the whole point of running jobs in the renderer.
+  async function executeAutomationJob(kind, payload = {}) {
+    if (kind === "fetch-orders") {
+      // handleGetAllOrders returns silently when this machine is already busy,
+      // which for a job would read as success. Refuse loudly instead so the
+      // requester learns nothing was fetched.
+      if (getAllOrdersRunning || anyVendorFetchRunning || sagePoRunningHere) {
+        throw new Error("This machine is already fetching (or typing into Sage) right now.");
+      }
+      await handleGetAllOrders({ skipTiger: payload.skipTiger === true });
+      return payload.skipTiger === true
+        ? "fetched vendor orders (Tiger not due)"
+        : "fetched every vendor's orders";
+    }
+    if (kind === "fetch-invoices") {
+      if (payload.world !== false) await handleFetchWorldInvoices();
+      if (payload.transbec !== false) await handleFetchTransbecInvoices();
+      if (payload.bestbuy === true) await handleFetchBestbuyInvoices();
+      return `checked Gmail (${["world", "transbec", payload.bestbuy === true ? "bestbuy" : ""]
+        .filter(Boolean)
+        .join(", ")})`;
+    }
+    if (kind === "print-invoices") {
+      await loadOrders();
+      const targets = ghostPrintTargets(ordersRef.current);
+      for (const { order, vendor } of targets) {
+        await handlePrintVendorInvoice(order, vendor);
+      }
+      return targets.length ? `printed ${targets.length} invoice(s)` : "nothing needed printing";
+    }
+    throw new Error(`Unknown job kind: ${kind}`);
+  }
+  // Always-current, so the poller below never runs a stale copy of the handlers.
+  automationExecRef.current = executeAutomationJob;
+
+  // Work addressed to this machine. A job carries the id of exactly one machine,
+  // so there is no claim to race over — only this machine ever picks this up.
+  useEffect(() => {
+    const id = setInterval(async () => {
+      if (automationJobBusyRef.current) return;
+      let job = null;
+      try {
+        const res = await api?.claimableAutomationJobs?.();
+        job = res?.ok ? (res.jobs || [])[0] : null;
+      } catch (e) {
+        return;
+      }
+      if (!job) return;
+      automationJobBusyRef.current = true;
+      setAutomationJobBusy(
+        `${JOB_LABELS[job.kind] || job.kind} for ${job.requestedBy || "another machine"}...`
+      );
+      try {
+        await api?.updateAutomationJob?.(job.id, { status: "running", startedAt: Date.now() });
+        const summary = await automationExecRef.current?.(job.kind, job.payload || {});
+        await api?.updateAutomationJob?.(job.id, {
+          status: "done",
+          finishedAt: Date.now(),
+          result: { summary: summary || "done" },
+        });
+      } catch (e) {
+        console.error("[automation] job failed", job.kind, e);
+        await api?.updateAutomationJob?.(job.id, {
+          status: "failed",
+          finishedAt: Date.now(),
+          error: (e?.message || "Job failed.").toString().slice(0, 300),
+        });
+      } finally {
+        automationJobBusyRef.current = false;
+        setAutomationJobBusy("");
+      }
+    }, JOB_CLAIM_POLL_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  // Run one step of the routine wherever its role says it belongs: here, or on
+  // another machine via a job. Returns { ok, summary } either way, so the ghost
+  // cycle reads the same whether a step ran locally or across the share.
+  async function dispatchAutomationStep({ role, kind, payload = {}, label }) {
+    const { roles, machines, own } = await refreshAutomationState();
+    const target = resolveRoleTarget(roles, role, machines, own);
+
+    if (target.where === "offline") {
+      return { ok: false, summary: `skipped ${label} - ${target.machineId} has the job but is offline` };
+    }
+    if (target.where === "local") {
+      try {
+        return { ok: true, summary: await executeAutomationJob(kind, payload) };
+      } catch (e) {
+        return { ok: false, summary: `${label} failed here: ${e?.message || "unknown error"}` };
+      }
+    }
+
+    const created = await api?.createAutomationJob?.({ kind, payload, assignedTo: target.machineId });
+    if (!created?.ok) {
+      return { ok: false, summary: `could not hand ${label} to ${target.machineId}: ${created?.error || "unknown error"}` };
+    }
+    const jobId = created.job.id;
+    const deadline = Date.now() + jobTimeoutMs(kind);
+    setGhostBusy(`${label} on ${target.machineId}...`);
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, JOB_POLL_MS));
+      let job = null;
+      try {
+        job = (await api?.readAutomationJob?.(jobId))?.job || null;
+      } catch (e) {
+        job = null;
+      }
+      if (job && isTerminalJob(job)) {
+        api?.deleteAutomationJob?.(jobId);
+        return job.status === "done"
+          ? { ok: true, summary: `${target.machineId} ${job.result?.summary || "finished"}` }
+          : { ok: false, summary: `${target.machineId} failed ${label}: ${job.error || "unknown error"}` };
+      }
+      if (Date.now() >= deadline) {
+        // Mark it failed rather than deleting it: the machine may still be
+        // mid-run, and a job that vanishes underneath a worker leaves it
+        // writing results into nothing.
+        api?.updateAutomationJob?.(jobId, {
+          status: "failed",
+          finishedAt: Date.now(),
+          error: "The machine that asked for this gave up waiting.",
+        });
+        return { ok: false, summary: `gave up waiting for ${target.machineId} to finish ${label}` };
+      }
+    }
+  }
+
+  // The `sage` role is enforced by the existing PO heartbeat lock rather than by
+  // anything new: being given the role makes this machine turn its own "POs On"
+  // toggle on, and losing it turns that back off — but only if the role is what
+  // switched it on in the first place.
+  //
+  // It acts once per assignment, tracked by ref, and does NOT re-run when
+  // sagePoEnabled changes. That matters: enabling POs can fail (another machine
+  // still holds the lock), and its own effect answers a failure by setting
+  // sagePoEnabled back to false. Watching that flag here would read the reset as
+  // "the role still isn't applied", set it true again, and spin between the two
+  // effects for as long as the other machine held the lock.
+  useEffect(() => {
+    if (!ownMachineId) return;
+    const assigned = (automationRoles?.sage || "").trim();
+    if (sageRoleAppliedRef.current === assigned) return;
+    sageRoleAppliedRef.current = assigned;
+    if (assigned === ownMachineId) {
+      if (!sagePoEnabledRef.current) {
+        sageRoleAutoEnabledRef.current = true;
+        setSagePoEnabled(true);
+      }
+    } else if (assigned && sagePoEnabledRef.current && sageRoleAutoEnabledRef.current) {
+      sageRoleAutoEnabledRef.current = false;
+      setSagePoEnabled(false);
+    }
+  }, [automationRoles?.sage, ownMachineId]);
 
   // ---- Ghost mode ---------------------------------------------------------
   //
@@ -5248,22 +5486,28 @@ export default function App() {
   // It is deliberately not autonomous about Sage: this machine only fills the
   // queue and releases it, and refuses to run at all unless another machine is
   // holding the Sage PO lock to do the typing (see foreignSagePoMachine).
-  async function runGhostCycle() {
+  // `trigger` is "schedule" or "manual" ("Run one now" in Order Management).
+  // A manual run is the real cycle, gates and all — a test that skipped the
+  // checks would prove nothing about what happens at half past.
+  async function runGhostCycle(trigger = "schedule") {
     if (ghostRunningRef.current) return;
     const startedAt = new Date();
-    const at = startedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const at =
+      startedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) +
+      (trigger === "manual" ? " (run now)" : "");
 
     // Read the lock off disk rather than trusting sageLockInfo: half an hour
-    // has passed since the last push, and the machine running Sage may have
-    // been switched off in between.
+    // has passed since the last push, and the Sage machine may have been
+    // switched off in between. It may be this machine — with roles, the same
+    // computer can hold the Sage role and run ghost mode.
     let sageMachine = "";
     try {
-      sageMachine = foreignSagePoMachine(await api?.getSageLock?.());
+      sageMachine = sagePoMachine(await api?.getSageLock?.());
     } catch (e) {
       console.error("[ghost] failed to read the Sage lock", e);
     }
     if (!sageMachine) {
-      setGhostLog(`${at} - skipped: no other machine is running Sage purchase orders.`);
+      setGhostLog(`${at} - skipped: no machine is running Sage purchase orders.`);
       return;
     }
     if (getAllOrdersRunning || anyVendorFetchRunning || printAllRunning || sagePoRunningHere) {
@@ -5272,28 +5516,38 @@ export default function App() {
     }
 
     ghostRunningRef.current = true;
+    setGhostRunning(true);
     const done = [];
     try {
-      setGhostBusy("Fetching every vendor's orders...");
-      await handleGetAllOrders();
-
-      setGhostBusy("Checking Gmail for World invoices...");
-      await handleFetchWorldInvoices();
-      setGhostBusy("Checking Gmail for Transbec invoices...");
-      await handleFetchTransbecInvoices();
-      // BestBuy emails a day's invoices the following day, so it gets one check
-      // a day rather than one every half hour.
+      // Tiger twice a day (morning + noon), everyone else every cycle. BestBuy
+      // emails a day's invoices the following day, so its Gmail check is once a
+      // day rather than once every half hour.
+      const tigerDue = shouldFetchTigerOrders(startedAt, ghostTigerRunRef.current);
+      if (tigerDue) ghostTigerRunRef.current = ghostTigerRunKey(startedAt);
       const bestbuyDue = shouldFetchBestbuyInvoices(startedAt, ghostBestbuyDayRef.current);
-      if (bestbuyDue) {
-        ghostBestbuyDayRef.current = ghostDayKey(startedAt);
-        setGhostBusy("Checking Gmail for BestBuy invoices (daily)...");
-        await handleFetchBestbuyInvoices();
-      }
-      // Each fetch reports its own failure in its own banner, so this only
-      // claims the steps ran — not that every vendor answered.
-      done.push(
-        `Ran every vendor fetch and the World/Transbec${bestbuyDue ? "/BestBuy" : ""} Gmail checks.`
-      );
+      if (bestbuyDue) ghostBestbuyDayRef.current = ghostDayKey(startedAt);
+
+      // Both of these belong to the `fetch` role — they drive Playwright and
+      // Gmail — so they run wherever that role points, here or on another
+      // machine. A step that can't run is reported and the cycle carries on:
+      // the later steps still have yesterday's orders to work with.
+      setGhostBusy("Fetching vendor orders...");
+      const fetched = await dispatchAutomationStep({
+        role: "fetch",
+        kind: "fetch-orders",
+        payload: { skipTiger: !tigerDue },
+        label: "the vendor fetch",
+      });
+      done.push(`${fetched.ok ? "Fetch:" : "Fetch FAILED:"} ${fetched.summary}.`);
+
+      setGhostBusy("Checking Gmail for invoices...");
+      const invoiced = await dispatchAutomationStep({
+        role: "fetch",
+        kind: "fetch-invoices",
+        payload: { world: true, transbec: true, bestbuy: bestbuyDue },
+        label: "the Gmail invoice check",
+      });
+      done.push(`${invoiced.ok ? "Gmail:" : "Gmail FAILED:"} ${invoiced.summary}.`);
 
       // Work from disk, not from whatever this window was holding when the
       // cycle started — the fetches have just rewritten orders.json.
@@ -5343,7 +5597,7 @@ export default function App() {
           // The Sage machine being switched off mid-queue is the one case where
           // the remaining orders are never coming back — stop waiting on it now
           // rather than sitting out the deadline.
-          if (!foreignSagePoMachine(await api?.getSageLock?.())) {
+          if (!sagePoMachine(await api?.getSageLock?.())) {
             sageDrained = false;
             done.push(`${sageMachine} stopped running Sage with ${pending} order(s) left.`);
             break;
@@ -5357,23 +5611,22 @@ export default function App() {
       if (!sageDrained) {
         done.push("Skipped printing this cycle.");
       } else {
+        // Printing goes to whichever machine owns the printer you want the
+        // paper to come out of.
         setGhostBusy("Printing invoices...");
-        await loadOrders();
-        const printTargets = ghostPrintTargets(ordersRef.current);
-        for (const { order, vendor } of printTargets) {
-          await handlePrintVendorInvoice(order, vendor);
-        }
-        done.push(
-          printTargets.length
-            ? `Printed ${printTargets.length} invoice(s).`
-            : "Nothing needed printing."
-        );
+        const printed = await dispatchAutomationStep({
+          role: "print",
+          kind: "print-invoices",
+          label: "printing",
+        });
+        done.push(`${printed.ok ? "Print:" : "Print FAILED:"} ${printed.summary}.`);
       }
     } catch (e) {
       console.error("[ghost] cycle failed", e);
       done.push(`Stopped: ${e?.message || "unknown error"}`);
     } finally {
       ghostRunningRef.current = false;
+      setGhostRunning(false);
       setGhostBusy("");
       setGhostLog(`${at} - ${done.join(" ")}`);
     }
@@ -5402,7 +5655,7 @@ export default function App() {
       }
       setGhostMode(enabled);
       if (!enabled) return;
-      ghostCycleRef.current?.();
+      ghostCycleRef.current?.("schedule");
     }, GHOST_TICK_MS);
     return () => clearInterval(id);
   }, []);
@@ -5789,6 +6042,9 @@ export default function App() {
             ghostMode={ghostMode}
             ghostBusy={ghostBusy}
             ghostLog={ghostLog}
+            ghostRunning={ghostRunning}
+            onRunGhostCycleNow={() => runGhostCycle("manual")}
+            automationJobBusy={automationJobBusy}
             onClearOrderFetchMessage={clearOrderFetchMessage}
             onClearInvoiceFetchMessage={clearInvoiceFetchMessage}
             onConfirmOrderEdit={(key) => updateOrderByKeyAndSave(key, {})}

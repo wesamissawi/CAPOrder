@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import api from "../api";
 import Card from "../components/Card";
+import { nextGhostCycleAt, sagePoMachine } from "../utils/ghostMode";
+import { AUTOMATION_ROLES, ROLE_HELP, ROLE_LABELS } from "../utils/automation";
 
 function PathRow({ label, value, onChange, readOnly, onBrowse, helper, status }) {
   return (
@@ -37,6 +39,12 @@ function PathRow({ label, value, onChange, readOnly, onBrowse, helper, status })
   );
 }
 
+// "10:30 AM", or "tomorrow at 8:00 AM" once the day's last cycle has gone.
+function formatGhostTime(when, now = new Date()) {
+  const clock = when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return when.getDate() === now.getDate() ? clock : `${clock} tomorrow`;
+}
+
 export default function SettingsView() {
   const [sharedPath, setSharedPath] = useState("");
   const [instancePath, setInstancePath] = useState("");
@@ -57,7 +65,24 @@ export default function SettingsView() {
   const [scrapersHeadless, setScrapersHeadless] = useState(false);
   const [qtyDiscrepancyThreshold, setQtyDiscrepancyThreshold] = useState(15);
   const [qtyDiscrepancyTaxRatePercent, setQtyDiscrepancyTaxRatePercent] = useState(13);
+  // Ghost mode saves the moment it is clicked rather than waiting for the Save
+  // button at the top of the page: it arms an unattended routine, so leaving it
+  // looking on while it is still off on disk is the one thing this toggle must
+  // never do. `ghostSageMachine` is the other half of the answer to "and then
+  // what?" — the cycle does nothing at all unless another machine is running
+  // Sage purchase orders.
   const [ghostMode, setGhostMode] = useState(false);
+  const [ghostSaving, setGhostSaving] = useState(false);
+  const [ghostError, setGhostError] = useState("");
+  const [ghostSageMachine, setGhostSageMachine] = useState("");
+  const [ownMachineId, setOwnMachineId] = useState("");
+  const [automationMachines, setAutomationMachines] = useState([]);
+  const [automationRoles, setAutomationRoles] = useState({ fetch: "", print: "", sage: "" });
+  const [roleSaving, setRoleSaving] = useState("");
+  const [roleError, setRoleError] = useState("");
+  // Re-rendered every half minute while armed, so "next cycle at ..." can't sit
+  // there naming a time that has already gone by.
+  const [ghostNow, setGhostNow] = useState(() => new Date());
   const [updateStatus, setUpdateStatus] = useState("idle");
   const [updateMessage, setUpdateMessage] = useState("");
   const [updateVersion, setUpdateVersion] = useState("");
@@ -165,6 +190,77 @@ export default function SettingsView() {
     }
   }
 
+  useEffect(() => {
+    if (!ghostMode) return;
+    const id = setInterval(() => setGhostNow(new Date()), 30 * 1000);
+    return () => clearInterval(id);
+  }, [ghostMode]);
+
+  async function refreshGhostSageMachine() {
+    try {
+      const res = await api.getSageLock?.();
+      setGhostSageMachine(sagePoMachine(res));
+      setOwnMachineId(res?.ownMachineId || "");
+    } catch (e) {
+      setGhostSageMachine("");
+    }
+  }
+
+  async function refreshAutomation() {
+    try {
+      const [rolesRes, machinesRes] = await Promise.all([
+        api.getAutomationRoles?.(),
+        api.listAutomationMachines?.(),
+      ]);
+      if (rolesRes?.ok) setAutomationRoles(rolesRes.roles || {});
+      if (machinesRes?.ok) {
+        setAutomationMachines(machinesRes.machines || []);
+        if (machinesRes.ownMachineId) setOwnMachineId(machinesRes.ownMachineId);
+      }
+    } catch (e) {
+      console.error("[automation] settings refresh failed", e);
+    }
+  }
+
+  async function handleRoleChange(role, machineId) {
+    setRoleSaving(role);
+    setRoleError("");
+    try {
+      const res = await api.setAutomationRoles?.({ [role]: machineId });
+      if (!res?.ok) throw new Error(res?.error || "Failed to save the assignment.");
+      setAutomationRoles(res.roles || {});
+      // The Sage role switches a machine's PO toggle, and the lock takes a
+      // moment to change hands — re-read rather than showing the old owner.
+      if (role === "sage") setTimeout(refreshGhostSageMachine, 1500);
+    } catch (e) {
+      setRoleError(e?.message || "Failed to save the assignment.");
+    } finally {
+      setRoleSaving("");
+    }
+  }
+
+  // Written straight to disk on click. Everything else in the Automation card
+  // waits for Save; this one cannot, because the gap between "the box is
+  // ticked" and "the machine is actually doing it" is the whole feature.
+  async function handleGhostModeToggle(next) {
+    setGhostMode(next);
+    setGhostError("");
+    setGhostSaving(true);
+    try {
+      const res = await api.setAppConfig({ ghostMode: Boolean(next) });
+      if (!res?.ok) throw new Error(res?.error || "Failed to save Ghost Mode.");
+      setGhostNow(new Date());
+      if (next) await refreshGhostSageMachine();
+    } catch (e) {
+      // Put the box back where disk says it is, rather than leaving it looking
+      // armed when nothing was saved.
+      setGhostMode(!next);
+      setGhostError(e?.message || "Failed to save Ghost Mode.");
+    } finally {
+      setGhostSaving(false);
+    }
+  }
+
   async function load() {
     setError("");
     try {
@@ -185,6 +281,9 @@ export default function SettingsView() {
       const qtyThresholdRaw = Number(res.config?.qtyDiscrepancyThreshold);
       setQtyDiscrepancyThreshold(Number.isFinite(qtyThresholdRaw) && qtyThresholdRaw >= 0 ? qtyThresholdRaw : 15);
       setGhostMode(res.config?.ghostMode === true);
+      setGhostError("");
+      refreshGhostSageMachine();
+      refreshAutomation();
       const qtyTaxRateRaw = Number(res.config?.qtyDiscrepancyTaxRate);
       setQtyDiscrepancyTaxRatePercent(
         Number.isFinite(qtyTaxRateRaw) && qtyTaxRateRaw >= 0 && qtyTaxRateRaw <= 1
@@ -1298,6 +1397,116 @@ export default function SettingsView() {
 
       <Card>
         <div className="space-y-4">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h2 className="text-xl font-semibold text-slate-800">Machines &amp; roles</h2>
+              <p className="text-sm text-slate-500">
+                Which computer does each part of the work. Set here, applies everywhere - any
+                machine can hand its work to the machine that owns the job.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={refreshAutomation}
+              className="shrink-0 px-3 py-1.5 rounded-full border border-slate-300 text-xs font-semibold text-slate-700 hover:bg-white"
+            >
+              Refresh
+            </button>
+          </div>
+
+          {roleError && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+              {roleError}
+            </div>
+          )}
+
+          <div className="grid gap-3 sm:grid-cols-3">
+            {AUTOMATION_ROLES.map((role) => {
+              const assigned = automationRoles?.[role] || "";
+              const assignedMachine = automationMachines.find((m) => m.machineId === assigned);
+              const assignedOffline = Boolean(assigned) && !assignedMachine?.online;
+              return (
+                <div key={role} className="flex flex-col gap-1">
+                  <label className="text-xs uppercase tracking-wide text-slate-500">
+                    {ROLE_LABELS[role]}
+                  </label>
+                  <select
+                    value={assigned}
+                    disabled={roleSaving === role}
+                    onChange={(e) => handleRoleChange(role, e.target.value)}
+                    className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 disabled:opacity-60"
+                  >
+                    <option value="">Whoever asks (no fixed machine)</option>
+                    {automationMachines.map((m) => (
+                      <option key={m.machineId} value={m.machineId}>
+                        {m.machineId}
+                        {m.isSelf ? " (this machine)" : ""}
+                        {m.online ? "" : " - offline"}
+                      </option>
+                    ))}
+                    {/* A machine assigned before it dropped off the share still
+                        has to be visible, or the dropdown would silently show
+                        the wrong owner. */}
+                    {assigned && !assignedMachine && (
+                      <option value={assigned}>{assigned} - not seen recently</option>
+                    )}
+                  </select>
+                  {assignedOffline && (
+                    <div className="text-xs text-amber-600">
+                      Offline - this step will be skipped until it is back.
+                    </div>
+                  )}
+                  <div className="text-xs text-slate-500">{ROLE_HELP[role]}</div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            <div className="font-semibold text-slate-700">
+              On the share now ({automationMachines.filter((m) => m.online).length} online)
+            </div>
+            {automationMachines.length === 0 ? (
+              <div className="mt-1">
+                No machines have checked in yet. Each one announces itself a few seconds after it
+                starts.
+              </div>
+            ) : (
+              <ul className="mt-1 space-y-0.5">
+                {automationMachines.map((m) => (
+                  <li key={m.machineId} className="flex items-center gap-2">
+                    <span
+                      className={`inline-block h-2 w-2 rounded-full ${
+                        m.online ? "bg-emerald-500" : "bg-slate-300"
+                      }`}
+                    />
+                    <span className={m.isSelf ? "font-semibold text-slate-800" : ""}>
+                      {m.machineId}
+                      {m.isSelf ? " (this machine)" : ""}
+                    </span>
+                    {m.appVersion && <span className="text-slate-400">v{m.appVersion}</span>}
+                    {AUTOMATION_ROLES.filter((r) => automationRoles?.[r] === m.machineId).map((r) => (
+                      <span
+                        key={r}
+                        className="rounded-full border border-indigo-200 bg-indigo-50 px-2 text-[11px] text-indigo-700"
+                      >
+                        {r}
+                      </span>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="mt-2">
+              A machine only does work for others while its app is open. Nothing here grants access
+              to anything - it only says who runs which step.
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="space-y-4">
           <div>
             <h2 className="text-xl font-semibold text-slate-800">Automation</h2>
             <p className="text-sm text-slate-500">
@@ -1404,20 +1613,54 @@ export default function SettingsView() {
                 <input
                   type="checkbox"
                   checked={ghostMode}
-                  onChange={(e) => setGhostMode(e.target.checked)}
+                  disabled={ghostSaving}
+                  onChange={(e) => handleGhostModeToggle(e.target.checked)}
                   className="h-4 w-4 rounded border-slate-300"
                 />
                 <span>
                   Run the Order Management routine by itself, every 30 minutes between 8am and 5pm
                 </span>
               </label>
+              {ghostError ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                  {ghostError}
+                </div>
+              ) : ghostMode ? (
+                <div className="rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-700 space-y-1">
+                  <div className="font-semibold">
+                    On. Next cycle at {formatGhostTime(nextGhostCycleAt(ghostNow))}
+                    {ghostSaving ? " (saving...)" : ""}
+                  </div>
+                  <div>
+                    {!ghostSageMachine
+                      ? "No machine is running Sage purchase orders right now, so cycles will skip until one is given the Sage role above."
+                      : ghostSageMachine === ownMachineId
+                      ? "This machine is doing the Sage entry, so the cycle will run."
+                      : `${ghostSageMachine} is doing the Sage entry, so the cycle will run.`}
+                  </div>
+                  <div>
+                    Each step runs on the machine given that role above - fetching here, printing
+                    there - and this machine drives the sequence.
+                  </div>
+                  <div>
+                    Watch it work in Order Management - the Order Fetcher card shows the step it is
+                    on, what the last cycle did, and a "Run one now" button if you'd rather not
+                    wait for the next half hour. Leave this app open; nothing runs while it is
+                    closed.
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                  Off. Saved as soon as you tick it - no need to press Save.
+                </div>
+              )}
               <div className="text-xs text-slate-500">
                 Each cycle runs strictly in order: Get All (every vendor), check Gmail for World
                 and Transbec invoices, queue every order that now has an invoice and isn't in Sage
                 yet and send the queue, wait for Sage to actually finish entering it, and only
-                then print. BestBuy's invoice email arrives the next day, so it gets one Gmail
-                check a day from noon. Printing covers Transbec and BestBuy invoices that have
-                never been printed — never World.
+                then print. Tiger is pulled twice a day (8am and noon) and BestBuy's invoice email
+                arrives the next day, so that gets one Gmail check a day from noon. Printing covers
+                Transbec and BestBuy invoices that have never been printed — never World.
               </div>
               <div className="text-xs text-slate-500">
                 Only runs while ANOTHER machine has Sage purchase orders ("Run Sage") switched on
