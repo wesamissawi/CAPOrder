@@ -99,15 +99,23 @@ const MAX_ATTEMPTS = 5;
 const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1, keylen: 32 };
 
 const createCredentialSyncService = (deps) => {
+  // loadConfig/saveConfig, NOT readConfig/writeConfig + `userConfig`.
+  //
+  // config.json has two credential-shaped places in it and only one is live.
+  // The Settings screen saves through config:set -> saveConfig(), which merges
+  // into the TOP LEVEL of the file, and every scraper reads them back with
+  // loadConfig(). The nested `userConfig` block belongs to the older
+  // config:read/config:write pair and is empty on a real install. Reading the
+  // wrong one is silent — it yields {} and the UI just offers "Send 0
+  // setting(s)" — so keep this pinned to the same pair the scrapers use.
   const {
     fs,
     path,
     getSharedDataDir,
     getSharedDirInfo,
     getMachineId,
-    getUserConfigRaw,
-    readConfig,
-    writeConfig,
+    loadConfig,
+    saveConfig,
     writeJsonAtomic,
   } = deps;
 
@@ -227,7 +235,7 @@ const createCredentialSyncService = (deps) => {
   // Tiger should not push an empty TIGER_USER over a receiving machine's
   // working one.
   function collectSharedConfig() {
-    const cfg = getUserConfigRaw();
+    const cfg = loadConfig();
     const out = {};
     SHARED_CONFIG_KEYS.forEach((key) => {
       const value = cfg[key];
@@ -340,21 +348,17 @@ const createCredentialSyncService = (deps) => {
       return { ok: false, error: `Wrong code. ${MAX_ATTEMPTS - attempts} attempt(s) left.` };
     }
 
-    // Merge, don't replace: keys this grant doesn't carry keep their local
-    // values, INVOICE_PRINTER above all.
-    const imported = [];
+    // Merge, don't replace. saveConfig() folds a partial into the existing
+    // file, so anything this grant doesn't carry keeps its local value —
+    // INVOICE_PRINTER above all, but also windowBounds/dataFile/ordersFile,
+    // which share the top level with the credentials.
+    const imported = {};
     try {
-      const cfg = readConfig();
-      const userConfig = cfg.userConfig && typeof cfg.userConfig === 'object' && !Array.isArray(cfg.userConfig)
-        ? cfg.userConfig
-        : {};
       SHARED_CONFIG_KEYS.forEach((key) => {
         if (!(key in payload)) return;
-        userConfig[key] = payload[key];
-        imported.push(key);
+        imported[key] = payload[key];
       });
-      cfg.userConfig = userConfig;
-      writeConfig(cfg);
+      saveConfig(imported);
     } catch (e) {
       console.error('[cred-sync] import failed', e);
       return { ok: false, error: e?.message || 'Could not save the received credentials.' };
@@ -364,7 +368,8 @@ const createCredentialSyncService = (deps) => {
     // still around, and this machine's request is answered.
     removeFile(grantFile);
     removeFile(requestFileFor(machineId));
-    return { ok: true, imported, count: imported.length, from: grant.from || '' };
+    const importedKeys = Object.keys(imported);
+    return { ok: true, imported: importedKeys, count: importedKeys.length, from: grant.from || '' };
   }
 
   // ---- sending machine ---------------------------------------------------

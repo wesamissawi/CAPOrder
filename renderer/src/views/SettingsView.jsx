@@ -1109,15 +1109,14 @@ export default function SettingsView() {
                         Cancel
                       </button>
                     )}
+                    {/* Never disabled on a zero count: a click that does
+                        nothing is indistinguishable from a broken button, so
+                        let the send run and surface whatever it says. */}
                     <button
                       type="button"
                       onClick={() => handleSendCreds(req.machineId)}
-                      disabled={syncBusy === `send:${req.machineId}` || syncOutgoingCount === 0}
-                      title={
-                        syncOutgoingCount === 0
-                          ? "This machine has no saved credentials to send."
-                          : `Sends ${syncOutgoingCount} setting(s)`
-                      }
+                      disabled={syncBusy === `send:${req.machineId}`}
+                      title={`This machine has ${syncOutgoingCount} shareable setting(s) saved`}
                       className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 disabled:opacity-60"
                     >
                       {syncBusy === `send:${req.machineId}`

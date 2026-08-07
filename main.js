@@ -1818,9 +1818,10 @@ const credentialSync = createCredentialSyncService({
   getSharedDataDir,
   getSharedDirInfo,
   getMachineId,
-  getUserConfigRaw,
-  readConfig,
-  writeConfig,
+  // The same pair the Settings screen and every scraper use — credentials sit
+  // at the top level of config.json, not in the vestigial `userConfig` block.
+  loadConfig,
+  saveConfig,
   writeJsonAtomic,
 });
 
