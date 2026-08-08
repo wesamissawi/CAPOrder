@@ -47,11 +47,21 @@ export function computeExpectedTotal(lineItems, taxRate = DEFAULT_TAX_RATE) {
 // diff of roughly twice the invoice and trips every single time, and lowering a
 // negative quantity is meaningless so the correction modal can't clear it
 // either. Credits were always out of scope here; the problem is that `isCredit`
-// alone doesn't identify them, since only the Proforce scraper sets it. Shape is
+// alone doesn't identify them — a vendor only sets it when it KNOWS it fetched
+// a credit, and a return scraped off an ordinary order-history page (BestBuy
+// 9074651/9074653) looks like any other order except for its signs. Shape is
 // the reliable signal. Measured against the order archive this is 7 of the 15
 // orders that trip the check.
+//
+// This is also the app's definition of "credit" for the Order Management credit
+// filter, so it has a CommonJS twin — `orderLooksLikeCredit` in
+// src/scrapers/creditShape.js — used by the scrapers and the main process,
+// which can't import from here. Change one, change the other.
 export function looksLikeCredit(order) {
   if (order?.isCredit === true) return true;
+  // Header total, which a list-page scrape has before any detail fetch — so a
+  // credit is still recognized when its line items never came back.
+  if (toNumber(order?.total) < 0) return true;
   const lineItems = getOrderLineItemsForCalc(order);
   if (!lineItems.length) return false;
   if (lineItems.some((li) => toNumber(li?.quantity) < 0)) return true;

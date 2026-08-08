@@ -2,6 +2,7 @@
 // Utility to normalize orders/line items into a Sage-friendly shape across scrapers.
 
 const { resolveCapCode } = require("./capRules");
+const { orderLooksLikeCredit } = require("./creditShape");
 
 function cleanMoneyString(val) {
   if (val === null || val === undefined) return "";
@@ -47,6 +48,9 @@ function standardizeOrderForSage(order = {}) {
   const warehouse = (order.warehouse || order.seller || order.source || "").toString().trim();
   const sage_source = (order.sage_source || order.source || warehouse || "").toString().trim();
   const lastUpdatedAt = order.lastUpdatedAt || order.updatedAt || new Date().toISOString();
+  const sage_lineItems = Array.isArray(order.lineItems)
+    ? order.lineItems.map((li) => normalizeLineItem(li || {}, warehouse))
+    : [];
   return {
     ...order,
     warehouse: warehouse || order.warehouse || "",
@@ -55,9 +59,13 @@ function standardizeOrderForSage(order = {}) {
     sage_reference: reference,
     sage_source,
     lastUpdatedAt,
-    sage_lineItems: Array.isArray(order.lineItems)
-      ? order.lineItems.map((li) => normalizeLineItem(li || {}, warehouse))
-      : [],
+    // Every scraper routes through here, so this is where a credit/return gets
+    // classified for all of them at once — no vendor has to know it scraped a
+    // credit, only that the document's signs are negative (see creditShape.js).
+    // Only ever set to true: the Gmail credit pipelines flag orders whose own
+    // shape isn't negative, and this must not undo that.
+    ...(orderLooksLikeCredit({ ...order, sage_lineItems }) ? { isCredit: true } : {}),
+    sage_lineItems,
   };
 }
 

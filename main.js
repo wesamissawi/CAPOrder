@@ -61,6 +61,7 @@ const {
   getCloverStatus,
 } = require('./src/scrapers/cloverScraper');
 const { resolveCapCode } = require('./src/scrapers/capRules');
+const { orderLooksLikeCredit } = require('./src/scrapers/creditShape');
 
 const isDev = !app.isPackaged;
 
@@ -1373,8 +1374,9 @@ function itemCodeKey(v) {
   return String(v || '').trim().toUpperCase().replace(/\s+/g, ' ');
 }
 
-// Credit/return orders (order.isCredit === true, currently only Transbec
-// credit memos — see [[transbec-credit-memos]]) run through archiving
+// Credit/return orders (orderLooksLikeCredit — an explicit isCredit, or an
+// order whose own signs are negative, e.g. a BestBuy return scraped straight
+// off the order-history page — see [[transbec-credit-memos]]) run through archiving
 // differently from every other order: instead of adding their (negative)
 // line items as fresh NEW STOCK — which would be wrong, since a credit isn't
 // new inventory arriving — this "rakes out" stock that's ALREADY sitting in
@@ -1482,7 +1484,7 @@ function archiveCompletedOrders(options = {}) {
       const key = normalizeOrderRef(order);
       if (key && !archiveByKey.has(key)) {
         let processedOrder;
-        if (order.isCredit) {
+        if (orderLooksLikeCredit(order)) {
           // Performs its own read+write immediately (it can decrement/delete
           // existing Returns rows, not just add new ones) — see the function
           // comment for why this can't be batched with allNewOutstandingItems.
@@ -1659,7 +1661,7 @@ function archiveOrderByKey(refKeyRaw, source) {
     return { ok: false, error: 'Order does not meet archive criteria.' };
   }
 
-  if (found.isCredit) {
+  if (orderLooksLikeCredit(found)) {
     found = reconcileCreditReturnAgainstStock(found);
   } else {
     const { order: withOutstanding, newItems } = addOrderLineItemsToNewStock(found);

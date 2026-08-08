@@ -31,6 +31,7 @@ import {
   computeBubblePrintSignature,
 } from "./utils/inventory";
 import { computeDiscountedItemPrices, computeDocumentTotals } from "./utils/quote";
+import { looksLikeCredit } from "./utils/qtyDiscrepancy";
 import { isOrderSageLocked, orderKeyMatches } from "./utils/sageLock";
 import { applyInvoiceEnvironmentalFees } from "./utils/environmentalFee";
 import {
@@ -136,7 +137,7 @@ function matchesOrdersPickupFilter(order, value) {
   // Credit orders live entirely under their own "Credit" filter — regardless
   // of what state they're in (confirmed, picked up, invoiced, etc.) they must
   // never surface under any other filter, including "All".
-  if (value !== "credit" && order?.isCredit === true) return false;
+  if (value !== "credit" && looksLikeCredit(order)) return false;
   switch (value) {
     case "not-picked":
       return !order.pickedUp;
@@ -173,12 +174,15 @@ function matchesOrdersPickupFilter(order, value) {
       );
       return !printed;
     }
-    // Every credit invoice, any vendor — Transbec's standalone credit orders
-    // set isCredit at creation; BestBuy's credit patch (handleFetchBestbuyInvoices)
-    // sets it on the existing order it patches. A future vendor's credit
-    // pipeline just needs to set this same flag to show up in this filter.
+    // Every credit invoice, any vendor. Two ways in, both covered by
+    // looksLikeCredit: an explicit `isCredit` (Transbec's standalone credit
+    // orders set it at creation, BestBuy's credit patch in
+    // handleFetchBestbuyInvoices sets it on the order it patches, and every
+    // scraper now stamps it via sageStandardize), or the order's own negative
+    // shape — which is what catches a return scraped before any credit invoice
+    // for it exists, and what reclassifies orders scraped by older builds.
     case "credit":
-      return order.isCredit === true;
+      return looksLikeCredit(order);
     // Mirrors OrderManagementView's canArchiveOrder — everything required to
     // actually click "Archive Order" is already true.
     case "needs-archive":
@@ -911,7 +915,23 @@ export default function App() {
     const salesOrderMeta = {};
     const createdIds = [];
     const sharedLowerNames = new Set(entries.map((e) => norm(e.name || e.id)));
-    const itemsLowerNames = new Set((items || []).map((it) => norm(it.allocated_to)));
+    // itemsRef, NOT the `items` in scope. This function is reached from the
+    // onBubbleSharedUpdated subscription, which is registered once on mount —
+    // so the handler holds the FIRST render's copy of this function, closing
+    // over the first render's `items`: the empty array useState was seeded
+    // with. Read that way, `itemsLowerNames` is permanently empty and the
+    // "this bubble still has parts in it" test below can never pass.
+    //
+    // That is what resurrected a closed order. The moment the other machine's
+    // delete arrived, this side dropped the bubble from local state even though
+    // its own parts were still pointing at that name (the parts push is a
+    // separate channel and lands a beat later). The ensure-bubbles effect then
+    // saw a part naming a bubble that no longer existed, re-minted it, and
+    // PUBLISHED it back to the share — as a bare {name, notes:""} shell, with
+    // no createdAt and no flags. By the time the parts push landed and moved
+    // them out, the empty shell was already on the share and every machine kept
+    // it, because a name present in the shared set is kept by definition.
+    const itemsLowerNames = new Set((itemsRef.current || []).map((it) => norm(it.allocated_to)));
     let keptIds = new Set();
     dbg('applyShared:IN', {
       incomingEntryCount: entries.length,
@@ -5699,7 +5719,7 @@ export default function App() {
       // Credit orders are excluded even ahead of the dirty-edit bypass below —
       // an in-progress edit on a credit order still must not leak it into any
       // filter other than "Credit".
-      if (order?.isCredit === true) return ordersPickupFilter === "credit";
+      if (looksLikeCredit(order)) return ordersPickupFilter === "credit";
       if (order?._localDirty) return true;
       // Pinned view, so a just-clicked Picked Up / Arrived cannot drop the card
       // out of the filter the user is standing in.

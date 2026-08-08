@@ -198,9 +198,15 @@ async function downloadAttachment(gmail, messageId, attachmentId) {
 // `after`/`before` are optional Gmail-format date strings ("YYYY/MM/DD"); when
 // omitted (every existing caller) the search is unbounded, so this is fully
 // backward-compatible with the invoice pipelines that don't use a date range.
+// `sender` may be a single address or a comma-delimited list (e.g. a vendor
+// that mails from several branches) — Gmail's from: operator needs those
+// joined with OR inside the parens, a bare comma is not an OR to it.
 async function searchInvoiceEmails(gmail, { sender, subjectPattern, maxResults = 25, after, before }) {
   const parts = ["has:attachment"];
-  if (sender) parts.push(`from:(${sender})`);
+  if (sender) {
+    const senders = String(sender).split(",").map((s) => s.trim()).filter(Boolean);
+    if (senders.length) parts.push(`from:(${senders.join(" OR ")})`);
+  }
   if (subjectPattern) parts.push(`subject:(${subjectPattern})`);
   if (after) parts.push(`after:${after}`);
   if (before) parts.push(`before:${before}`);

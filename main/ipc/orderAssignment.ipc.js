@@ -19,6 +19,7 @@ const {
   resolveLedgerEntry,
   normalizeLedgerKeys,
 } = require('../domain/orderAssignment.domain');
+const { orderLooksLikeCredit } = require('../../src/scrapers/creditShape');
 
 const upper = (v) => String(v ?? '').trim().toUpperCase();
 
@@ -220,7 +221,7 @@ function registerOrderAssignmentIpc(ipcMain, deps) {
           .map((o) => ({ order: o, archived: true })),
       ].filter(
         ({ order }) =>
-          order && orderMatchesSearch(order, needle) && (includeCredits || order?.isCredit !== true)
+          order && orderMatchesSearch(order, needle) && (includeCredits || !orderLooksLikeCredit(order))
       );
 
       tagged.sort((a, b) => orderTimeMs(b.order) - orderTimeMs(a.order));

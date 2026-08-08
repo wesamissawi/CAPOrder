@@ -20,6 +20,7 @@
 // many links came from each tier plus any items that matched the order but no
 // line. That's the signal for whether this view can be trusted on old data.
 const { resolveCapCode } = require('../../src/scrapers/capRules');
+const { orderLooksLikeCredit } = require('../../src/scrapers/creditShape');
 const { normalizeOrderRef } = require('./orders.domain');
 
 // Bubbles that mean "not allocated yet". A part sitting here has arrived but
@@ -269,7 +270,10 @@ function buildOrderAssignment(order, itemsByRef, ledgerEntry, opts = {}) {
     // Older rows predate the stamp (~1%), hence the fallbacks.
     scrapedAt: order?.detailFetchedAt || order?.orderDate || order?.lastUpdatedAt || '',
     total: order?.total ?? null,
-    isCredit: order?.isCredit === true,
+    // Shape, not just the flag — orders scraped before every scraper stamped
+    // isCredit (and returns pulled off an ordinary order-history page) carry no
+    // flag at all. See src/scrapers/creditShape.js.
+    isCredit: orderLooksLikeCredit(order),
     enteredInSage: order?.enteredInSage === true,
     archived,
     archivedAt: order?.archivedAt || null,

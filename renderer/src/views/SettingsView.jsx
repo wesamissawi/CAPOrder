@@ -744,6 +744,12 @@ export default function SettingsView() {
                 Version: {appName || "App"} {appVersion} ({isPackaged ? "packaged" : "dev"})
               </p>
             )}
+            {credError && (
+              <p className="text-xs text-red-700 mt-1">{credError}</p>
+            )}
+            {credStatus && !credError && (
+              <p className="text-xs text-emerald-700 mt-1">{credStatus}</p>
+            )}
           </div>
           <div className="flex gap-2">
             <button
@@ -751,6 +757,15 @@ export default function SettingsView() {
               onClick={load}
             >
               Reload
+            </button>
+            <button
+              type="button"
+              onClick={handleSaveCreds}
+              disabled={credSaving}
+              className="px-4 py-2 rounded-full border border-slate-300 text-sm font-semibold text-slate-700 hover:bg-white disabled:opacity-60"
+              title="Saves vendor logins, invoice sender/subject fields, and Gmail settings below."
+            >
+              {credSaving ? "Saving..." : "Save Credentials"}
             </button>
             <button
               className="px-4 py-2 rounded-full bg-indigo-600 text-white text-sm font-semibold shadow hover:bg-indigo-700"
@@ -1054,11 +1069,12 @@ export default function SettingsView() {
               <label className="text-xs uppercase tracking-wide text-slate-500">CBK Sender (from:)</label>
               <input
                 type="text"
-                placeholder="branch_05@cbkauto.com"
+                placeholder="branch_05@cbkauto.com, branch_02@cbkauto.com"
                 value={cbkInvoiceSender}
                 onChange={(e) => setCbkInvoiceSender(e.target.value)}
                 className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
               />
+              <p className="text-xs text-slate-400">Comma-separate multiple addresses if CBK sends from more than one.</p>
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-xs uppercase tracking-wide text-slate-500">CBK Subject Contains</label>
