@@ -156,16 +156,37 @@ export function ghostSagePendingCount(orders, keys) {
 //    person can see that they are entering it deliberately); unattended, an
 //    order scraped minutes ago whose invoice has not arrived yet would be typed
 //    into Sage with a blank reference.
+//  - BestBuy is the exception to that rule: its invoices routinely land in
+//    Gmail a day behind the order (see GHOST_BESTBUY_HOUR), so waiting on
+//    source_invoice would strand every BestBuy order for a full cycle. It
+//    sends on its order reference instead (sageStandardize's fallback), the
+//    same "sent without the final invoice number" path the invoiceSageUpdate/
+//    invoiceNeedsSync machinery already exists to correct once the real
+//    invoice shows up.
 //  - credits are left alone. They carry their own sign conventions and are
 //    matched to a return requisition by hand in the Credits view first.
 //  - a quantity discrepancy still blocks, exactly as it does on the card: that
 //    gap is a question for a person, and the answer is usually to lower a
-//    quantity, not to send it.
+//    quantity, not to send it. But that check only has something to compare
+//    against once billed_total is known, and for World/Transbec that arrives
+//    from a separate Gmail step (fetch-invoices) that can land in a later
+//    cycle than source_invoice did — so those two additionally wait for
+//    billed_total itself before queueing, rather than being entered on the
+//    original scraped total and only shown to be short after the fact, when
+//    enteredInSage has already turned the discrepancy check off for good.
 export function ghostSageQueueTargets(orders, { taxRate, threshold } = {}) {
   return (orders || []).filter((order) => {
     if (!order || !ghostOrderKey(order)) return false;
     if (order.enteredInSage === true) return false;
-    if (!(order.source_invoice || "").toString().trim()) return false;
+    const source = (order.source || "").toString().trim().toLowerCase();
+    const isBestbuy = source === "bestbuy";
+    if (!isBestbuy && !(order.source_invoice || "").toString().trim()) return false;
+    if (source === "world" || source === "transbec") {
+      const billedRaw = order.billed_total ?? order.billedTotal;
+      const billedNum =
+        billedRaw === null || billedRaw === undefined || billedRaw === "" ? NaN : Number(billedRaw);
+      if (!Number.isFinite(billedNum)) return false;
+    }
     if (looksLikeCredit(order)) return false;
     // Already on its way, in either waiting room — queueing it again is a no-op
     // at best and a double entry at worst.
