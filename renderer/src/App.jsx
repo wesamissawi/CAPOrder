@@ -294,6 +294,45 @@ function splitPartCode(part) {
 // the site; capRules.json's warehouseAliases.World lists the same strings.
 const WORLD_WAREHOUSE = "World Automotive Warehouse";
 
+// Vendor order fetches used to print the scraper's whole statusLog: login
+// steps, page counts, per-order detail chatter, product aggregation. None of it
+// is read after the run — the only number that matters is how many orders came
+// back, so the status line is just that count under the warehouse they land in.
+// The full log still goes to the devtools console (logScanDetail) so a bad run
+// — a login step that stalled, a detail page that failed — is still traceable.
+const FETCH_WAREHOUSES = {
+  world: WORLD_WAREHOUSE,
+  cbk: "CBK",
+  tiger: "Tiger",
+  bestbuy: "BestBuy",
+  transbec: "Transbec",
+  proforce: "Proforce",
+};
+
+function logScanDetail(tag, res) {
+  if (Array.isArray(res?.statusLog) && res.statusLog.length) {
+    console.info(`[scan:${tag}]\n${res.statusLog.join("\n")}`);
+  }
+}
+
+function fetchStatusLine(vendor, res) {
+  logScanDetail(vendor, res);
+  const warehouse = FETCH_WAREHOUSES[vendor] || vendor;
+  const raw = Number(res?.detailFetched ?? res?.added);
+  const scraped = Number.isFinite(raw) ? raw : 0;
+  return `${warehouse} — ${scraped} order${scraped === 1 ? "" : "s"} scraped.`;
+}
+
+// Gmail invoice/credit scans get the same treatment: their statusLog narrates
+// the search, every skipped email and every parsed PDF, but the only thing
+// worth reading afterwards is how many documents came back.
+function gmailStatusLine(vendor, res, noun = "invoice") {
+  logScanDetail(`${vendor}-gmail`, res);
+  const warehouse = FETCH_WAREHOUSES[vendor] || vendor;
+  const n = Array.isArray(res?.discoveries) ? res.discoveries.length : 0;
+  return `${warehouse} — ${n} ${noun}${n === 1 ? "" : "s"} found.`;
+}
+
 const DELETE_DESTINATIONS = ["NEW STOCK", "SHELF", "CASH SALES", "RETURNS"];
 
 const ACCOUNTING_PATHS = {
@@ -422,6 +461,17 @@ export default function App() {
   const [ordersArchiveStatus, setOrdersArchiveStatus] = useState("");
   const [ordersArchiveError, setOrdersArchiveError] = useState("");
   const [archiveCleanupDays, setArchiveCleanupDays] = useState(2);
+  // Order Management's "recently archived" log — most recent first, refreshed
+  // whenever an archive action here completes (single, bulk, or Needs Archive).
+  const [recentArchivedOrders, setRecentArchivedOrders] = useState([]);
+  async function loadRecentArchivedOrders() {
+    try {
+      const res = await api?.getRecentArchivedOrders?.(10);
+      if (res?.ok) setRecentArchivedOrders(Array.isArray(res.orders) ? res.orders : []);
+    } catch (e) {
+      console.error("[orders-archive] failed to load recent archive log", e);
+    }
+  }
   // Purchase-order processing is coordinated across machines via a shared lock
   // (only one machine at a time). Invoice processing runs locally and is unlocked.
   const [sagePoEnabled, setSagePoEnabled] = useState(false);
@@ -532,6 +582,18 @@ export default function App() {
   const [transbecCreditError, setTransbecCreditError] = useState("");
   const [transbecCreditLog, setTransbecCreditLog] = useState([]);
   const [transbecCredits, setTransbecCredits] = useState([]);
+  const [transbecCreditMatch, setTransbecCreditMatch] = useState(null); // the order being matched
+  const [transbecCreditMatchSlipId, setTransbecCreditMatchSlipId] = useState("");
+  const [transbecCreditMatchSaving, setTransbecCreditMatchSaving] = useState(false);
+  const [transbecCreditMatchError, setTransbecCreditMatchError] = useState("");
+  const [worldCreditScanning, setWorldCreditScanning] = useState(false);
+  const [worldCreditError, setWorldCreditError] = useState("");
+  const [worldCreditLog, setWorldCreditLog] = useState([]);
+  const [worldCredits, setWorldCredits] = useState([]);
+  const [worldCreditMatch, setWorldCreditMatch] = useState(null); // the order being matched
+  const [worldCreditMatchSlipId, setWorldCreditMatchSlipId] = useState("");
+  const [worldCreditMatchSaving, setWorldCreditMatchSaving] = useState(false);
+  const [worldCreditMatchError, setWorldCreditMatchError] = useState("");
   const [transbecFetching, setTransbecFetching] = useState(false);
   const [transbecStatus, setTransbecStatus] = useState("");
   const [transbecError, setTransbecError] = useState("");
@@ -552,6 +614,11 @@ export default function App() {
   const [proforceCreditMatchSlipId, setProforceCreditMatchSlipId] = useState("");
   const [proforceCreditMatchSaving, setProforceCreditMatchSaving] = useState(false);
   const [proforceCreditMatchError, setProforceCreditMatchError] = useState("");
+  // Resolved CAP codes for the credit currently being matched, parallel to its
+  // lineItems. Only one match modal can be open at a time, so both share this.
+  // Empty until rules:resolve-lines answers (and for any line the rules can't
+  // resolve) — creditLinePartKeys falls back to the raw pair for those.
+  const [creditMatchCapCodes, setCreditMatchCapCodes] = useState([]);
   const [invoicePrintingRef, setInvoicePrintingRef] = useState("");
   const [printAllRunning, setPrintAllRunning] = useState(false);
   const [archiveAllRunning, setArchiveAllRunning] = useState(false);
@@ -3200,7 +3267,77 @@ export default function App() {
       updateOrderByKey(referenceKey, { [field]: checked });
     }
   }
-  function handleMarkComplete(referenceKey) {
+  // Clear the post-Sage value check. The alert means "Sage's total disagreed
+  // with the bill at the last run" — which stops being true the moment someone
+  // corrects Sage by hand, and nothing reports that back, so this is a normal
+  // ending rather than an override. What Sage last reported is deliberately
+  // NOT overwritten: sage_total_synced is a record of what came back from a
+  // run, and asserting a new value here would fabricate one. Stamped so the
+  // archive can still show the gap was waived and by whom.
+  function handleClearValueCheck(referenceKey) {
+    updateOrderByKey(referenceKey, (order) => {
+      const billed = Number(order?.billed_total ?? order?.billedTotal);
+      const sage = Number(order?.sage_total_synced ?? order?.sageTotalSynced);
+      return {
+        valueCheckAlert: false,
+        valueCheckClearedAt: new Date().toISOString(),
+        valueCheckClearedBy: ownMachineId || "",
+        valueCheckClearedDiff:
+          Number.isFinite(billed) && Number.isFinite(sage)
+            ? Number(Math.abs(billed - sage).toFixed(2))
+            : null,
+      };
+    });
+  }
+
+  // Mark Complete ticks every readiness flag at once, and is the escape hatch
+  // for "Sage and the bill disagree and I don't want to reconcile it".
+  //
+  // The gate that actually blocks archiving here is `valueCheckAlert`, NOT
+  // totalVerified: the Sage run sets it when |billed_total - sage_total_synced|
+  // exceeds 0.1 (main/domain/sage.domain.js), and canArchiveOrder refuses while
+  // it stands. totalVerified was never the obstacle — Mark Complete already
+  // forced it true. So clearing the alert is what "let me archive it anyway"
+  // means, and because that discards a real money check, it is confirmed first.
+  //
+  // Only this one check is waived. invoiceNeedsSync is left alone, so an order
+  // with an unsynced invoice number still can't be waved through.
+  async function handleMarkComplete(referenceKey) {
+    const normalizedKey = String(referenceKey || "").trim().toUpperCase();
+    const order = (orders || []).find((o) => {
+      if (!o) return false;
+      const cand = (o.sage_reference || o.reference || o.__row || "").toString().trim().toUpperCase();
+      return cand && cand === normalizedKey;
+    });
+
+    const billedNum = Number(order?.billed_total ?? order?.billedTotal);
+    const sageNum = Number(order?.sage_total_synced ?? order?.sageTotalSynced);
+    const bothKnown = Number.isFinite(billedNum) && Number.isFinite(sageNum);
+    // Prompt on the standing alert, or on a gap the Sage run hasn't judged yet.
+    const needsConfirm =
+      order?.valueCheckAlert === true || (bothKnown && Math.abs(billedNum - sageNum) > 0.009);
+
+    if (needsConfirm) {
+      const money = (n) => `$${n.toFixed(2)}`;
+      const figures = bothKnown
+        ? `Last synced from Sage: ${money(sageNum)}\nBill: ${money(billedNum)}\n` +
+          `Difference: ${money(Math.abs(billedNum - sageNum))}\n\n`
+        : "";
+      // The figures above are what Sage reported at its LAST run, which is
+      // routinely out of date here — the usual reason for saying yes is that
+      // Sage has since been corrected by hand, and nothing tells the app that.
+      const detail =
+        figures +
+        `Say OK if Sage is correct now — including when you have already fixed it by hand. ` +
+        `That clears the value-check alert and lets this order be archived.\n\n` +
+        `The figure above is only what Sage reported at its last run; it is left as-is ` +
+        `until the next sync.`;
+      const ok = api?.confirm
+        ? await api.confirm("Please confirm the sage value matches what's on the bill.", detail)
+        : window.confirm(`Please confirm the sage value matches what's on the bill.\n\n${detail}`);
+      if (!ok) return;
+    }
+
     updateOrderByKey(referenceKey, (order) => {
       const hasInvoice = Boolean((order?.source_invoice || "").toString().trim());
       return {
@@ -3209,6 +3346,8 @@ export default function App() {
         totalVerified: true,
         enteredInSage: true,
         inStore: true,
+        // Confirmed above — this is the flag that was blocking the archive.
+        valueCheckAlert: false,
         source_invoice: hasInvoice ? order.source_invoice : "manual",
         status: "complete",
       };
@@ -3419,6 +3558,7 @@ export default function App() {
       if (!res?.ok) throw new Error(res?.error || "Failed to archive completed orders.");
       setOrdersArchiveStatus(`Archived ${res.archived || 0} order(s).`);
       await loadOrders();
+      await loadRecentArchivedOrders();
     } catch (e) {
       setOrdersArchiveError(e?.message || "Failed to archive completed orders.");
     } finally {
@@ -3433,25 +3573,19 @@ export default function App() {
       const res = await api.archiveOrder(refKey, source);
       if (!res?.ok) throw new Error(res?.error || "Failed to archive order.");
       await loadOrders();
+      await loadRecentArchivedOrders();
     } catch (e) {
       setOrdersError(e?.message || "Failed to archive order.");
     }
   }
 
-  // The individual "Archive Order" button's confirmation — same journal-entry
-  // reminder popup as "Archive All" (below) gives each order, just for the
-  // one order being archived. Cancel aborts, nothing is archived.
+  // The individual "Archive Order" button — archives straight away, no
+  // confirmation popup. "Archive All" (below) still confirms per order since
+  // that's a bulk action archiving several orders at once unattended.
   async function handleArchiveOrderWithConfirm(order) {
     if (!order) return;
     const refKey = order.reference || order.__row;
     if (!refKey) return;
-    const proceed = api?.confirm
-      ? await api.confirm(
-          `Record the journal entry before archiving order ${order.reference || refKey}.`,
-          `Journal Entry: ${order.journalEntry || "(none recorded)"}`
-        )
-      : true;
-    if (!proceed) return;
     await handleArchiveOrder(refKey, order.source);
   }
 
@@ -3525,11 +3659,7 @@ export default function App() {
       setOrdersDirty(false);
       setOrdersInitialized(true);
       if (res.path) setOrdersSourcePath(res.path);
-      const baseMsg = `Fetched ${res.count ?? list.length} orders and saved to ${res.path || "orders.json"}.`;
-      const logMsg = Array.isArray(res.statusLog) && res.statusLog.length
-        ? `\n${res.statusLog.join("\n")}`
-        : "";
-      setWorldOrdersStatus(baseMsg + logMsg);
+      setWorldOrdersStatus(fetchStatusLine("world", res));
     } catch (e) {
       console.error("[orders] world fetch error", e);
       setWorldOrdersError(e?.message || "Failed to fetch World orders.");
@@ -3556,10 +3686,7 @@ export default function App() {
       setOrdersDirty(false);
       setOrdersInitialized(true);
       if (res.path) setOrdersSourcePath(res.path);
-      const baseMsg = `Fetched ${list.length} CBK order(s) and saved to ${res.path || "orders.json"}.`;
-      const logMsg =
-        Array.isArray(res.statusLog) && res.statusLog.length ? `\n${res.statusLog.join("\n")}` : "";
-      setCbkOrdersStatus(baseMsg + logMsg);
+      setCbkOrdersStatus(fetchStatusLine("cbk", res));
     } catch (e) {
       console.error("[orders] cbk fetch error", e);
       setCbkOrdersError(e?.message || "Failed to fetch CBK orders.");
@@ -3586,10 +3713,7 @@ export default function App() {
       setOrdersDirty(false);
       setOrdersInitialized(true);
       if (res.path) setOrdersSourcePath(res.path);
-      const baseMsg = `Fetched ${list.length} Tiger order(s) and saved to ${res.path || "orders.json"}.`;
-      const logMsg =
-        Array.isArray(res.statusLog) && res.statusLog.length ? `\n${res.statusLog.join("\n")}` : "";
-      setTigerOrdersStatus(baseMsg + logMsg);
+      setTigerOrdersStatus(fetchStatusLine("tiger", res));
     } catch (e) {
       console.error("[orders] tiger fetch error", e);
       setTigerOrdersError(e?.message || "Failed to fetch Tiger orders.");
@@ -3616,10 +3740,7 @@ export default function App() {
       setOrdersDirty(false);
       setOrdersInitialized(true);
       if (res.path) setOrdersSourcePath(res.path);
-      const baseMsg = `Fetched ${list.length} BestBuy order(s) and saved to ${res.path || "orders.json"}.`;
-      const logMsg =
-        Array.isArray(res.statusLog) && res.statusLog.length ? `\n${res.statusLog.join("\n")}` : "";
-      setBestBuyOrdersStatus(baseMsg + logMsg);
+      setBestBuyOrdersStatus(fetchStatusLine("bestbuy", res));
     } catch (e) {
       console.error("[orders] bestbuy fetch error", e);
       setBestBuyOrdersError(e?.message || "Failed to fetch BestBuy orders.");
@@ -3646,10 +3767,7 @@ export default function App() {
       setOrdersDirty(false);
       setOrdersInitialized(true);
       if (res.path) setOrdersSourcePath(res.path);
-      const baseMsg = `Fetched ${list.length} Transbec order(s) and saved to ${res.path || "orders.json"}.`;
-      const logMsg =
-        Array.isArray(res.statusLog) && res.statusLog.length ? `\n${res.statusLog.join("\n")}` : "";
-      setTransbecOrdersStatus(baseMsg + logMsg);
+      setTransbecOrdersStatus(fetchStatusLine("transbec", res));
     } catch (e) {
       console.error("[orders] transbec fetch error", e);
       setTransbecOrdersError(e?.message || "Failed to fetch Transbec orders.");
@@ -3674,10 +3792,7 @@ export default function App() {
       setOrdersDirty(false);
       setOrdersInitialized(true);
       if (res.path) setOrdersSourcePath(res.path);
-      const baseMsg = `Fetched ${list.length} Proforce order(s) and saved to ${res.path || "orders.json"}.`;
-      const logMsg =
-        Array.isArray(res.statusLog) && res.statusLog.length ? `\n${res.statusLog.join("\n")}` : "";
-      setProforceStatus(baseMsg + logMsg);
+      setProforceStatus(fetchStatusLine("proforce", res));
     } catch (e) {
       console.error("[orders] proforce fetch error", e);
       setProforceError(e?.message || "Failed to fetch Proforce orders.");
@@ -3783,6 +3898,105 @@ export default function App() {
   // the stock reconciliation uses (uppercase, single-spaced) so "matched" here
   // means the same thing it will mean when the credit is archived.
   const normalizePartKey = (v) => String(v || "").trim().toUpperCase().replace(/\s+/g, " ");
+  // Date fields for a credit order, from whatever the memo printed.
+  //
+  // A credit MUST be posted in Sage under the date it was issued, not the day
+  // it happened to be entered. enterSagePurchases.ahk reads sageDate first (it
+  // is already ddmmyy and needs no parsing), then `date`, then orderDate — and
+  // when all three are missing it falls back to A_DD/A_MM/A_YYYY, i.e. today.
+  // Credit orders are built by hand here and carried no date at all, which is
+  // how Transbec 01HW9352 (Jul 15) / 01IA3146 (Jul 31) and World 02KQ8236
+  // (Aug 10) all posted on Aug 11. BestBuy was never affected because its
+  // credits patch an order that already came from the order scrape with dates.
+  //
+  // Accepts ISO "YYYY-MM-DD" (Transbec's parser) or "MM/DD/YY" (World's
+  // "Credit Memo DATE" column, as printed). Returns {} when nothing parses, so
+  // a credit with an unreadable date is left dateless rather than being given
+  // a wrong one — the AHK's today-fallback is bad, but a silently invented
+  // date is worse.
+  function creditOrderDateFields(raw) {
+    const s = String(raw || "").trim();
+    if (!s) return {};
+    let y;
+    let m;
+    let d;
+    const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    const us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (iso) {
+      y = Number(iso[1]);
+      m = Number(iso[2]);
+      d = Number(iso[3]);
+    } else if (us) {
+      m = Number(us[1]);
+      d = Number(us[2]);
+      y = Number(us[3]);
+      if (y < 100) y += 2000;
+      // Only reading that is possible if the first field is > 12.
+      if (m > 12 && d <= 12) {
+        const swap = m;
+        m = d;
+        d = swap;
+      }
+    } else {
+      return {};
+    }
+    if (!(y > 1990 && m >= 1 && m <= 12 && d >= 1 && d <= 31)) return {};
+    const p2 = (n) => String(n).padStart(2, "0");
+    return {
+      // Noon UTC, not midnight: a midnight timestamp renders as the previous
+      // day in any negative-offset timezone, which is exactly where this runs.
+      orderDate: new Date(Date.UTC(y, m - 1, d, 12, 0, 0)).toISOString(),
+      orderDateRaw: `${p2(m)}/${p2(d)}/${y}`,
+      // ddmmyy — the form the AHK types straight into Sage.
+      sageDate: `${p2(d)}${p2(m)}${String(y).slice(-2)}`,
+    };
+  }
+
+  // The codes a credit line may be sitting under in the RETURNS bubble, best
+  // first — the renderer twin of creditLineCodeKeys in main.js, and it must stay
+  // in step with it so a badge here means what archiving will actually do.
+  //
+  // A credit's lineItems are RAW off the vendor's PDF ("WAG" + "ZD1852"), but a
+  // Returns item holds the code the CAP rules RESOLVED it to, which for plenty
+  // of families is not the raw pair at all: World drops the line code for WAG
+  // QC/ZD/MX/PD/SX ("WAG ZD1852" is stocked as "ZD1852"), rewrites LUA -> LUC
+  // and BSH wipers -> BOS, and strips dashes for TRK/SPE. Comparing either raw
+  // form alone therefore matches one half of a credit and misses the other.
+  // Resolution only exists in the main process, so resolvedCode arrives from
+  // rules:resolve-lines; the raw pair stays as the fallback for items stocked
+  // before the rules existed. See [[cap-code-single-source-resolve]].
+  const creditLinePartKeys = (line, resolvedCode) => {
+    const keys = [];
+    const resolved = normalizePartKey(resolvedCode);
+    if (resolved) keys.push(resolved);
+    const raw = normalizePartKey(`${line?.partLineCode || ""} ${line?.partNumber || ""}`);
+    if (raw && raw !== resolved) keys.push(raw);
+    return keys;
+  };
+
+  // Ask the main process for the resolved codes of a credit's lines. Best-effort:
+  // on failure the modals just fall back to the raw pair, which is what they did
+  // before this existed.
+  async function loadCreditMatchCapCodes(order) {
+    const lines = Array.isArray(order?.lineItems) ? order.lineItems : [];
+    setCreditMatchCapCodes([]);
+    if (!lines.length || !api?.resolveCapLines) return;
+    try {
+      const res = await api.resolveCapLines({
+        warehouse: order?.warehouse || order?.seller || order?.source || "",
+        lines: lines.map((l) => ({
+          partLineCode: l?.partLineCode || "",
+          partNumber: l?.partNumber || "",
+          // capRules branches on the description for NGK (oxygen -> NTK),
+          // BSH (wipers -> BOS) and EUR (shoes), so it must go along.
+          partDescription: l?.partDescription || l?.description || "",
+        })),
+      });
+      if (res?.ok && Array.isArray(res.codes)) setCreditMatchCapCodes(res.codes);
+    } catch (e) {
+      console.error("[vendor] failed to resolve CAP codes for credit match", e);
+    }
+  }
 
   // Requisitions that are waiting on a credit — the only ones a credit can be
   // matched to, per the Returns Management model.
@@ -3822,8 +4036,14 @@ export default function App() {
       setTransbecCreditScanning(true);
       setTransbecCreditError("");
       const res = await api.fetchTransbecCreditInvoices({ fromDate, toDate });
-      setTransbecCreditLog(Array.isArray(res?.statusLog) ? res.statusLog : []);
-      if (!res?.ok) throw new Error(res?.error || "Failed to check for Transbec credits.");
+      // Also puts the scan's full statusLog on the console; a failure shows the
+      // error on its own rather than a misleading "0 found".
+      const line = gmailStatusLine("transbec", res, "credit memo");
+      if (!res?.ok) {
+        setTransbecCreditLog([]);
+        throw new Error(res?.error || "Failed to check for Transbec credits.");
+      }
+      setTransbecCreditLog([line]);
       setTransbecCredits(Array.isArray(res.discoveries) ? res.discoveries : []);
     } catch (e) {
       console.error("[vendor] fetch transbec credits failed", e);
@@ -3862,7 +4082,14 @@ export default function App() {
           isCredit: true,
           reference: refValue,
           __row: refValue,
-          warehouse: "Transbec Credit",
+          // The REAL warehouse, not a "Transbec Credit" label. capRules matches
+          // warehouse names exactly (ci() is equality, not substring), so a
+          // decorated name resolves nothing and every rewritten Transbec code
+          // (TRB BCD1210 -> BCD 1210, the trsToCAP interchange, TK -> UC K...)
+          // silently falls through to the raw "<line> <part>" — which then fails
+          // to match the RETURNS stock those parts are actually filed under.
+          // See [[cap-rules-warehouse-key-mismatch]] for the identical World bug.
+          warehouse: "Transbec",
           // Same Sage source code regular (scraped) Transbec orders use
           // (transbecScraper.js) — credit orders are built manually here, so
           // they'd otherwise go into Sage with no source code at all.
@@ -3880,9 +4107,12 @@ export default function App() {
           // e.g. archiving this order feeds them through the same
           // addOrderLineItemsToNewStock path as a normal order (negative
           // quantities net the returned units out of New Stock).
-          lineItems: Array.isArray(credit.lineItems) ? credit.lineItems : [],
+          lineItems: toTransbecCreditLineItems(credit.lineItems),
           ...(credit.poNumber ? { transbecCreditPoNumber: credit.poNumber } : {}),
           ...(credit.customerNumber ? { transbecCreditCustomerNumber: credit.customerNumber } : {}),
+          // Post under the credit memo's own date, not today. Transbec's parser
+          // returns ISO "YYYY-MM-DD".
+          ...creditOrderDateFields(credit.creditDate),
           lastUpdatedAt: new Date().toISOString(),
         };
         const nextList = normalizeOrdersForSave(base.concat(newOrder));
@@ -3918,6 +4148,25 @@ export default function App() {
       prev.map((c) => (norm(c.creditMemoNumber) === memoKey ? { ...c, known: false, created: false } : c))
     );
     return { ok: true };
+  }
+
+  // The credit memo prints every money value negative, so the parser reads
+  // costPrice negative too. A PRICE in Sage is never negative — only the
+  // quantity carries the sign — and it matters more here than it looks: a
+  // hand-built credit order has no sage_lineItems, so enterSagePurchases.ahk
+  // reads THESE items directly, types costPrice as the purchase price, and runs
+  // it through its price ladder to set the selling/preferred price on the item
+  // record. A negative cost writes negative prices onto the part itself, which
+  // outlives the credit. quantity and extended stay negative as printed:
+  // quantity x |cost| still gives the negative extension Sage needs.
+  // Same convention as toWorldCreditOrderLines.
+  function toTransbecCreditLineItems(rawLineItems) {
+    return (Array.isArray(rawLineItems) ? rawLineItems : []).map((li) => {
+      const costNum = Number(li?.costPriceValue ?? li?.costPrice);
+      if (!Number.isFinite(costNum)) return li;
+      const costAbs = Math.abs(costNum);
+      return { ...li, costPrice: costAbs, costPriceValue: costAbs };
+    });
   }
 
   // DEV-ONLY: wipe every cached Transbec credit scan result and downloaded PDF
@@ -3958,6 +4207,354 @@ export default function App() {
     } catch (e) {
       console.error("[vendor] failed to open transbec credit file", e);
       setTransbecCreditError(e?.message || "Failed to open credit memo file.");
+    }
+  }
+
+  // World credit memos (World Automotive Warehouse, from Gmail) — same shape
+  // as the Transbec credit pipeline above: no pre-existing order, purely a
+  // discovery list, turned into an order via a per-row "Create order" button.
+  async function handleLoadWorldCredits() {
+    if (!api?.getWorldCredits) return;
+    try {
+      setWorldCreditError("");
+      const res = await api.getWorldCredits();
+      if (!res?.ok) throw new Error(res?.error || "Failed to load World credits.");
+      setWorldCredits(Array.isArray(res.credits) ? res.credits : []);
+    } catch (e) {
+      console.error("[vendor] load world credits failed", e);
+      setWorldCreditError(e?.message || "Failed to load World credits.");
+    }
+  }
+
+  async function handleFetchWorldCredits(fromDate, toDate) {
+    if (!api?.fetchWorldCreditInvoices) return;
+    try {
+      setWorldCreditScanning(true);
+      setWorldCreditError("");
+      const res = await api.fetchWorldCreditInvoices({ fromDate, toDate });
+      const line = gmailStatusLine("world", res, "credit memo");
+      if (!res?.ok) {
+        setWorldCreditLog([]);
+        throw new Error(res?.error || "Failed to check for World credits.");
+      }
+      setWorldCreditLog([line]);
+      setWorldCredits(Array.isArray(res.discoveries) ? res.discoveries : []);
+    } catch (e) {
+      console.error("[vendor] fetch world credits failed", e);
+      setWorldCreditError(e?.message || "Failed to check for World credits.");
+    } finally {
+      setWorldCreditScanning(false);
+    }
+  }
+
+  // Turn a discovered World credit memo into a new order in Order Management
+  // — there is no existing order to patch (a credit is a return against a
+  // past sale, not a new purchase). Sign convention (see [[epicor-credit-scan]]
+  // memory, "World credits, when that pipeline eventually gets built, must do
+  // the same"): quantity stays negative as printed, costPrice is forced
+  // POSITIVE — enterSagePurchases.ahk derives the selling price straight off
+  // costPrice via its price ladder, and a negative cost would write negative
+  // selling/preferred prices onto the Sage item record. extended and
+  // billed_total stay negative so the reconcile/value-check math (which
+  // compares magnitudes) and the AHK's purchase-line entry (negative qty x
+  // positive unit cost = negative extension) both work out.
+  // Returns BOTH arrays the rest of the app expects, because the environmental
+  // handling charge has to be carried in two different shapes — the same split
+  // renderer/src/utils/environmentalFee.js documents for the typed path:
+  //
+  //   lineItems[i]      — the PART's own figures, fee recorded as metadata only.
+  //   sage_lineItems[i] — fee-INCLUSIVE figures, because enterSagePurchases.ahk
+  //                       types costPrice and extended into Sage verbatim and
+  //                       knows nothing about EHC.
+  //
+  // A credit built only `lineItems`, so the AHK's `sage_lineItems || lineItems`
+  // fallback handed Sage the fee-EXCLUSIVE cost and the charge was silently
+  // dropped (e.g. GKI TF1146 on credit 02KQ8236, EHC 0.60 — parsed correctly,
+  // never entered). The fee must NOT be folded into lineItems instead: Order
+  // Management's "+ev" editor recomputes from those base figures, so a
+  // fee-inclusive lineItem would let the charge be added a second time.
+  //
+  // Signs: the memo prints the EHC negative on a credit, and the extended column
+  // EXCLUDES it (TOTAL MDSE + TOTAL EHC are separate sums that the parser audits
+  // independently), so the fee genuinely has to be added on here. ehcExtended is
+  // used as printed rather than recomputed as ehcUnit x quantity — quantity is
+  // negative on a credit, so multiplying would flip the fee positive.
+  function toWorldCreditOrderLines(rawLineItems) {
+    // 30.13 + 0.6 lands on 30.729999999999997 in binary floating point and the
+    // AHK types whatever it is given, so round computed money back to cents.
+    const cents = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+    const lineItems = [];
+    const sage_lineItems = [];
+
+    for (const li of Array.isArray(rawLineItems) ? rawLineItems : []) {
+      const costAbs = Math.abs(Number(li.costPrice) || 0);
+      const extendedVal = Number(li.extended) || 0;
+      const ehcUnit = Number(li.ehcUnit) || 0;
+      const ehcExtended = Number(li.ehcExtended) || 0;
+      const hasFee = ehcExtended !== 0 || ehcUnit !== 0;
+      // Per-unit, positive — this is what the "+ev" editor shows and what
+      // applyEnvironmentalFee treats a fee as.
+      const feePerUnit = hasFee ? Math.abs(ehcUnit) : 0;
+
+      const shared = {
+        partLineCode: li.partLineCode || "",
+        partNumber: li.partNumber || "",
+        partDescription: li.description || "",
+        unit: li.unit || "",
+        quantity: li.quantity,
+        core: Boolean(li.core),
+        ehcUnit,
+        ehcExtended,
+        hasEnvironmentalFee: hasFee,
+        environmentalFeeAmount: hasFee ? feePerUnit.toFixed(2) : "",
+        originalInvoice: li.originalInvoice || "",
+        addedToOutstanding: false,
+      };
+
+      lineItems.push({
+        ...shared,
+        costPrice: costAbs,
+        costPriceValue: costAbs,
+        extended: extendedVal,
+        extendedValue: extendedVal,
+      });
+
+      // Cost is positive (the price ladder reads it); the fee raises it. Extended
+      // is negative and the fee — also negative — makes it more so.
+      const sageCost = cents(costAbs + feePerUnit);
+      const sageExtended = cents(extendedVal + ehcExtended);
+      sage_lineItems.push({
+        ...shared,
+        costPrice: sageCost,
+        costPriceValue: sageCost,
+        extended: sageExtended,
+        extendedValue: sageExtended,
+      });
+    }
+
+    return { lineItems, sage_lineItems };
+  }
+
+  async function handleCreateOrderFromWorldCredit(credit) {
+    if (!credit || !api?.writeOrders) return { ok: false, error: "Saving orders is not available." };
+    const memoNum = String(credit.creditMemoNumber || "").trim();
+    if (!memoNum) return { ok: false, error: "This credit memo has no number to key an order by." };
+    try {
+      const ordersRes = await api?.readOrders?.();
+      const currentList = ordersRes?.state || ordersRes || [];
+      const base = Array.isArray(currentList) ? currentList : [];
+
+      const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+      const memoKey = norm(memoNum);
+      const already = base.some(
+        (o) => o && (norm(o.source_invoice) === memoKey || norm(o.invoiceNum) === memoKey)
+      );
+
+      if (!already) {
+        const totalNum = Number(credit.total);
+        const refValue = credit.reference ? String(credit.reference).trim() : memoNum;
+        const newOrder = {
+          source: "world",
+          isCredit: true,
+          reference: refValue,
+          __row: refValue,
+          // Must match the real scraped value so capRules/the AHK's inline
+          // rule fallback resolve the World-specific codes (NGK->NTK, TRK
+          // dash-strip, etc.) — see [[cap-code-single-source-resolve]].
+          warehouse: "World Automotive Warehouse",
+          // Same Sage source code regular (scraped) World orders use
+          // (worldScraper.js) — credit orders are built manually here, so
+          // they'd otherwise go into Sage with no source code at all.
+          sage_source: "WOR505",
+          source_invoice: memoNum,
+          sage_reference: memoNum,
+          hasInvoiceNum: true,
+          // Credit orders have no separate detail-fetch step, same as
+          // Transbec/CBK/BestBuy Gmail orders — the credit total IS the detail.
+          detailStored: true,
+          ...(Number.isFinite(totalNum) ? { billed_total: -Math.abs(totalNum) } : {}),
+          ...(credit.fileName ? { worldCreditFile: credit.fileName } : {}),
+          ...(credit.packingSlip ? { worldCreditPackingSlip: credit.packingSlip } : {}),
+          // Post under the credit memo's own date, not today. World's parser
+          // reads this off the "Credit Memo DATE" column as "MM/DD/YY".
+          ...creditOrderDateFields(credit.creditDate),
+          // Both halves: the AHK reads sage_lineItems (fee-inclusive), the rest
+          // of the app reads lineItems. See toWorldCreditOrderLines.
+          ...toWorldCreditOrderLines(credit.lineItems),
+          lastUpdatedAt: new Date().toISOString(),
+        };
+        const nextList = normalizeOrdersForSave(base.concat(newOrder));
+        const saveRes = await api.writeOrders(nextList);
+        if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the new order.");
+        if (ordersInitialized) {
+          adoptSavedOrders(nextList);
+          setOrdersDirty(false);
+        }
+      }
+
+      setWorldCredits((prev) =>
+        prev.map((c) => (norm(c.creditMemoNumber) === memoKey ? { ...c, known: true, created: true } : c))
+      );
+      return { ok: true, duplicate: already };
+    } catch (e) {
+      console.error("[vendor] create order from world credit failed", e);
+      return { ok: false, error: e?.message || "Failed to create order." };
+    }
+  }
+
+  // Remove the order created from a World credit memo, flipping the row back
+  // to "not created" so it can be re-created if needed.
+  async function handleRemoveWorldCreditOrder(credit) {
+    const memoNum = String(credit?.creditMemoNumber || "").trim();
+    if (!memoNum) return { ok: false, error: "This credit memo has no number." };
+    const res = await handleDeleteOrder(memoNum, "world");
+    if (!res.ok) return res;
+    const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+    const memoKey = norm(memoNum);
+    setWorldCredits((prev) =>
+      prev.map((c) => (norm(c.creditMemoNumber) === memoKey ? { ...c, known: false, created: false } : c))
+    );
+    return { ok: true };
+  }
+
+  // Credit memo PDFs share the gmail data dir with regular World invoices, so
+  // viewing reuses that same IPC handler by file name.
+  async function handleViewWorldCreditImage(fileName) {
+    if (!api?.openWorldInvoiceImage || !fileName) return;
+    try {
+      const res = await api.openWorldInvoiceImage(fileName);
+      if (!res?.ok) {
+        setWorldCreditError(res?.error || "Failed to open credit memo file.");
+      }
+    } catch (e) {
+      console.error("[vendor] failed to open world credit file", e);
+      setWorldCreditError(e?.message || "Failed to open credit memo file.");
+    }
+  }
+
+  function handleOpenWorldCreditMatch(order) {
+    if (!order) return;
+    setWorldCreditMatch(order);
+    setWorldCreditMatchSlipId(order.returnSlipId || "");
+    setWorldCreditMatchError("");
+    loadCreditMatchCapCodes(order);
+  }
+
+  function handleCloseWorldCreditMatch() {
+    setWorldCreditMatch(null);
+    setWorldCreditMatchSlipId("");
+    setWorldCreditMatchError("");
+    setCreditMatchCapCodes([]);
+  }
+
+  // Mirrors handleConfirmProforceCreditMatch exactly: the credit is already a
+  // real order with real lineItems by the time this runs (parsed positionally
+  // off the PDF, arithmetic self-audited) — matching just stamps the chosen
+  // slip's identity onto it for traceability, then settles that slip out of
+  // Returns Management via the same settleSlipAsCreditReceived every credit
+  // flow uses.
+  async function handleConfirmWorldCreditMatch() {
+    if (!worldCreditMatch || !api?.writeOrders) return;
+    const slip = waitingCreditSlips.find((s) => s.id === worldCreditMatchSlipId) || null;
+    if (!slip) {
+      setWorldCreditMatchError("Pick a requisition to match, or cancel.");
+      return;
+    }
+    setWorldCreditMatchSaving(true);
+    setWorldCreditMatchError("");
+    try {
+      const key = worldCreditMatch.reference;
+      const patch = {
+        returnSlipId: slip.id,
+        returnSlipWarehouse: slip.warehouse || "",
+        ...(slip.po ? { returnSlipPo: slip.po } : {}),
+        ...(slip.date ? { returnSlipDate: slip.date } : {}),
+        lastUpdatedAt: new Date().toISOString(),
+      };
+      const nextOrders = orders.map((o) =>
+        o?.reference === key && o.source === "world" ? { ...o, ...patch } : o
+      );
+      const normalized = normalizeOrdersForSave(nextOrders);
+      const saveRes = await api.writeOrders(normalized);
+      if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the matched order.");
+      adoptSavedOrders(normalized);
+      setOrdersDirty(false);
+
+      const settled = await settleSlipAsCreditReceived(slip.id);
+      if (!settled.ok) throw new Error(settled.error || "Failed to settle the requisition slip.");
+
+      handleCloseWorldCreditMatch();
+      const slipLabel = slip.po
+        ? `PO ${slip.po}`
+        : `the requisition (${[slip.warehouse || "Unspecified", slip.date || "no date"].join(" · ")})`;
+      alert(`Mark ${slipLabel} as credited, then destroy it — it's settled now.`);
+    } catch (e) {
+      console.error("[vendor] failed to match world credit to requisition", e);
+      setWorldCreditMatchError(e?.message || "Failed to match credit to requisition.");
+    } finally {
+      setWorldCreditMatchSaving(false);
+    }
+  }
+
+  function handleOpenTransbecCreditMatch(order) {
+    if (!order) return;
+    setTransbecCreditMatch(order);
+    setTransbecCreditMatchSlipId(order.returnSlipId || "");
+    setTransbecCreditMatchError("");
+    loadCreditMatchCapCodes(order);
+  }
+
+  function handleCloseTransbecCreditMatch() {
+    setTransbecCreditMatch(null);
+    setTransbecCreditMatchSlipId("");
+    setTransbecCreditMatchError("");
+    setCreditMatchCapCodes([]);
+  }
+
+  // Mirrors handleConfirmWorldCreditMatch. A Transbec credit is likewise already
+  // a real order with real lineItems read off the credit memo, so matching only
+  // stamps the chosen slip onto it and settles that slip through the same
+  // settleSlipAsCreditReceived every credit flow uses.
+  async function handleConfirmTransbecCreditMatch() {
+    if (!transbecCreditMatch || !api?.writeOrders) return;
+    const slip = waitingCreditSlips.find((s) => s.id === transbecCreditMatchSlipId) || null;
+    if (!slip) {
+      setTransbecCreditMatchError("Pick a requisition to match, or cancel.");
+      return;
+    }
+    setTransbecCreditMatchSaving(true);
+    setTransbecCreditMatchError("");
+    try {
+      const key = transbecCreditMatch.reference;
+      const patch = {
+        returnSlipId: slip.id,
+        returnSlipWarehouse: slip.warehouse || "",
+        ...(slip.po ? { returnSlipPo: slip.po } : {}),
+        ...(slip.date ? { returnSlipDate: slip.date } : {}),
+        lastUpdatedAt: new Date().toISOString(),
+      };
+      const nextOrders = orders.map((o) =>
+        o?.reference === key && o.source === "transbec" ? { ...o, ...patch } : o
+      );
+      const normalized = normalizeOrdersForSave(nextOrders);
+      const saveRes = await api.writeOrders(normalized);
+      if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the matched order.");
+      adoptSavedOrders(normalized);
+      setOrdersDirty(false);
+
+      const settled = await settleSlipAsCreditReceived(slip.id);
+      if (!settled.ok) throw new Error(settled.error || "Failed to settle the requisition slip.");
+
+      handleCloseTransbecCreditMatch();
+      const slipLabel = slip.po
+        ? `PO ${slip.po}`
+        : `the requisition (${[slip.warehouse || "Unspecified", slip.date || "no date"].join(" · ")})`;
+      alert(`Mark ${slipLabel} as credited, then destroy it — it's settled now.`);
+    } catch (e) {
+      console.error("[vendor] failed to match transbec credit to requisition", e);
+      setTransbecCreditMatchError(e?.message || "Failed to match credit to requisition.");
+    } finally {
+      setTransbecCreditMatchSaving(false);
     }
   }
 
@@ -4170,7 +4767,7 @@ export default function App() {
       setWorldStatus("");
       const res = await api.fetchWorldInvoices({ reference });
       if (!res?.ok) throw new Error(res?.error || "Failed to fetch World invoices.");
-      const logMsg = Array.isArray(res.statusLog) && res.statusLog.length ? res.statusLog.join("\n") : "";
+      const logMsg = gmailStatusLine("world", res);
 
       const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
       let appliedCount = 0;
@@ -4295,7 +4892,7 @@ export default function App() {
       setTransbecStatus("");
       const res = await api.fetchTransbecInvoices({ reference });
       if (!res?.ok) throw new Error(res?.error || "Failed to fetch Transbec invoices.");
-      const logMsg = Array.isArray(res.statusLog) && res.statusLog.length ? res.statusLog.join("\n") : "";
+      const logMsg = gmailStatusLine("transbec", res);
 
       const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
       let appliedCount = 0;
@@ -4399,7 +4996,7 @@ export default function App() {
       setBestbuyStatus("");
       const res = await api.fetchBestbuyInvoices({ reference });
       if (!res?.ok) throw new Error(res?.error || "Failed to fetch BestBuy invoices.");
-      const logMsg = Array.isArray(res.statusLog) && res.statusLog.length ? res.statusLog.join("\n") : "";
+      const logMsg = gmailStatusLine("bestbuy", res);
       const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
 
       let creditLogMsg = "";
@@ -4408,8 +5005,7 @@ export default function App() {
         try {
           const creditRes = await api.fetchBestbuyCreditInvoices({ reference });
           if (creditRes?.ok) {
-            creditLogMsg =
-              Array.isArray(creditRes.statusLog) && creditRes.statusLog.length ? creditRes.statusLog.join("\n") : "";
+            creditLogMsg = gmailStatusLine("bestbuy", creditRes, "credit invoice");
             creditDiscoveries = Array.isArray(creditRes.discoveries) ? creditRes.discoveries : [];
           } else {
             console.error("[vendor] bestbuy credit invoice fetch failed", creditRes);
@@ -4609,7 +5205,7 @@ export default function App() {
       setCbkStatus("");
       const res = await api.fetchCbkInvoices({ reference });
       if (!res?.ok) throw new Error(res?.error || "Failed to fetch CBK invoices.");
-      const logMsg = Array.isArray(res.statusLog) && res.statusLog.length ? res.statusLog.join("\n") : "";
+      const logMsg = gmailStatusLine("cbk", res);
 
       const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
       let appliedCount = 0;
@@ -4726,7 +5322,7 @@ export default function App() {
       setProforceCreditStatus("");
       const res = await api.fetchProforceCreditInvoices({ reference });
       if (!res?.ok) throw new Error(res?.error || "Failed to fetch Proforce credit invoices.");
-      const logMsg = Array.isArray(res.statusLog) && res.statusLog.length ? res.statusLog.join("\n") : "";
+      const logMsg = gmailStatusLine("proforce", res, "credit invoice");
       const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
 
       let appliedCount = 0;
@@ -4806,12 +5402,14 @@ export default function App() {
     setProforceCreditMatch(order);
     setProforceCreditMatchSlipId(order.returnSlipId || "");
     setProforceCreditMatchError("");
+    loadCreditMatchCapCodes(order);
   }
 
   function handleCloseProforceCreditMatch() {
     setProforceCreditMatch(null);
     setProforceCreditMatchSlipId("");
     setProforceCreditMatchError("");
+    setCreditMatchCapCodes([]);
   }
 
   // Unlike a scanned-credit modal (which creates a brand-new order from a
@@ -4878,6 +5476,8 @@ export default function App() {
         ? transbecPdfName(order)
         : vendor === "world"
         ? order?.worldInvoiceFile
+        : vendor === "world-credit"
+        ? order?.worldCreditFile
         : vendor === "cbk"
         ? order?.cbkInvoiceFile
         : vendor === "bestbuy-credit"
@@ -4888,7 +5488,7 @@ export default function App() {
     const setError =
       vendor === "transbec"
         ? setTransbecError
-        : vendor === "world"
+        : vendor === "world" || vendor === "world-credit"
         ? setWorldError
         : vendor === "cbk"
         ? setCbkError
@@ -4897,34 +5497,51 @@ export default function App() {
         : setBestbuyError;
     if (!fileName || !api?.printInvoiceSilent || !order?.reference) return;
     const printKey = `${vendor}:${order.reference}`;
-    // Transbec credit memos print in full — the actual "Credit Memo BALANCE
-    // DUE" and signature stub live on page 2, unlike a regular invoice where
-    // page 1 alone is enough. Every other vendor/print stays page-1-only.
-    const allPages = vendor === "transbec" && fileName === order?.transbecCreditFile;
+    // Transbec/World credit memos print in full — the return stub with the
+    // actual "BALANCE DUE" and signature lives on page 2, unlike a regular
+    // invoice where page 1 alone is enough. Every other vendor/print stays
+    // page-1-only.
+    const allPages =
+      (vendor === "transbec" && fileName === order?.transbecCreditFile) || vendor === "world-credit";
+    const field =
+      vendor === "transbec"
+        ? "transbecInvoicePrinted"
+        : vendor === "world"
+        ? "worldInvoicePrinted"
+        : vendor === "world-credit"
+        ? "worldCreditInvoicePrinted"
+        : vendor === "cbk"
+        ? "cbkInvoicePrinted"
+        : vendor === "bestbuy-credit"
+        ? "bestbuyCreditInvoicePrinted"
+        : vendor === "proforce-credit"
+        ? "proforceCreditInvoicePrinted"
+        : "bestbuyInvoicePrinted";
     try {
       setInvoicePrintingRef(printKey);
       setError("");
+      // Claimed BEFORE the physical print, not after: this is what a second
+      // caller (another ghost cycle once the requester's 10-minute patience
+      // for a remote print job runs out and it dispatches a retry, or a
+      // person clicking Print Invoice by hand on an order that looks stuck)
+      // sees when it decides whether this order still needs printing. Writing
+      // the flag only on success left a gap — sometimes close to an hour, see
+      // CA4043 — where the order still read as unprinted while a slow/retried
+      // print job was in flight, and a second attempt printed it again.
+      await updateOrderByKeyAndSave(order.reference, {
+        [field]: true,
+        [`${field}At`]: new Date().toISOString(),
+      });
       const res = await api.printInvoiceSilent(fileName, allPages);
       if (!res?.ok) {
         throw new Error(res?.error || "Failed to print invoice.");
       }
-
-      const field =
-        vendor === "transbec"
-          ? "transbecInvoicePrinted"
-          : vendor === "world"
-          ? "worldInvoicePrinted"
-          : vendor === "cbk"
-          ? "cbkInvoicePrinted"
-          : vendor === "bestbuy-credit"
-          ? "bestbuyCreditInvoicePrinted"
-          : vendor === "proforce-credit"
-          ? "proforceCreditInvoicePrinted"
-          : "bestbuyInvoicePrinted";
-      updateOrderByKeyAndSave(order.reference, { [field]: true, [`${field}At`]: new Date().toISOString() });
     } catch (e) {
       console.error(`[vendor] failed to print ${vendor} invoice`, e);
       setError(e?.message || "Failed to print invoice.");
+      // Release the claim so a failed attempt doesn't leave an invoice that
+      // never actually printed permanently marked as printed.
+      await updateOrderByKeyAndSave(order.reference, { [field]: false, [`${field}At`]: "" });
     } finally {
       setInvoicePrintingRef("");
     }
@@ -5186,6 +5803,13 @@ export default function App() {
       loadOrders();
     }
   }, [currentView, ordersInitialized, ordersLoading]);
+
+  // Refreshed each time the tab is opened, not just once initially — an
+  // archive run on another machine should show up here without this one
+  // needing its own archive action to trigger a reload.
+  useEffect(() => {
+    if (currentView === "order-management") loadRecentArchivedOrders();
+  }, [currentView]);
 
   useEffect(() => {
     // Same test processSageOrdersQueue uses to pick its targets — these are the
@@ -6027,8 +6651,10 @@ export default function App() {
             sageQueueSending={sageQueueSending}
             onReleaseSageLock={handleReleaseSageLock}
             onMarkComplete={handleMarkComplete}
+            onClearValueCheck={handleClearValueCheck}
             onReconcileTotals={handleReconcileTotals}
             onArchiveOrder={handleArchiveOrderWithConfirm}
+            recentArchivedOrders={recentArchivedOrders}
             onDeleteOrder={handleDeleteScanOrder}
             hasSearch={hasSearch}
             onGetWorldOrders={handleGetWorldOrders}
@@ -6083,6 +6709,10 @@ export default function App() {
             onVerifyTransbecInvoice={handleOpenInvoiceReview}
             onPrintTransbecInvoice={(order) => handlePrintVendorInvoice(order, "transbec")}
             onViewTransbecCreditInvoiceImage={(order) => handleViewTransbecCreditImage(order?.transbecCreditFile)}
+            onViewWorldCreditInvoiceImage={(order) => handleViewWorldCreditImage(order?.worldCreditFile)}
+            onPrintWorldCreditInvoice={(order) => handlePrintVendorInvoice(order, "world-credit")}
+            onMatchWorldCreditToRequisition={handleOpenWorldCreditMatch}
+            onMatchTransbecCreditToRequisition={handleOpenTransbecCreditMatch}
             onFetchBestbuyInvoices={handleFetchBestbuyInvoices}
             bestbuyFetching={bestbuyFetching}
             bestbuyStatus={bestbuyStatus}
@@ -6129,6 +6759,15 @@ export default function App() {
             onRemoveTransbecCreditOrder={handleRemoveTransbecCreditOrder}
             onViewTransbecCreditImage={handleViewTransbecCreditImage}
             onResetTransbecCredits={handleResetTransbecCredits}
+            worldCredits={worldCredits}
+            worldCreditScanning={worldCreditScanning}
+            worldCreditError={worldCreditError}
+            worldCreditLog={worldCreditLog}
+            onFetchWorldCredits={handleFetchWorldCredits}
+            onLoadWorldCredits={handleLoadWorldCredits}
+            onCreateWorldCreditOrder={handleCreateOrderFromWorldCredit}
+            onRemoveWorldCreditOrder={handleRemoveWorldCreditOrder}
+            onViewWorldCreditImage={handleViewWorldCreditImage}
           />
         ) : currentView === "archive-search" ? (
           <ArchiveSearchView
@@ -6395,14 +7034,14 @@ export default function App() {
         const orderLines = Array.isArray(proforceCreditMatch.lineItems) ? proforceCreditMatch.lineItems : [];
         // Part numbers on each side, so both lists can show whether they line
         // up — same bidirectional check the credit matcher uses.
-        const orderPartKeys = new Set(orderLines.map((l) => normalizePartKey(l.partNumber)).filter(Boolean));
+        const lineKeys = (l, i) => creditLinePartKeys(l, creditMatchCapCodes[i]);
+        const orderPartKeys = new Set(orderLines.flatMap(lineKeys));
         const slipKeys = new Set(slipItems.map((it) => normalizePartKey(it.itemcode)).filter(Boolean));
+        const lineOnSlip = (l, i) => lineKeys(l, i).some((k) => slipKeys.has(k));
         const unmatchedSlipCount = slipItems.filter(
           (it) => !orderPartKeys.has(normalizePartKey(it.itemcode))
         ).length;
-        const unmatchedOrderCount = orderLines.filter(
-          (l) => !slipKeys.has(normalizePartKey(l.partNumber))
-        ).length;
+        const unmatchedOrderCount = orderLines.filter((l, i) => !lineOnSlip(l, i)).length;
         return (
           <div className="fixed inset-0 z-[5000] bg-slate-900/60 flex items-center justify-center px-4">
             <div className="bg-white rounded-3xl shadow-2xl w-full max-w-[95vw] p-6 flex flex-col gap-4 max-h-[95vh]">
@@ -6449,7 +7088,7 @@ export default function App() {
                   ) : (
                     <div className="space-y-1 max-h-[60vh] overflow-auto border rounded-2xl p-2 bg-slate-50/60">
                       {orderLines.map((li, i) => {
-                        const onSlip = selectedSlip ? slipKeys.has(normalizePartKey(li.partNumber)) : null;
+                        const onSlip = selectedSlip ? lineOnSlip(li, i) : null;
                         return (
                           <div
                             key={`${li.partNumber || "part"}-${i}`}
@@ -6608,6 +7247,456 @@ export default function App() {
                   title="Stamp the order with this requisition and close it out of Returns Management"
                 >
                   {proforceCreditMatchSaving ? "Matching…" : "Match & close requisition"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {worldCreditMatch && (() => {
+        const selectedSlip = waitingCreditSlips.find((s) => s.id === worldCreditMatchSlipId) || null;
+        const slipItems = selectedSlip?.items || [];
+        const money = (n) => `$${(Number.isFinite(Number(n)) ? Number(n) : 0).toFixed(2)}`;
+        const orderLines = Array.isArray(worldCreditMatch.lineItems) ? worldCreditMatch.lineItems : [];
+        const lineKeys = (l, i) => creditLinePartKeys(l, creditMatchCapCodes[i]);
+        const orderPartKeys = new Set(orderLines.flatMap(lineKeys));
+        const slipKeys = new Set(slipItems.map((it) => normalizePartKey(it.itemcode)).filter(Boolean));
+        const lineOnSlip = (l, i) => lineKeys(l, i).some((k) => slipKeys.has(k));
+        const unmatchedSlipCount = slipItems.filter(
+          (it) => !orderPartKeys.has(normalizePartKey(it.itemcode))
+        ).length;
+        const unmatchedOrderCount = orderLines.filter((l, i) => !lineOnSlip(l, i)).length;
+        return (
+          <div className="fixed inset-0 z-[5000] bg-slate-900/60 flex items-center justify-center px-4">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-[95vw] p-6 flex flex-col gap-4 max-h-[95vh]">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-semibold text-slate-800">
+                  Match Credit {worldCreditMatch.reference} to a Return Requisition
+                </h2>
+                <button className="text-slate-500 hover:text-slate-700" onClick={handleCloseWorldCreditMatch}>
+                  x
+                </button>
+              </div>
+              {worldCreditMatchError && (
+                <div className="text-sm text-red-600 whitespace-pre-line">{worldCreditMatchError}</div>
+              )}
+              <p className="text-sm text-slate-500">
+                This credit is already a real order with its own parts, read straight off the World
+                credit memo PDF — no scan to correct here. Compare it against the requisition on the
+                right before confirming; confirming stamps the order with the requisition and closes
+                it out of Returns Management, the same as its own "Credit received" button.
+              </p>
+
+              <div className="grid gap-4 lg:grid-cols-2 overflow-auto">
+                {/* Left: the credit's own parts, read-only. */}
+                <div className="flex flex-col gap-2 min-w-0">
+                  <div className="flex flex-wrap gap-4 text-sm rounded-2xl border border-indigo-100 bg-indigo-50/40 px-3 py-2">
+                    <div>
+                      <div className="text-xs uppercase tracking-wide text-slate-400">Credit #</div>
+                      <div className="font-bold text-amber-700">{worldCreditMatch.reference || "—"}</div>
+                    </div>
+                    {Number.isFinite(Number(worldCreditMatch.billed_total)) && (
+                      <div>
+                        <div className="text-xs uppercase tracking-wide text-slate-400">Credit total</div>
+                        <div className="font-semibold text-slate-800">{money(worldCreditMatch.billed_total)}</div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-sm font-semibold text-slate-700">
+                    1 · Credit's parts <span className="font-normal text-slate-400">(read-only, {orderLines.length})</span>
+                  </div>
+                  {orderLines.length === 0 ? (
+                    <p className="text-sm text-slate-500 border rounded-xl px-3 py-2 bg-slate-50">
+                      This credit has no line items.
+                    </p>
+                  ) : (
+                    <div className="space-y-1 max-h-[60vh] overflow-auto border rounded-2xl p-2 bg-slate-50/60">
+                      {orderLines.map((li, i) => {
+                        const onSlip = selectedSlip ? lineOnSlip(li, i) : null;
+                        return (
+                          <div
+                            key={`${li.partNumber || "part"}-${i}`}
+                            className={`flex items-center justify-between gap-2 text-xs bg-white border rounded-lg px-2 py-1 ${
+                              onSlip === false ? "border-amber-300 bg-amber-50/50" : "border-slate-100"
+                            }`}
+                          >
+                            <span className="font-semibold text-slate-800">
+                              {[li.partLineCode, li.partNumber].filter(Boolean).join(" ") || "—"}
+                            </span>
+                            <span className="text-slate-500 truncate">{li.partDescription || ""}</span>
+                            <span className="text-slate-500 whitespace-nowrap">
+                              {li.quantity ?? ""} × {money(li.costPriceValue)}
+                            </span>
+                            {onSlip !== null && (
+                              <span
+                                className={`px-2 py-0.5 rounded-full border font-semibold whitespace-nowrap ${
+                                  onSlip
+                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                    : "bg-amber-100 text-amber-800 border-amber-300"
+                                }`}
+                                title={
+                                  onSlip
+                                    ? "This part number is on the requisition"
+                                    : "No line on the requisition has this part number"
+                                }
+                              >
+                                {onSlip ? "on requisition" : "not on requisition"}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {selectedSlip && unmatchedOrderCount > 0 && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
+                      <span className="font-semibold">{unmatchedOrderCount}</span> part(s) on the
+                      credit have no matching part number on the requisition.
+                    </p>
+                  )}
+                </div>
+
+                {/* Right: pick a requisition, compare its parts. */}
+                <div className="flex flex-col gap-2 min-w-0">
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">
+                      2 · Match to a return requisition{" "}
+                      <span className="font-normal text-slate-400">(waiting on credit, any warehouse)</span>
+                    </label>
+                    {waitingCreditSlips.length === 0 ? (
+                      <p className="text-sm text-slate-500 border rounded-xl px-3 py-2 bg-slate-50">
+                        No requisitions are waiting on a credit right now.
+                      </p>
+                    ) : (
+                      <select
+                        className="w-full border rounded-xl px-3 py-2 text-sm"
+                        value={worldCreditMatchSlipId}
+                        onChange={(e) => setWorldCreditMatchSlipId(e.target.value)}
+                      >
+                        <option value="">Select a requisition…</option>
+                        {waitingCreditSlips.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {[
+                              s.warehouse || "Unspecified",
+                              s.date || "no date",
+                              s.po ? `PO ${s.po}` : "no PO",
+                              `${s.items.length} part(s)`,
+                            ].join(" · ")}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+
+                  {selectedSlip ? (
+                    <div className="border rounded-2xl p-3 bg-slate-50/60">
+                      <div className="text-sm font-semibold text-slate-700 mb-1">
+                        Parts on this requisition <span className="font-normal text-slate-400">({slipItems.length})</span>
+                      </div>
+                      {slipItems.length > 0 && (
+                        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 mb-2">
+                          Confirming marks the requisition as credited:{" "}
+                          <span className="font-semibold">{slipItems.length} part(s)</span> will be
+                          removed from Returns Management.
+                        </p>
+                      )}
+                      {slipItems.length === 0 && (
+                        <p className="text-xs text-slate-500">This requisition has no parts.</p>
+                      )}
+                      <div className="space-y-1 max-h-[55vh] overflow-auto">
+                        {slipItems.map((it) => {
+                          const onCredit = orderPartKeys.has(normalizePartKey(it.itemcode));
+                          return (
+                            <div
+                              key={it.uid}
+                              className={`flex items-center justify-between gap-2 text-xs bg-white border rounded-lg px-2 py-1 ${
+                                onCredit ? "border-slate-100" : "border-amber-300 bg-amber-50/50"
+                              }`}
+                            >
+                              <span className="font-semibold text-slate-800">{it.itemcode || "—"}</span>
+                              <span className="text-slate-500 whitespace-nowrap">
+                                {Math.max(1, Number(it.quantity) || 1)} × {money(it.cost)}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded-full border font-semibold whitespace-nowrap ${
+                                  onCredit
+                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                    : "bg-amber-100 text-amber-800 border-amber-300"
+                                }`}
+                                title={
+                                  onCredit
+                                    ? "This part number is on the credit"
+                                    : "No line on the credit has this part number"
+                                }
+                              >
+                                {onCredit ? "on credit" : "not on credit"}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {unmatchedSlipCount > 0 && (
+                        <p className="text-xs text-amber-700 mt-2">
+                          <span className="font-semibold">{unmatchedSlipCount}</span> part(s) on the
+                          requisition have no matching part number on the credit — double check this
+                          is the right requisition before confirming.
+                        </p>
+                      )}
+                      {unmatchedSlipCount === 0 && unmatchedOrderCount === 0 && slipItems.length > 0 && (
+                        <p className="text-xs text-emerald-700 mt-2 font-semibold">
+                          Every part number matches both sides.
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-500 border rounded-xl px-3 py-2 bg-slate-50">
+                      Pick a requisition above to compare its parts against the credit.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-3 border-t pt-4">
+                <button
+                  className="px-4 py-2 rounded-xl border text-sm"
+                  onClick={handleCloseWorldCreditMatch}
+                  disabled={worldCreditMatchSaving}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold disabled:opacity-60"
+                  onClick={handleConfirmWorldCreditMatch}
+                  disabled={worldCreditMatchSaving || !selectedSlip}
+                  title="Stamp the order with this requisition and close it out of Returns Management"
+                >
+                  {worldCreditMatchSaving ? "Matching…" : "Match & close requisition"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {transbecCreditMatch && (() => {
+        const selectedSlip = waitingCreditSlips.find((s) => s.id === transbecCreditMatchSlipId) || null;
+        const slipItems = selectedSlip?.items || [];
+        const money = (n) => `$${(Number.isFinite(Number(n)) ? Number(n) : 0).toFixed(2)}`;
+        const orderLines = Array.isArray(transbecCreditMatch.lineItems) ? transbecCreditMatch.lineItems : [];
+        const lineKeys = (l, i) => creditLinePartKeys(l, creditMatchCapCodes[i]);
+        const orderPartKeys = new Set(orderLines.flatMap(lineKeys));
+        const slipKeys = new Set(slipItems.map((it) => normalizePartKey(it.itemcode)).filter(Boolean));
+        const lineOnSlip = (l, i) => lineKeys(l, i).some((k) => slipKeys.has(k));
+        const unmatchedSlipCount = slipItems.filter(
+          (it) => !orderPartKeys.has(normalizePartKey(it.itemcode))
+        ).length;
+        const unmatchedOrderCount = orderLines.filter((l, i) => !lineOnSlip(l, i)).length;
+        return (
+          <div className="fixed inset-0 z-[5000] bg-slate-900/60 flex items-center justify-center px-4">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-[95vw] p-6 flex flex-col gap-4 max-h-[95vh]">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-semibold text-slate-800">
+                  Match Credit {transbecCreditMatch.reference} to a Return Requisition
+                </h2>
+                <button className="text-slate-500 hover:text-slate-700" onClick={handleCloseTransbecCreditMatch}>
+                  x
+                </button>
+              </div>
+              {transbecCreditMatchError && (
+                <div className="text-sm text-red-600 whitespace-pre-line">{transbecCreditMatchError}</div>
+              )}
+              <p className="text-sm text-slate-500">
+                This credit is already a real order with its own parts, read straight off the Transbec
+                credit memo PDF — no scan to correct here. Compare it against the requisition on the
+                right before confirming; confirming stamps the order with the requisition and closes
+                it out of Returns Management, the same as its own "Credit received" button.
+              </p>
+
+              <div className="grid gap-4 lg:grid-cols-2 overflow-auto">
+                {/* Left: the credit's own parts, read-only. */}
+                <div className="flex flex-col gap-2 min-w-0">
+                  <div className="flex flex-wrap gap-4 text-sm rounded-2xl border border-indigo-100 bg-indigo-50/40 px-3 py-2">
+                    <div>
+                      <div className="text-xs uppercase tracking-wide text-slate-400">Credit #</div>
+                      <div className="font-bold text-amber-700">{transbecCreditMatch.reference || "—"}</div>
+                    </div>
+                    {Number.isFinite(Number(transbecCreditMatch.billed_total)) && (
+                      <div>
+                        <div className="text-xs uppercase tracking-wide text-slate-400">Credit total</div>
+                        <div className="font-semibold text-slate-800">{money(transbecCreditMatch.billed_total)}</div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-sm font-semibold text-slate-700">
+                    1 · Credit's parts <span className="font-normal text-slate-400">(read-only, {orderLines.length})</span>
+                  </div>
+                  {orderLines.length === 0 ? (
+                    <p className="text-sm text-slate-500 border rounded-xl px-3 py-2 bg-slate-50">
+                      This credit has no line items.
+                    </p>
+                  ) : (
+                    <div className="space-y-1 max-h-[60vh] overflow-auto border rounded-2xl p-2 bg-slate-50/60">
+                      {orderLines.map((li, i) => {
+                        const onSlip = selectedSlip ? lineOnSlip(li, i) : null;
+                        return (
+                          <div
+                            key={`${li.partNumber || "part"}-${i}`}
+                            className={`flex items-center justify-between gap-2 text-xs bg-white border rounded-lg px-2 py-1 ${
+                              onSlip === false ? "border-amber-300 bg-amber-50/50" : "border-slate-100"
+                            }`}
+                          >
+                            <span className="font-semibold text-slate-800">
+                              {[li.partLineCode, li.partNumber].filter(Boolean).join(" ") || "—"}
+                            </span>
+                            <span className="text-slate-500 truncate">{li.partDescription || ""}</span>
+                            <span className="text-slate-500 whitespace-nowrap">
+                              {li.quantity ?? ""} × {money(li.costPriceValue)}
+                            </span>
+                            {onSlip !== null && (
+                              <span
+                                className={`px-2 py-0.5 rounded-full border font-semibold whitespace-nowrap ${
+                                  onSlip
+                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                    : "bg-amber-100 text-amber-800 border-amber-300"
+                                }`}
+                                title={
+                                  onSlip
+                                    ? "This part number is on the requisition"
+                                    : "No line on the requisition has this part number"
+                                }
+                              >
+                                {onSlip ? "on requisition" : "not on requisition"}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {selectedSlip && unmatchedOrderCount > 0 && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
+                      <span className="font-semibold">{unmatchedOrderCount}</span> part(s) on the
+                      credit have no matching part number on the requisition.
+                    </p>
+                  )}
+                </div>
+
+                {/* Right: pick a requisition, compare its parts. */}
+                <div className="flex flex-col gap-2 min-w-0">
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1">
+                      2 · Match to a return requisition{" "}
+                      <span className="font-normal text-slate-400">(waiting on credit, any warehouse)</span>
+                    </label>
+                    {waitingCreditSlips.length === 0 ? (
+                      <p className="text-sm text-slate-500 border rounded-xl px-3 py-2 bg-slate-50">
+                        No requisitions are waiting on a credit right now.
+                      </p>
+                    ) : (
+                      <select
+                        className="w-full border rounded-xl px-3 py-2 text-sm"
+                        value={transbecCreditMatchSlipId}
+                        onChange={(e) => setTransbecCreditMatchSlipId(e.target.value)}
+                      >
+                        <option value="">Select a requisition…</option>
+                        {waitingCreditSlips.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {[
+                              s.warehouse || "Unspecified",
+                              s.date || "no date",
+                              s.po ? `PO ${s.po}` : "no PO",
+                              `${s.items.length} part(s)`,
+                            ].join(" · ")}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+
+                  {selectedSlip ? (
+                    <div className="border rounded-2xl p-3 bg-slate-50/60">
+                      <div className="text-sm font-semibold text-slate-700 mb-1">
+                        Parts on this requisition <span className="font-normal text-slate-400">({slipItems.length})</span>
+                      </div>
+                      {slipItems.length > 0 && (
+                        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 mb-2">
+                          Confirming marks the requisition as credited:{" "}
+                          <span className="font-semibold">{slipItems.length} part(s)</span> will be
+                          removed from Returns Management.
+                        </p>
+                      )}
+                      {slipItems.length === 0 && (
+                        <p className="text-xs text-slate-500">This requisition has no parts.</p>
+                      )}
+                      <div className="space-y-1 max-h-[55vh] overflow-auto">
+                        {slipItems.map((it) => {
+                          const onCredit = orderPartKeys.has(normalizePartKey(it.itemcode));
+                          return (
+                            <div
+                              key={it.uid}
+                              className={`flex items-center justify-between gap-2 text-xs bg-white border rounded-lg px-2 py-1 ${
+                                onCredit ? "border-slate-100" : "border-amber-300 bg-amber-50/50"
+                              }`}
+                            >
+                              <span className="font-semibold text-slate-800">{it.itemcode || "—"}</span>
+                              <span className="text-slate-500 whitespace-nowrap">
+                                {Math.max(1, Number(it.quantity) || 1)} × {money(it.cost)}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded-full border font-semibold whitespace-nowrap ${
+                                  onCredit
+                                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                    : "bg-amber-100 text-amber-800 border-amber-300"
+                                }`}
+                                title={
+                                  onCredit
+                                    ? "This part number is on the credit"
+                                    : "No line on the credit has this part number"
+                                }
+                              >
+                                {onCredit ? "on credit" : "not on credit"}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {unmatchedSlipCount > 0 && (
+                        <p className="text-xs text-amber-700 mt-2">
+                          <span className="font-semibold">{unmatchedSlipCount}</span> part(s) on the
+                          requisition have no matching part number on the credit — double check this
+                          is the right requisition before confirming.
+                        </p>
+                      )}
+                      {unmatchedSlipCount === 0 && unmatchedOrderCount === 0 && slipItems.length > 0 && (
+                        <p className="text-xs text-emerald-700 mt-2 font-semibold">
+                          Every part number matches both sides.
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-500 border rounded-xl px-3 py-2 bg-slate-50">
+                      Pick a requisition above to compare its parts against the credit.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-3 border-t pt-4">
+                <button
+                  className="px-4 py-2 rounded-xl border text-sm"
+                  onClick={handleCloseTransbecCreditMatch}
+                  disabled={transbecCreditMatchSaving}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold disabled:opacity-60"
+                  onClick={handleConfirmTransbecCreditMatch}
+                  disabled={transbecCreditMatchSaving || !selectedSlip}
+                  title="Stamp the order with this requisition and close it out of Returns Management"
+                >
+                  {transbecCreditMatchSaving ? "Matching…" : "Match & close requisition"}
                 </button>
               </div>
             </div>

@@ -111,8 +111,16 @@ const DISCOUNT_CELL = /^\d+(?:\.\d+)?%$/;
 const UNIT_CELL = /^[A-Z]{2,3}$/;
 
 // Per-item environmental handling charge, printed on its own line beneath the
-// item as "EHC : 0.21 Ext: 1.26" (unit charge, then charge x qty).
-const EHC_LINE = /^EHC\s*:?\s*([\d.]+)\s*Ext:?\s*([\d.]+)/i;
+// item as "EHC : 0.21 Ext: 1.26" (unit charge, then charge x qty). Allows a
+// leading minus — a CREDIT prints this negative ("EHC : -0.60 Ext: -0.60",
+// verified on a real World credit memo), which a digits-only pattern would
+// silently fail to capture.
+const EHC_LINE = /^EHC\s*:?\s*(-?[\d.]+)\s*Ext:?\s*(-?[\d.]+)/i;
+
+// A returned line on a credit memo names the invoice it was originally sold
+// on ("Original Inv# 02KO2494"), printed on its own line beneath the item —
+// informational only, kept when present (invoices never carry this line).
+const ORIGINAL_INV_LINE = /Original\s*Inv#\s*([0-9A-Z]{4,12})/i;
 
 // A part is printed as "<2-4 letter line code> <part number>". The number is kept
 // VERBATIM including any dashes — capRules.resolveCapCode branches on the line
@@ -159,13 +167,15 @@ function extractLineItems(rows) {
       items.push(previous);
       continue;
     }
-    const ehc = row.items
-      .map((c) => c.str.trim())
-      .join(" ")
-      .match(EHC_LINE);
+    const text = row.items.map((c) => c.str.trim()).join(" ");
+    const ehc = text.match(EHC_LINE);
     if (ehc && previous) {
       previous.ehcUnit = money(ehc[1]) ?? 0;
       previous.ehcExtended = money(ehc[2]) ?? 0;
+    }
+    const orig = text.match(ORIGINAL_INV_LINE);
+    if (orig && previous && !previous.originalInvoice) {
+      previous.originalInvoice = orig[1].toUpperCase();
     }
   }
   return items;
@@ -288,4 +298,9 @@ module.exports = {
   extractInvoiceFromPdf,
   extractReferenceFromSubject,
   getInvoiceAssetName,
+  // Exported for worldCreditInvoice.actions.js — a credit memo is the same
+  // document shape as an invoice (see that file's header comment), so the
+  // credit parser reuses these directly instead of duplicating them.
+  money,
+  extractStubBalanceDue,
 };

@@ -81,10 +81,17 @@ export function qtyDiscrepancyAcknowledged(order, diff) {
 }
 
 // Returns null when there isn't enough information to judge (no confirmed
-// billed total yet, no line items, already in Sage, or a credit — credits
-// follow their own sign conventions and aren't what this check targets).
+// billed total yet, no line items, or a credit — credits follow their own
+// sign conventions and aren't what this check targets).
+//
+// Runs the same whether or not the order has already been entered in Sage.
+// Pre-entry, a discrepancy blocks the send and the fix is Confirm Quantities.
+// Post-entry, Confirm Quantities can still correct the record (what actually
+// shipped) but can no longer change what was typed into Sage — that's
+// "Reconcile totals" (see OrderManagementView's showReconcile), a separate
+// comparison against sage_total_synced rather than the line items.
 export function getOrderQtyDiscrepancy(order, taxRate = DEFAULT_TAX_RATE, threshold = DEFAULT_THRESHOLD) {
-  if (!order || order.enteredInSage === true) return null;
+  if (!order) return null;
   if (looksLikeCredit(order)) return null;
   const billedRaw = order.billed_total ?? order.billedTotal;
   const billedNum = billedRaw === null || billedRaw === undefined || billedRaw === "" ? NaN : Number(billedRaw);

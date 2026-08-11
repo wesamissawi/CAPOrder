@@ -25,6 +25,7 @@ const createVendorOrdersService = (deps) => {
     fetchCbkInvoicesScraper,
     fetchTransbecCreditInvoicesScraper,
     fetchProforceCreditInvoicesScraper,
+    fetchWorldCreditInvoicesScraper,
     getWorldInvoiceCachePath,
     getGmailAssetsDir,
     getTransbecInvoiceCachePath,
@@ -33,6 +34,7 @@ const createVendorOrdersService = (deps) => {
     getCbkInvoiceCachePath,
     getTransbecCreditInvoiceCachePath,
     getProforceCreditInvoiceCachePath,
+    getWorldCreditInvoiceCachePath,
     runInteractiveAuth,
     verifyConnection,
     saveConfig,
@@ -303,6 +305,10 @@ const createVendorOrdersService = (deps) => {
         typeof config.TRANSBEC_CREDIT_INVOICE_SENDER === 'string' ? config.TRANSBEC_CREDIT_INVOICE_SENDER : '',
       transbecCreditSubject:
         typeof config.TRANSBEC_CREDIT_INVOICE_SUBJECT === 'string' ? config.TRANSBEC_CREDIT_INVOICE_SUBJECT : '',
+      worldCreditSender:
+        typeof config.WORLD_CREDIT_INVOICE_SENDER === 'string' ? config.WORLD_CREDIT_INVOICE_SENDER : '',
+      worldCreditSubject:
+        typeof config.WORLD_CREDIT_INVOICE_SUBJECT === 'string' ? config.WORLD_CREDIT_INVOICE_SUBJECT : '',
       proforceCreditSender:
         typeof config.PROFORCE_CREDIT_INVOICE_SENDER === 'string' ? config.PROFORCE_CREDIT_INVOICE_SENDER : '',
       proforceCreditSubject:
@@ -642,6 +648,77 @@ const createVendorOrdersService = (deps) => {
     }
   }
 
+  // World CREDIT MEMOS from Gmail — same shape as the Transbec credit pipeline
+  // above (no pre-existing order, purely a discovery list; the Credits view's
+  // "Create order" button turns one into a new order). Powers the Credits
+  // view's "Check for World Credits" button.
+  async function fetchWorldCreditInvoices(payload = {}) {
+    try {
+      const { clientId, clientSecret, refreshToken, worldCreditSender, worldCreditSubject } = getGmailCreds();
+      if (!clientId || !clientSecret) {
+        return { ok: false, error: 'Missing Gmail OAuth client id/secret. Set them in Settings.' };
+      }
+      if (!refreshToken) {
+        return { ok: false, error: 'Gmail is not connected. Click “Connect Gmail” in Settings.' };
+      }
+      const gmailDataDir = getGmailAssetsDir();
+      ensureDir(gmailDataDir);
+      const fromDate = typeof payload?.fromDate === 'string' ? payload.fromDate : '';
+      const toDate = typeof payload?.toDate === 'string' ? payload.toDate : '';
+      const res = await fetchWorldCreditInvoicesScraper({
+        credentials: { clientId, clientSecret, refreshToken },
+        sender: worldCreditSender || 'reports@groupe-monaco.ca',
+        subjectPattern: worldCreditSubject || 'Credit Memo for 20605 Cust',
+        dataDir: gmailDataDir,
+        cachePath: getWorldCreditInvoiceCachePath(),
+        fromDate,
+        toDate,
+      });
+      if (!res?.ok) return res;
+      const known = collectKnownInvoiceNumbers ? collectKnownInvoiceNumbers() : new Set();
+      const discoveries = (res.discoveries || []).map((d) => {
+        const key = String(d.creditMemoNumber || '').trim().toUpperCase();
+        return { ...d, known: Boolean(key) && known.has(key) };
+      });
+      return { ...res, discoveries };
+    } catch (e) {
+      console.error('[vendor:fetch-world-credit-invoices]', e);
+      return { ok: false, error: e?.message || 'Failed to fetch World credit memos.' };
+    }
+  }
+
+  // List every credit memo already cached in world_credit_invoice_cache.json,
+  // WITHOUT hitting Gmail — lets the Credits view show prior scan results
+  // right after an app restart.
+  async function getWorldCreditInvoices() {
+    try {
+      const cachePath = getWorldCreditInvoiceCachePath();
+      let cache = {};
+      if (fs.existsSync(cachePath)) {
+        const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) cache = parsed;
+      }
+      const known = collectKnownInvoiceNumbers ? collectKnownInvoiceNumbers() : new Set();
+      const credits = Object.values(cache)
+        .map((v) => v && v.discovery)
+        .filter(Boolean)
+        .map((d) => {
+          const key = String(d.creditMemoNumber || '').trim().toUpperCase();
+          return { ...d, known: Boolean(key) && known.has(key) };
+        })
+        .sort((a, b) => String(b.checkedAt || '').localeCompare(String(a.checkedAt || '')));
+      return {
+        ok: true,
+        credits,
+        scannedCount: credits.length,
+        unknownCount: credits.filter((c) => !c.known).length,
+      };
+    } catch (e) {
+      console.error('[vendor:get-world-credits]', e);
+      return { ok: false, error: e?.message || 'Failed to read World credit memos.' };
+    }
+  }
+
   return {
     fetchWorldOrders,
     fetchTransbecOrders,
@@ -658,7 +735,9 @@ const createVendorOrdersService = (deps) => {
     fetchCbkInvoices,
     fetchTransbecCreditInvoices,
     fetchProforceCreditInvoices,
+    fetchWorldCreditInvoices,
     getTransbecCreditInvoices,
+    getWorldCreditInvoices,
     resetTransbecCreditScans,
   };
 };

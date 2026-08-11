@@ -118,6 +118,8 @@ export default function SettingsView() {
   const [cbkInvoiceSubject, setCbkInvoiceSubject] = useState("Invoice");
   const [transbecCreditInvoiceSender, setTransbecCreditInvoiceSender] = useState("donotreply@transbec.ca");
   const [transbecCreditInvoiceSubject, setTransbecCreditInvoiceSubject] = useState("Credit Memo");
+  const [worldCreditInvoiceSender, setWorldCreditInvoiceSender] = useState("reports@groupe-monaco.ca");
+  const [worldCreditInvoiceSubject, setWorldCreditInvoiceSubject] = useState("Credit Memo for 20605 Cust");
   const [gmailConnected, setGmailConnected] = useState(false);
   const [gmailEmail, setGmailEmail] = useState("");
   const [gmailConnecting, setGmailConnecting] = useState(false);
@@ -352,6 +354,8 @@ export default function SettingsView() {
           setCbkInvoiceSubject(cfg.CBK_INVOICE_SUBJECT || "Invoice");
           setTransbecCreditInvoiceSender(cfg.TRANSBEC_CREDIT_INVOICE_SENDER || "donotreply@transbec.ca");
           setTransbecCreditInvoiceSubject(cfg.TRANSBEC_CREDIT_INVOICE_SUBJECT || "Credit Memo");
+          setWorldCreditInvoiceSender(cfg.WORLD_CREDIT_INVOICE_SENDER || "reports@groupe-monaco.ca");
+          setWorldCreditInvoiceSubject(cfg.WORLD_CREDIT_INVOICE_SUBJECT || "Credit Memo for 20605 Cust");
           setInvoicePrinter(cfg.INVOICE_PRINTER || "");
           setCredStatus("");
           setCredError("");
@@ -475,6 +479,8 @@ export default function SettingsView() {
         CBK_INVOICE_SUBJECT: cbkInvoiceSubject || "",
         TRANSBEC_CREDIT_INVOICE_SENDER: transbecCreditInvoiceSender || "",
         TRANSBEC_CREDIT_INVOICE_SUBJECT: transbecCreditInvoiceSubject || "",
+        WORLD_CREDIT_INVOICE_SENDER: worldCreditInvoiceSender || "",
+        WORLD_CREDIT_INVOICE_SUBJECT: worldCreditInvoiceSubject || "",
         INVOICE_PRINTER: invoicePrinter || "",
       });
       if (res?.ok) {
@@ -1107,6 +1113,29 @@ export default function SettingsView() {
               />
               <p className="text-xs text-slate-400">
                 E.g. subject "Credit Memo for T30252 Cust PO" — the PO/reference is read from the subject.
+              </p>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">World Credit Memo Sender (from:)</label>
+              <input
+                type="text"
+                placeholder="reports@groupe-monaco.ca"
+                value={worldCreditInvoiceSender}
+                onChange={(e) => setWorldCreditInvoiceSender(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">World Credit Memo Subject Contains</label>
+              <input
+                type="text"
+                placeholder="Credit Memo for 20605 Cust"
+                value={worldCreditInvoiceSubject}
+                onChange={(e) => setWorldCreditInvoiceSubject(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+              <p className="text-xs text-slate-400">
+                E.g. subject "Credit Memo for 20605 Cust PO" — 20605 is World's customer number for this account.
               </p>
             </div>
           </div>

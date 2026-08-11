@@ -95,8 +95,10 @@ export default function OrderManagementView({
   sageQueueSending = false,
   onReleaseSageLock,
   onMarkComplete,
+  onClearValueCheck,
   onReconcileTotals,
   onArchiveOrder,
+  recentArchivedOrders,
   onDeleteOrder,
   hasSearch,
   onGetWorldOrders,
@@ -150,6 +152,10 @@ export default function OrderManagementView({
   onVerifyTransbecInvoice,
   onPrintTransbecInvoice,
   onViewTransbecCreditInvoiceImage,
+  onViewWorldCreditInvoiceImage,
+  onPrintWorldCreditInvoice,
+  onMatchWorldCreditToRequisition,
+  onMatchTransbecCreditToRequisition,
   onFetchBestbuyInvoices,
   bestbuyFetching,
   bestbuyStatus,
@@ -416,6 +422,34 @@ export default function OrderManagementView({
         order.valueCheckAlert !== true &&
         !isInvoiceNotPrinted(order)
     );
+
+  // Same conditions as canArchiveOrder, in the same order, but as prose. The
+  // Archive button simply isn't rendered while any of them fails, which leaves
+  // no way to tell WHICH one — and the print gate in particular has no checkbox
+  // of its own, so an order can sit there looking complete with nothing to
+  // click. Credit orders hit that hardest: they're excluded from the
+  // "Not Printed" filter (and so from Print All) by design, so their only print
+  // affordance is the per-card Print Credit button.
+  const archiveBlockers = (order) => {
+    if (!order) return [];
+    const reasons = [];
+    if (order.detailStored !== true) reasons.push("order detail hasn't been fetched");
+    if (order.pickedUp !== true) reasons.push('"Picked Up" not checked');
+    if (order.inStore !== true) reasons.push('"Arrived" not checked');
+    if (order.hasInvoiceNum !== true) reasons.push("invoice # not confirmed");
+    if (order.totalVerified !== true) reasons.push('"Value Check" not confirmed');
+    if (order.enteredInSage !== true) reasons.push('"Entered in Sage" not checked');
+    if (order.invoiceNeedsSync === true) reasons.push("invoice # changed — Sage needs re-syncing");
+    if (order.valueCheckAlert === true) reasons.push("value check still open (see above)");
+    if (isInvoiceNotPrinted(order)) {
+      reasons.push(
+        order.bestbuyCreditFile && !order.bestbuyInvoiceFile
+          ? 'credit invoice not printed — use "Print Credit" above'
+          : 'invoice not printed — use "Print Invoice" above'
+      );
+    }
+    return reasons;
+  };
 
   return (
     <>
@@ -741,7 +775,8 @@ export default function OrderManagementView({
           )}
         </Card>
       </section>
-      <section>
+      <div className="flex flex-col xl:flex-row items-start gap-4">
+        <section className="flex-1 min-w-0">
         {ordersLoading && filteredOrders.length === 0 ? (
           <div className="py-12 text-center text-slate-500">Loading orders...</div>
         ) : (
@@ -863,12 +898,16 @@ export default function OrderManagementView({
                         )}
                       </div>
                       <div className="flex flex-row items-center gap-2">
-                        {!order.enteredInSage && hasQtyDiscrepancy && (
+                        {hasQtyDiscrepancy && (
                           <button
                             type="button"
                             onClick={() => onOpenQtyConfirm?.(refKey)}
                             className="px-3 py-1 rounded-full text-xs font-semibold border bg-red-600 text-white border-red-600 hover:bg-red-700 animate-pulse"
-                            title={`Billed total is ${qtyDiscrepancy.diff >= 0 ? "+" : ""}$${qtyDiscrepancy.diff.toFixed(2)} vs. the line items total ($${qtyDiscrepancy.expectedTotal.toFixed(2)}) — confirm quantities before sending to Sage`}
+                            title={`Billed total is ${qtyDiscrepancy.diff >= 0 ? "+" : ""}$${qtyDiscrepancy.diff.toFixed(2)} vs. the line items total ($${qtyDiscrepancy.expectedTotal.toFixed(2)}) — confirm quantities${
+                              order.enteredInSage
+                                ? " (this order is already in Sage; saving corrects the record only, not the Sage entry)"
+                                : " before sending to Sage"
+                            }`}
                           >
                             Confirm Quantities
                           </button>
@@ -1022,6 +1061,12 @@ export default function OrderManagementView({
                         {ordersSaving ? "Saving..." : ordersDirty ? "Save Changes" : "Saved"}
                       </button>
                     </div>
+                    {!canArchiveOrder(order) && archiveBlockers(order).length > 0 && (
+                      <div className="mt-2 text-xs text-amber-700">
+                        <span className="font-semibold">Can't archive yet:</span>{" "}
+                        {archiveBlockers(order).join("; ")}.
+                      </div>
+                    )}
                   </div>
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     <div className="flex flex-col gap-1">
@@ -1179,6 +1224,83 @@ export default function OrderManagementView({
                             ? "Print Credit Again"
                             : "Print Credit"}
                         </button>
+                      )}
+                      {order.source === "transbec" &&
+                        order.isCredit &&
+                        !order.returnSlipId &&
+                        onMatchTransbecCreditToRequisition && (
+                          <button
+                            type="button"
+                            onClick={() => onMatchTransbecCreditToRequisition(order)}
+                            className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-amber-700 border-amber-300 hover:bg-amber-50 self-start"
+                            title={
+                              waitingCreditSlipCount
+                                ? `Match this credit to one of the ${waitingCreditSlipCount} requisition(s) waiting on a credit`
+                                : "Match this credit to a return requisition (none are waiting on a credit right now)"
+                            }
+                          >
+                            Match to Requisition…
+                          </button>
+                        )}
+                      {order.source === "transbec" && order.isCredit && order.returnSlipId && (
+                        <span
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200 self-start"
+                          title={`Matched to a requisition${order.returnSlipWarehouse ? ` (${order.returnSlipWarehouse})` : ""}`}
+                        >
+                          Matched to Requisition
+                        </span>
+                      )}
+                      {/* World credit orders (isCredit: true) never have a
+                          worldInvoiceFile — only this one. */}
+                      {order.worldCreditFile && onViewWorldCreditInvoiceImage && (
+                        <button
+                          type="button"
+                          onClick={() => onViewWorldCreditInvoiceImage(order)}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-slate-700 border-slate-200 hover:bg-slate-50 self-start"
+                          title="Open the credit memo PDF in your default viewer"
+                        >
+                          View Credit PDF
+                        </button>
+                      )}
+                      {order.worldCreditFile && onPrintWorldCreditInvoice && (
+                        <button
+                          type="button"
+                          onClick={() => onPrintWorldCreditInvoice(order)}
+                          disabled={invoicePrintingRef === `world-credit:${order.reference}`}
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50 disabled:opacity-60 self-start"
+                          title="Print the credit memo"
+                        >
+                          {invoicePrintingRef === `world-credit:${order.reference}`
+                            ? "Printing..."
+                            : order.worldCreditInvoicePrinted
+                            ? "Print Credit Again"
+                            : "Print Credit"}
+                        </button>
+                      )}
+                      {order.source === "world" &&
+                        order.isCredit &&
+                        !order.returnSlipId &&
+                        onMatchWorldCreditToRequisition && (
+                          <button
+                            type="button"
+                            onClick={() => onMatchWorldCreditToRequisition(order)}
+                            className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-amber-700 border-amber-300 hover:bg-amber-50 self-start"
+                            title={
+                              waitingCreditSlipCount
+                                ? `Match this credit to one of the ${waitingCreditSlipCount} requisition(s) waiting on a credit`
+                                : "Match this credit to a return requisition (none are waiting on a credit right now)"
+                            }
+                          >
+                            Match to Requisition…
+                          </button>
+                        )}
+                      {order.source === "world" && order.isCredit && order.returnSlipId && (
+                        <span
+                          className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200 self-start"
+                          title={`Matched to a requisition${order.returnSlipWarehouse ? ` (${order.returnSlipWarehouse})` : ""}`}
+                        >
+                          Matched to Requisition
+                        </span>
                       )}
                       {order.source === "bestbuy" && !order.bestbuyInvoiceFile && !order.bestbuyCreditFile && onFetchBestbuyInvoices && (
                         <button
@@ -1535,7 +1657,10 @@ export default function OrderManagementView({
                         <span>
                           Billed total ${qtyDiscrepancy.billedTotal.toFixed(2)} vs. line items total $
                           {qtyDiscrepancy.expectedTotal.toFixed(2)} (diff {qtyDiscrepancy.diff >= 0 ? "+" : ""}
-                          ${qtyDiscrepancy.diff.toFixed(2)}) — confirm quantities before sending to Sage.
+                          ${qtyDiscrepancy.diff.toFixed(2)}) — confirm quantities
+                          {order.enteredInSage
+                            ? " (already in Sage; this corrects the record only)."
+                            : " before sending to Sage."}
                         </span>
                         <button
                           type="button"
@@ -1559,6 +1684,46 @@ export default function OrderManagementView({
                           }}
                         >
                           Checked
+                        </button>
+                      </div>
+                    )}
+                    {/* The value check only tinted the card before, with no
+                        statement of what was wrong and no way to clear it — so
+                        an order could sit unarchivable with nothing explaining
+                        why. Sage is routinely corrected by hand after the run
+                        that raised this, and nothing tells the app that, so the
+                        figures are labelled "last synced" and clearing is a
+                        first-class action rather than an override. */}
+                    {needsValueCheck && (
+                      <div className="mt-3 rounded-xl border border-indigo-300 bg-indigo-50/70 px-3 py-2">
+                        <div className="text-xs font-semibold text-indigo-800 flex items-center gap-2">
+                          <span className="inline-block h-2 w-2 rounded-full bg-indigo-600"></span>
+                          Value check — Sage and the bill disagree
+                        </div>
+                        {Number.isFinite(billedNum) && Number.isFinite(sageNum) && (
+                          <div className="mt-1 text-xs text-slate-600 flex flex-wrap gap-x-4 gap-y-0.5">
+                            <span>
+                              Sage (last synced):{" "}
+                              <span className="font-semibold text-slate-800">${sageNum.toFixed(2)}</span>
+                            </span>
+                            <span>
+                              Bill: <span className="font-semibold text-slate-800">${billedNum.toFixed(2)}</span>
+                            </span>
+                            <span>
+                              Difference:{" "}
+                              <span className="font-semibold text-indigo-700">
+                                ${Math.abs(billedNum - sageNum).toFixed(2)}
+                              </span>
+                            </span>
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          className="mt-2 px-2 py-1 text-xs font-semibold rounded-lg border border-indigo-500 text-indigo-700 bg-white hover:bg-indigo-50"
+                          onClick={() => onClearValueCheck?.(refKey)}
+                          title="Clears this alert so the order can be archived. Use when Sage is correct now — including when you have already fixed it by hand."
+                        >
+                          Sage fixed by hand — clear alert
                         </button>
                       </div>
                     )}
@@ -1608,6 +1773,44 @@ export default function OrderManagementView({
           </div>
         )}
       </section>
+      <aside className="w-full xl:w-72 shrink-0 xl:sticky xl:top-4">
+        <Card>
+          <div className="text-sm uppercase tracking-wide text-slate-400 font-semibold">
+            Recently Archived
+          </div>
+          <div className="mt-3 flex flex-col gap-2">
+            {(recentArchivedOrders || []).length === 0 && (
+              <div className="text-sm text-slate-400">Nothing archived yet.</div>
+            )}
+            {(recentArchivedOrders || []).map((row, idx) => (
+              <div
+                key={`${row.reference || row.invoice || "archived"}-${row.archivedAt || idx}`}
+                className={`rounded-xl border px-3 py-2 text-xs ${
+                  idx === 0
+                    ? "border-indigo-300 bg-indigo-50 ring-1 ring-indigo-200"
+                    : "border-slate-200 bg-white/60"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className={`font-semibold uppercase ${idx === 0 ? "text-indigo-700" : "text-slate-600"}`}>
+                    {(row.warehouse || "-").slice(0, 5)}
+                  </span>
+                  <span className="text-slate-500">{row.invoice || "-"}</span>
+                </div>
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <span className="text-slate-700 font-semibold">
+                    {Number.isFinite(row.total) ? `$${row.total.toFixed(2)}` : "-"}
+                  </span>
+                  <span className="text-slate-500 truncate max-w-[9rem]" title={row.journalEntry || ""}>
+                    {row.journalEntry || "-"}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </aside>
+      </div>
     </>
   );
 }

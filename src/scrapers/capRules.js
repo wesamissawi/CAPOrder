@@ -495,6 +495,10 @@ const DEFAULT_RULES = {
       'World Automotive Warehouse',
       'World Automotive Warehouse / Regional Automotive Warehouse',
     ],
+    // Credit orders built in the Credits view used to store this decorated
+    // name; new ones store plain 'Transbec'. Kept so the ones already on disk
+    // still resolve their codes instead of falling through to defaultCode.
+    Transbec: ['Transbec Credit'],
   },
   warehouses: {
     World: [

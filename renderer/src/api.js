@@ -98,6 +98,8 @@ const fallbackApi = {
   fetchTransbecCreditInvoices: warnAsync("fetchTransbecCreditInvoices"),
   getTransbecCredits: warnAsync("getTransbecCredits", async () => ({ ok: true, credits: [] })),
   resetTransbecCredits: warnAsync("resetTransbecCredits"),
+  fetchWorldCreditInvoices: warnAsync("fetchWorldCreditInvoices"),
+  getWorldCredits: warnAsync("getWorldCredits", async () => ({ ok: true, credits: [] })),
   fetchCbkInvoices: warnAsync("fetchCbkInvoices"),
   openCbkInvoiceImage: warnAsync("openCbkInvoiceImage"),
   readCbkInvoiceImage: warnAsync("readCbkInvoiceImage"),
@@ -108,10 +110,13 @@ const fallbackApi = {
   archiveOrders: warnAsync("archiveOrders"),
   archiveOrder: warnAsync("archiveOrder"),
   deleteOrder: warnAsync("deleteOrder"),
-  confirm: async (message) => window.confirm(message),
+  // Browser-dev fallback for the native dialog. Keeps `detail` — callers put the
+  // figures being confirmed there, so dropping it would hide what is at stake.
+  confirm: async (message, detail) => window.confirm(detail ? `${message}\n\n${detail}` : message),
   searchOrdersArchive: warnAsync("searchOrdersArchive", async () => ({ ok: false, results: [] })),
   addArchiveLineToCashSales: warnAsync("addArchiveLineToCashSales", async () => ({ ok: false })),
   purgeOldOrdersArchive: warnAsync("purgeOldOrdersArchive", async () => ({ ok: false, removed: 0 })),
+  getRecentArchivedOrders: warnAsync("getRecentArchivedOrders", async () => ({ ok: false, orders: [] })),
   readOrderAssignments: warnAsync("readOrderAssignments", async () => ({ ok: false, orders: [] })),
   setOrderAssignmentResolved: warnAsync("setOrderAssignmentResolved"),
   resolveOrderAssignmentsBefore: warnAsync("resolveOrderAssignmentsBefore"),
@@ -178,6 +183,7 @@ const fallbackApi = {
   saveRules: warnAsync("saveRules"),
   resetRulesDefaults: warnAsync("resetRulesDefaults"),
   testRule: warnAsync("testRule", async () => ({ ok: false, code: "", description: "" })),
+  resolveCapLines: warnAsync("resolveCapLines", async () => ({ ok: false, codes: [] })),
   getInterchange: warnAsync("getInterchange", async () => ({ ok: false, table: {} })),
   saveInterchange: warnAsync("saveInterchange"),
 };

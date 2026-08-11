@@ -254,7 +254,77 @@ function parseCreditMemoText(text) {
   // BestBuy credit invoices, regardless of the sign printed in the source.
   if (total != null) total = -Math.abs(total);
 
-  return { creditMemoNumber, packingSlip, poNumber, customerNumber, total };
+  const creditDate = parseCreditMemoDate(t, creditMemoNumber);
+
+  return { creditMemoNumber, packingSlip, poNumber, customerNumber, total, creditDate };
+}
+
+const MONTH_NAMES = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+// The date the credit was ISSUED — what the purchase must carry into Sage.
+// Without it enterSagePurchases.ahk's NormalizeSageDate falls through to
+// A_DD/A_MM/A_YYYY and posts the credit under TODAY, which is how 01HW9352
+// (Jul 15) and 01IA3146 (Jul 31) both landed on Aug 11.
+//
+// The memo prints the date twice: the labelled "Credit Memo DATE" column
+// ("07/15/26") and a textual stamp in the page header ("Page 1 16:58:30
+// Jul 15 2026"). The numeric one is the labelled field so it wins, but numeric
+// day/month order cannot be read off the document — both observed samples
+// happen to have day > 12, which proves MM/DD/YY for those two and nothing
+// more. So the textual form is used to CHECK the reading, and to flip it when
+// it disagrees. Returns ISO "YYYY-MM-DD", or "" when nothing parses.
+function parseCreditMemoDate(text, creditMemoNumber) {
+  const t = String(text || "");
+
+  let textual = null;
+  const txtM = t.match(/\b([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})\b/);
+  if (txtM) {
+    const mo = MONTH_NAMES[txtM[1].toLowerCase()];
+    if (mo) textual = { y: Number(txtM[3]), m: mo, d: Number(txtM[2]) };
+  }
+
+  // Anchor on the memo number: the value row is "<customer> <memo#> <date>
+  // <packing slip> ...", so the date is the token right after the number we
+  // already trust. Falls back to the column label for any layout that reorders.
+  let numeric = null;
+  const esc = String(creditMemoNumber || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const numM =
+    (esc && t.match(new RegExp(esc + "\\s+(\\d{1,2})/(\\d{1,2})/(\\d{2,4})"))) ||
+    t.match(/Credit\s*Memo\s*DATE[\s\S]{0,120}?(\d{1,2})\/(\d{1,2})\/(\d{2,4})/i);
+  if (numM) {
+    const a = Number(numM[1]);
+    const b = Number(numM[2]);
+    // pdf-parse glues adjacent cells with no separator, so the date runs
+    // straight into the packing slip: "07/15/26" + "01CC2566001" reads as
+    // "07/15/2601CC2566001" and a greedy 4-digit year swallows "2601". Accept a
+    // 4-digit year only when it IS a plausible year; otherwise it is a 2-digit
+    // year with the next cell stuck to it.
+    const rawYear = numM[3];
+    let y = Number(rawYear);
+    if (!(y >= 1990 && y <= 2100)) y = Number(rawYear.slice(0, 2));
+    if (y < 100) y += 2000;
+    let m = a;
+    let d = b;
+    if (a > 12 && b <= 12) {
+      // Unambiguous the other way round.
+      m = b;
+      d = a;
+    } else if (textual && textual.d === a && textual.m === b) {
+      // The document's own textual stamp says day comes first here.
+      m = b;
+      d = a;
+    }
+    numeric = { y, m, d };
+  }
+
+  const picked = numeric || textual;
+  if (!picked) return "";
+  const { y, m, d } = picked;
+  if (!(y > 1990 && m >= 1 && m <= 12 && d >= 1 && d <= 31)) return "";
+  return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 }
 
 // Extract credit-memo fields from raw PDF bytes. Scalar fields (credit memo

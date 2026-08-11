@@ -450,6 +450,37 @@ const registerOrdersIpc = (ipcMain, deps) => {
     }
   });
 
+  // The Order Management "recently archived" log — most recently archived
+  // first, capped at `limit`. Read fresh off disk each call rather than kept
+  // live in the renderer, since archiving can happen from another machine.
+  ipcMain.handle('orders-archive:recent', async (_evt, limit) => {
+    try {
+      const n = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Number(limit) : 10;
+      const archive = readOrdersArchive() || [];
+      const rows = archive
+        .filter((o) => o && o.archivedAt)
+        .sort((a, b) => String(b.archivedAt).localeCompare(String(a.archivedAt)))
+        .slice(0, n)
+        .map((o) => ({
+          reference: o.reference || '',
+          source: o.source || '',
+          warehouse: (o.warehouse || o.seller || '').toString(),
+          invoice: o.source_invoice || o.invoiceNum || '',
+          total: Number.isFinite(Number(o.billed_total ?? o.billedTotal))
+            ? Number(o.billed_total ?? o.billedTotal)
+            : Number.isFinite(Number(o.total))
+            ? Number(o.total)
+            : null,
+          journalEntry: o.journalEntry || o.journal_entry || '',
+          archivedAt: o.archivedAt || '',
+        }));
+      return { ok: true, orders: rows };
+    } catch (e) {
+      console.error('[orders-archive:recent]', e);
+      return { ok: false, error: e?.message || 'Failed to read recently archived orders.' };
+    }
+  });
+
 
   ipcMain.handle('orders:reconcile-totals', async (_event, refKeyRaw, providedOrder) => {
     try {

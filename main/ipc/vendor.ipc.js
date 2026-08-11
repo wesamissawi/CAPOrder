@@ -66,7 +66,9 @@ const registerVendorIpc = (ipcMain, deps) => {
     fetchCbkInvoices,
     fetchTransbecCreditInvoices,
     fetchProforceCreditInvoices,
+    fetchWorldCreditInvoices,
     getTransbecCreditInvoices,
+    getWorldCreditInvoices,
     resetTransbecCreditScans,
     connectGmail,
     getGmailStatus,
@@ -139,6 +141,20 @@ const registerVendorIpc = (ipcMain, deps) => {
 
   ipcMain.handle('vendor:get-transbec-credits', async () => {
     return getTransbecCreditInvoices();
+  });
+
+  // --- World CREDIT MEMOS from Gmail (separate search from the regular
+  // invoice pipeline above; a credit has no pre-existing order — it's a
+  // return against a past sale — so this is just a discovery list, same
+  // shape as the Transbec credit pipeline above. PDFs land in the same
+  // gmail data dir, so viewing/printing reuse the World invoice image
+  // handlers above by file name) ---
+  ipcMain.handle('vendor:fetch-world-credit-invoices', async (_evt, payload) => {
+    return fetchWorldCreditInvoices(payload);
+  });
+
+  ipcMain.handle('vendor:get-world-credits', async () => {
+    return getWorldCreditInvoices();
   });
 
   // --- Proforce CREDIT invoices from Gmail (Proforce never emails regular

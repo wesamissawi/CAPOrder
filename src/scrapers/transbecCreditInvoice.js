@@ -77,16 +77,17 @@ async function fetchTransbecCreditInvoices(options = {}) {
       if (cached === "pick-ticket") continue;
 
       // Reuse a cached parse only if its saved PDF is still on disk AND it
-      // was parsed by a version of this code that captured lineItems — older
-      // cache entries (from before line-item extraction existed) would
-      // otherwise be trusted forever and never re-parsed, since the PDF file
-      // itself never goes away. Same self-healing idea as the BestBuy
-      // invoice cache's "total !== null" check.
+      // was parsed by a version of this code that captured lineItems AND a
+      // creditDate — older cache entries (from before line-item extraction, or
+      // before the credit date was read) would otherwise be trusted forever and
+      // never re-parsed, since the PDF file itself never goes away. Same
+      // self-healing idea as the BestBuy invoice cache's "total !== null" check.
       let discovery = null;
       if (
         cached &&
         cached.discovery &&
         Array.isArray(cached.discovery.lineItems) &&
+        cached.discovery.creditDate &&
         (!cached.discovery.fileName ||
           (dataDir && fs.existsSync(path.join(dataDir, cached.discovery.fileName))))
       ) {
@@ -96,7 +97,9 @@ async function fetchTransbecCreditInvoices(options = {}) {
             `ref=${discovery.reference || "(none)"} lineItems=${discovery.lineItems.length}`
         );
       } else if (cached && cached.discovery) {
-        console.log(`[transbec-credit] ${messageId}: cached entry is stale (no lineItems captured) — re-parsing`);
+        console.log(
+          `[transbec-credit] ${messageId}: cached entry is stale (no lineItems or no creditDate) — re-parsing`
+        );
       }
 
       if (!discovery) {
@@ -161,6 +164,9 @@ async function fetchTransbecCreditInvoices(options = {}) {
           // file header comment in transbecCreditInvoice.actions.js.
           reference: parsed.packingSlip || poReference || parsed.creditMemoNumber || "",
           creditMemoNumber: parsed.creditMemoNumber || "",
+          // ISO "YYYY-MM-DD". The date the credit must be POSTED under in Sage
+          // — without it the purchase-entry AHK defaults to today.
+          creditDate: parsed.creditDate || "",
           packingSlip: parsed.packingSlip || "",
           poNumber: parsed.poNumber || "",
           customerNumber: parsed.customerNumber || poReference || "",

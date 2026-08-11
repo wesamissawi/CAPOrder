@@ -26,12 +26,21 @@ function normalizeLineItem(item = {}, warehouse = "") {
   // final code the part will actually carry in Sage — the same value the bubble
   // stores — so the two never drift. See src/scrapers/capRules.js.
   const resolved = resolveCapCode(warehouse, partLineCode, partNumber, partDescription);
+  // A PRICE entered in Sage is never negative — only the quantity carries the
+  // sign of a return or credit. enterSagePurchases.ahk types costPrice straight
+  // into the purchase line AND runs it through the price ladder to derive the
+  // selling/preferred price, so a negative cost writes negative prices onto the
+  // item record itself, which outlives the credit. `extended` is deliberately
+  // left signed: it is an amount, not a price, and Sage needs it negative for a
+  // credit. Same convention the hand-built credit orders follow.
+  const costNum = item.costPriceValue ?? toNumber(costRaw);
+  const costAbs = costNum === null ? null : Math.abs(costNum);
   return {
     ...item,
     partLineCode,
     partNumber,
-    costPrice: cleanMoneyString(costRaw),
-    costPriceValue: item.costPriceValue ?? toNumber(costRaw),
+    costPrice: costAbs === null ? cleanMoneyString(costRaw) : String(costAbs),
+    costPriceValue: costAbs,
     partDescription,
     sageCode: resolved.code,
     sageDescription: resolved.description,

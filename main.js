@@ -47,6 +47,7 @@ const { getBestBuyOrders } = require('./src/scrapers/bestBuyScraper');
 const { getCbkOrders } = require('./src/scrapers/cbkScraper');
 const { getTigerOrders } = require('./src/scrapers/tigerScraper');
 const { fetchWorldInvoices } = require('./src/scrapers/worldInvoice');
+const { fetchWorldCreditInvoices } = require('./src/scrapers/worldCreditInvoice');
 const { fetchTransbecInvoices } = require('./src/scrapers/transbecInvoice');
 const { fetchBestbuyInvoices } = require('./src/scrapers/bestbuyInvoice');
 const { fetchBestbuyCreditInvoices } = require('./src/scrapers/bestbuyCreditInvoice');
@@ -174,6 +175,9 @@ function getCbkInvoiceCachePath() {
 }
 function getTransbecCreditInvoiceCachePath() {
   return path.join(getGmailAssetsDir(), 'transbec_credit_invoice_cache.json');
+}
+function getWorldCreditInvoiceCachePath() {
+  return path.join(getGmailAssetsDir(), 'world_credit_invoice_cache.json');
 }
 
 const PRELOAD = path.resolve(__dirname, 'preload.js');
@@ -1189,16 +1193,21 @@ function collectKnownInvoiceNumbers() {
 // manifest. Same month-folder convention the retired Epicor scrape used, so
 // existing world_YYYYMM archives stay coherent.
 function archiveWorldGmailAssets(archivedOrders) {
-  // worldInvoiceFile holds the .pdf name. epicorInvoiceImage is the legacy field
-  // from the retired Epicor portal scrape: orders captured before this changeover
-  // still carry one, and its .png lives in the old epicor folder. We keep moving
-  // those so a pre-existing order's invoice image isn't orphaned on archive.
+  // worldInvoiceFile holds the .pdf name. worldCreditFile is the analogous
+  // field for a credit-memo order created from the Credits view's World
+  // Credits scan (no invoice — just a credit memo attachment). epicorInvoiceImage
+  // is the legacy field from the retired Epicor portal scrape: orders captured
+  // before this changeover still carry one, and its .png lives in the old
+  // epicor folder. We keep moving those so a pre-existing order's invoice
+  // image isn't orphaned on archive.
   const assetOf = (o) =>
     o.worldInvoiceFile
       ? { fileName: o.worldInvoiceFile, dir: getGmailAssetsDir() }
-      : o.epicorInvoiceImage
-        ? { fileName: o.epicorInvoiceImage, dir: path.join(getSharedDataDir(), 'epicor') }
-        : null;
+      : o.worldCreditFile
+        ? { fileName: o.worldCreditFile, dir: getGmailAssetsDir() }
+        : o.epicorInvoiceImage
+          ? { fileName: o.epicorInvoiceImage, dir: path.join(getSharedDataDir(), 'epicor') }
+          : null;
   const candidates = (archivedOrders || []).filter((o) => o && o.source === 'world' && assetOf(o));
   if (!candidates.length) return;
 
@@ -1374,6 +1383,26 @@ function itemCodeKey(v) {
   return String(v || '').trim().toUpperCase().replace(/\s+/g, ' ');
 }
 
+// The codes a credit line may be sitting under in the RETURNS bubble, best first.
+//
+// A credit's lineItems are RAW off the vendor's document ("WAG" + "ZD1852"),
+// but the stock item created when the part was purchased holds the code the CAP
+// rules RESOLVED it to (makeOutstandingFromLine, main/domain/items.domain.js) —
+// and those rules rewrite plenty of codes: World drops the line code entirely
+// for WAG QC/ZD/MX/PD/SX, so "WAG ZD1852" is stocked as "ZD1852", while
+// Transbec turns "TRB BCD1210" into "BCD 1210". Keying on the raw pair alone
+// therefore missed exactly the parts the rules touched. The raw form is kept as
+// a fallback for items stocked before the rules existed, or by a path that
+// never resolved. See [[cap-code-single-source-resolve]].
+function creditLineCodeKeys(warehouse, line) {
+  const keys = [];
+  const resolved = itemCodeKey(resolveCapCodeForLine(warehouse, line));
+  if (resolved) keys.push(resolved);
+  const raw = itemCodeKey(`${line?.partLineCode || ''} ${line?.partNumber || ''}`);
+  if (raw && raw !== resolved) keys.push(raw);
+  return keys;
+}
+
 // Credit/return orders (orderLooksLikeCredit — an explicit isCredit, or an
 // order whose own signs are negative, e.g. a BestBuy return scraped straight
 // off the order-history page — see [[transbec-credit-memos]]) run through archiving
@@ -1406,23 +1435,27 @@ function reconcileCreditReturnAgainstStock(order) {
   // same physical Returns row within one reconciliation pass.
   const consumedUids = new Set();
 
+  const warehouseForRules = order?.warehouse || order?.seller || order?.source || '';
+
   const updatedLineItems = order.lineItems.map((line) => {
     if (!line || line.addedToOutstanding === true) return line;
-    const code = itemCodeKey(`${line.partLineCode || ''} ${line.partNumber || ''}`);
+    const codes = creditLineCodeKeys(warehouseForRules, line);
     const returnQty = Math.abs(Number(line.quantity) || 0);
-    if (!code || !returnQty) return { ...line, addedToOutstanding: true };
+    if (!codes.length || !returnQty) return { ...line, addedToOutstanding: true };
 
     const match = currentItems.find(
       (it) =>
         it &&
         !consumedUids.has(it.uid) &&
-        itemCodeKey(it.itemcode) === code &&
+        codes.includes(itemCodeKey(it.itemcode)) &&
         String(it.allocated_to || '').trim().toUpperCase() === 'RETURNS'
     );
 
     if (!match) {
       console.log(
-        `[orders] credit ${order.reference || ''}: no matching Returns item for "${code}" — leaving stock flow untouched`
+        `[orders] credit ${order.reference || ''}: no matching Returns item for ${codes
+          .map((c) => `"${c}"`)
+          .join(' / ')} — leaving stock flow untouched`
       );
       return { ...line, addedToOutstanding: true };
     }
@@ -1552,14 +1585,14 @@ function purgeOldOrdersArchive(days = 90) {
   return { ok: true, removed, remaining: keep.length };
 }
 
-// Never let a bad/missing rule break a search — a blank capCode just falls the
-// archive view back to the raw "<line> <part>" comparison.
+// Never let a bad/missing rule break a caller — a blank capCode just falls them
+// back to the raw "<line> <part>" comparison.
 function resolveCapCodeForLine(warehouse, line) {
   try {
     const r = resolveCapCode(warehouse, line?.partLineCode, line?.partNumber, line?.partDescription);
     return (r?.code || '').trim();
   } catch (e) {
-    console.error('[archive search] capCode resolve failed', e?.message);
+    console.error('[capRules] capCode resolve failed', e?.message);
     return '';
   }
 }
@@ -1757,6 +1790,7 @@ const vendorOrdersService = createVendorOrdersService({
   fetchCbkInvoicesScraper: fetchCbkInvoices,
   fetchTransbecCreditInvoicesScraper: fetchTransbecCreditInvoices,
   fetchProforceCreditInvoicesScraper: fetchProforceCreditInvoices,
+  fetchWorldCreditInvoicesScraper: fetchWorldCreditInvoices,
   getGmailAssetsDir,
   getWorldInvoiceCachePath,
   getTransbecInvoiceCachePath,
@@ -1765,6 +1799,7 @@ const vendorOrdersService = createVendorOrdersService({
   getCbkInvoiceCachePath,
   getTransbecCreditInvoiceCachePath,
   getProforceCreditInvoiceCachePath,
+  getWorldCreditInvoiceCachePath,
   runInteractiveAuth,
   verifyConnection,
   saveConfig,
@@ -1785,7 +1820,9 @@ const {
   fetchCbkInvoices: fetchCbkInvoicesService,
   fetchTransbecCreditInvoices: fetchTransbecCreditInvoicesService,
   fetchProforceCreditInvoices: fetchProforceCreditInvoicesService,
+  fetchWorldCreditInvoices: fetchWorldCreditInvoicesService,
   getTransbecCreditInvoices,
+  getWorldCreditInvoices,
   resetTransbecCreditScans,
   connectGmail,
   getGmailStatus,
@@ -2408,7 +2445,9 @@ function registerAllIpc() {
     fetchCbkInvoices: fetchCbkInvoicesService,
     fetchTransbecCreditInvoices: fetchTransbecCreditInvoicesService,
     fetchProforceCreditInvoices: fetchProforceCreditInvoicesService,
+    fetchWorldCreditInvoices: fetchWorldCreditInvoicesService,
     getTransbecCreditInvoices,
+    getWorldCreditInvoices,
     resetTransbecCreditScans,
     connectGmail,
     getGmailStatus,

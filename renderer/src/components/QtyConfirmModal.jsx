@@ -67,6 +67,7 @@ export default function QtyConfirmModal({
   onSave,
   onAcknowledge,
 }) {
+  const alreadyEntered = Boolean(order?.enteredInSage);
   const baseLineItems = useMemo(() => getOrderLineItemsForCalc(order), [order]);
   const baseKeys = useMemo(() => buildLineKeys(baseLineItems), [baseLineItems]);
   const hasSageLineItems = Array.isArray(order?.sage_lineItems) && order.sage_lineItems.length > 0;
@@ -165,6 +166,14 @@ export default function QtyConfirmModal({
               {order?.warehouse || "-"} - {order?.reference || refKey} — the billed total doesn't
               match what these line items add up to. Lower the quantities that didn't actually
               ship, then save. Quantities can only be reduced, never increased.
+              {alreadyEntered && (
+                <>
+                  {" "}
+                  This order is already entered in Sage — saving here only corrects the record of
+                  what shipped; it does not change the amount already posted in Sage. Use
+                  "Reconcile totals" on the card for that.
+                </>
+              )}
             </p>
           </div>
           <button className="text-slate-500 hover:text-slate-700 text-lg leading-none" onClick={onClose}>
@@ -251,7 +260,7 @@ export default function QtyConfirmModal({
             The billed total is <strong>higher</strong> than these line items, so lowering
             quantities will only widen the gap. That usually means an environmental fee, core
             charge or freight on the invoice that isn't a line here — in which case use
-            <strong> Send to Sage anyway</strong>.
+            <strong>{alreadyEntered ? " Mark reviewed" : " Send to Sage anyway"}</strong>.
           </div>
         )}
 
@@ -281,15 +290,21 @@ export default function QtyConfirmModal({
               Cancel
             </button>
             {/* Escape hatch: without it an order whose gap can't be closed by
-                lowering quantities has no route to Sage at all. */}
+                lowering quantities has no route to Sage at all. Post-entry there
+                is nothing left to send, but the gap still needs a way to be
+                dismissed as reviewed instead of nagging forever. */}
             {stillOver && onAcknowledge && (
               <button
                 className="px-4 py-2 rounded-full text-sm font-semibold border border-amber-400 text-amber-800 bg-white hover:bg-amber-50 disabled:opacity-50"
                 onClick={handleAcknowledge}
                 disabled={busy}
-                title="Record this difference as reviewed and let the order go to Sage. The check returns if the billed total or the line items change."
+                title={
+                  alreadyEntered
+                    ? "Record this difference as reviewed. The check returns if the billed total or the line items change."
+                    : "Record this difference as reviewed and let the order go to Sage. The check returns if the billed total or the line items change."
+                }
               >
-                {acking ? "Recording…" : "Send to Sage anyway"}
+                {acking ? "Recording…" : alreadyEntered ? "Mark reviewed" : "Send to Sage anyway"}
               </button>
             )}
             <button

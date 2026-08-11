@@ -244,32 +244,58 @@ async function fetchDetail(context, detailUrl) {
           const totalRaw = norm(tds[12]?.innerText || "");
           const quantity = qtyShip || qtyOrder || "";
           const coreVal = money(coreRaw);
+          const totalVal = money(totalRaw);
+          const qtyVal = money(quantity);
+          const cents = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+          // Prices entered in Sage are NEVER negative — only the quantity
+          // carries the sign of a return. A negative unit cost would also feed
+          // the purchase-entry AHK's price ladder and write negative selling
+          // prices onto the item record.
+          const unitNet = money(netRaw) === null ? null : Math.abs(money(netRaw));
+          const unitCore = coreVal === null ? null : Math.abs(coreVal);
+
+          // The row's "Net Total" column ALREADY INCLUDES the core
+          // (190.95 + 74.54- = 265.49- on credit 2419126), so handing that
+          // figure to the part line and then pushing a separate core line
+          // counted the core twice — and the core line, taking the raw core
+          // cell verbatim, carried the wrong sign, so Sage was CHARGED the core
+          // on a credit instead of crediting it. Split the vendor's own total
+          // instead of recomputing it, which keeps
+          // part + core === the printed row total exactly, discounts and all.
+          let partExtendedValue = totalVal;
+          let coreExtendedValue = null;
+          if (unitCore) {
+            const magnitude = qtyVal === null ? unitCore : Math.abs(qtyVal) * unitCore;
+            coreExtendedValue = cents(totalVal !== null && totalVal < 0 ? -magnitude : magnitude);
+            if (totalVal !== null) partExtendedValue = cents(totalVal - coreExtendedValue);
+          }
+
           const entry = {
             partLineCode: brand || "",
             partNumber,
-            costPrice: netRaw,
-            costPriceValue: money(netRaw),
+            costPrice: unitNet === null ? netRaw : String(unitNet),
+            costPriceValue: unitNet,
             partDescription,
             quantity,
-            extended: totalRaw,
-            extendedValue: money(totalRaw),
+            extended: partExtendedValue === null ? totalRaw : String(partExtendedValue),
+            extendedValue: partExtendedValue,
             core: false,
-            coreCharge: coreVal,
+            coreCharge: unitCore,
             hasEnvironmentalFee: Boolean(money(ehcRaw)),
             environmentalFeeAmount: money(ehcRaw),
             addedToOutstanding: false,
           };
           lineItems.push(entry);
-          if (coreVal) {
+          if (unitCore) {
             lineItems.push({
               partLineCode: `CORE ${brand || ""}`.trim(),
               partNumber,
-              costPrice: coreRaw,
-              costPriceValue: coreVal,
+              costPrice: String(unitCore),
+              costPriceValue: unitCore,
               partDescription: `BestBuy Core: ${partNumber}`.trim(),
               quantity,
-              extended: coreRaw,
-              extendedValue: coreVal,
+              extended: coreExtendedValue === null ? coreRaw : String(coreExtendedValue),
+              extendedValue: coreExtendedValue,
               core: true,
               addedToOutstanding: false,
               hasEnvironmentalFee: false,

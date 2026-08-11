@@ -21,6 +21,9 @@ function daysAgoIso(days) {
 // credit memo Transbec has ever sent.
 const TRANSBEC_CREDIT_DEFAULT_LOOKBACK_DAYS = 5;
 
+// World credit memos default to the same trailing window as Transbec's.
+const WORLD_CREDIT_DEFAULT_LOOKBACK_DAYS = 5;
+
 // Vendor credit memos pulled from Gmail. Previously this card lived inside the
 // Epicor view; when the Epicor portal scrape was retired (World now emails
 // machine-readable invoices) this was lifted into its own view so it kept its
@@ -36,17 +39,31 @@ export default function CreditsView({
   onRemoveTransbecCreditOrder,
   onViewTransbecCreditImage,
   onResetTransbecCredits,
+  worldCredits,
+  worldCreditScanning,
+  worldCreditError,
+  worldCreditLog,
+  onFetchWorldCredits,
+  onLoadWorldCredits,
+  onCreateWorldCreditOrder,
+  onRemoveWorldCreditOrder,
+  onViewWorldCreditImage,
 }) {
   const [transbecResetStatus, setTransbecResetStatus] = useState("");
   const [creditCreateStatus, setCreditCreateStatus] = useState({}); // { [creditMemoNumber]: "adding" | "created" | "removing" | "error:msg" }
   const [creditFromDate, setCreditFromDate] = useState(daysAgoIso(TRANSBEC_CREDIT_DEFAULT_LOOKBACK_DAYS));
   const [creditToDate, setCreditToDate] = useState(todayIso());
   const [onlyNewCredits, setOnlyNewCredits] = useState(true);
+  const [worldCreditCreateStatus, setWorldCreditCreateStatus] = useState({}); // { [creditMemoNumber]: "adding" | "created" | "removing" | "error:msg" }
+  const [worldCreditFromDate, setWorldCreditFromDate] = useState(daysAgoIso(WORLD_CREDIT_DEFAULT_LOOKBACK_DAYS));
+  const [worldCreditToDate, setWorldCreditToDate] = useState(todayIso());
+  const [onlyNewWorldCredits, setOnlyNewWorldCredits] = useState(true);
 
   // On open, list whatever was found in past sessions straight from the cache
   // (no Gmail round-trip) so the page isn't empty after a restart.
   useEffect(() => {
     if (onLoadTransbecCredits) onLoadTransbecCredits();
+    if (onLoadWorldCredits) onLoadWorldCredits();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -60,6 +77,16 @@ export default function CreditsView({
     // count as "on file", so the user sees the confirmation.
     () => (onlyNewCredits ? credits.filter((c) => !c.known || c.created) : credits),
     [credits, onlyNewCredits]
+  );
+
+  const worldCreditsList = Array.isArray(worldCredits) ? worldCredits : [];
+  const worldCreditUnknownCount = useMemo(
+    () => worldCreditsList.filter((c) => !c.known && !c.created).length,
+    [worldCreditsList]
+  );
+  const visibleWorldCredits = useMemo(
+    () => (onlyNewWorldCredits ? worldCreditsList.filter((c) => !c.known || c.created) : worldCreditsList),
+    [worldCreditsList, onlyNewWorldCredits]
   );
 
   async function handleCreateCreditOrder(credit) {
@@ -98,6 +125,34 @@ export default function CreditsView({
       });
     } catch (e) {
       setCreditCreateStatus((p) => ({ ...p, [key]: "error:" + (e?.message || "Failed") }));
+    }
+  }
+
+  async function handleCreateWorldCreditOrder(credit) {
+    const key = credit.creditMemoNumber || "";
+    setWorldCreditCreateStatus((p) => ({ ...p, [key]: "adding" }));
+    try {
+      const res = await onCreateWorldCreditOrder(credit);
+      if (!res?.ok) throw new Error(res?.error || "Failed to create order.");
+      setWorldCreditCreateStatus((p) => ({ ...p, [key]: "created" }));
+    } catch (e) {
+      setWorldCreditCreateStatus((p) => ({ ...p, [key]: "error:" + (e?.message || "Failed") }));
+    }
+  }
+
+  async function handleRemoveWorldCreditOrder(credit) {
+    const key = credit.creditMemoNumber || "";
+    setWorldCreditCreateStatus((p) => ({ ...p, [key]: "removing" }));
+    try {
+      const res = await onRemoveWorldCreditOrder(credit);
+      if (!res?.ok) throw new Error(res?.error || "Failed to remove order.");
+      setWorldCreditCreateStatus((p) => {
+        const next = { ...p };
+        delete next[key];
+        return next;
+      });
+    } catch (e) {
+      setWorldCreditCreateStatus((p) => ({ ...p, [key]: "error:" + (e?.message || "Failed") }));
     }
   }
 
@@ -351,6 +406,238 @@ export default function CreditsView({
             );
           })}
         </div>
-      </Card>    </div>
+      </Card>
+
+      <Card>
+        <div className="flex flex-col gap-3">
+          <div>
+            <h2 className="text-xl font-semibold text-slate-800">World Credits</h2>
+            <p className="text-sm text-slate-500">
+              Check Gmail for World Automotive Warehouse credit memo emails (from{" "}
+              <span className="font-mono">reports@groupe-monaco.ca</span>, subject &quot;Credit
+              Memo for 20605 Cust&quot;). These have no existing order, so each one gets its own{" "}
+              <strong>Create order</strong> button.
+            </p>
+          </div>
+          <div className="grid gap-3 md:grid-cols-[1fr,1fr,auto] items-end">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">From date</label>
+              <input
+                type="date"
+                className="rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                value={worldCreditFromDate}
+                max={worldCreditToDate || undefined}
+                onChange={(e) => setWorldCreditFromDate(e.target.value)}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">To date</label>
+              <input
+                type="date"
+                className="rounded-xl border border-slate-200 px-3 py-2 text-sm"
+                value={worldCreditToDate}
+                min={worldCreditFromDate || undefined}
+                onChange={(e) => setWorldCreditToDate(e.target.value)}
+              />
+            </div>
+            <button
+              className="rounded-xl bg-indigo-600 text-white px-4 py-2 font-semibold shadow hover:bg-indigo-700 disabled:opacity-60 whitespace-nowrap"
+              onClick={() => onFetchWorldCredits(worldCreditFromDate, worldCreditToDate)}
+              disabled={worldCreditScanning || !worldCreditFromDate || !worldCreditToDate}
+            >
+              {worldCreditScanning ? "Checking…" : "Check for World Credits"}
+            </button>
+          </div>
+          <p className="text-xs text-slate-400">
+            Defaults to the last {WORLD_CREDIT_DEFAULT_LOOKBACK_DAYS} days. Widen the range to check
+            further back — credit memos already found stay listed below regardless of the range.
+          </p>
+          {worldCreditError && (
+            <div className="text-sm text-red-600 whitespace-pre-line">{worldCreditError}</div>
+          )}
+          {Array.isArray(worldCreditLog) && worldCreditLog.length > 0 && (
+            <details className="text-xs text-slate-500">
+              <summary className="cursor-pointer select-none">Check log</summary>
+              <pre className="mt-2 whitespace-pre-wrap text-slate-500">{worldCreditLog.join("\n")}</pre>
+            </details>
+          )}
+          {worldCreditsList.length > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+              <div className="flex flex-wrap items-center gap-4">
+                <span className="text-slate-600">
+                  Found <span className="font-semibold text-slate-800">{worldCreditsList.length}</span>{" "}
+                  credit memo(s)
+                </span>
+                <span
+                  className={`px-2 py-1 rounded-full border font-semibold ${
+                    worldCreditUnknownCount > 0
+                      ? "bg-amber-100 text-amber-800 border-amber-300"
+                      : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                  }`}
+                >
+                  {worldCreditUnknownCount} not yet made into an order
+                </span>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={onlyNewWorldCredits}
+                  onChange={(e) => setOnlyNewWorldCredits(e.target.checked)}
+                />
+                Show only invoices I don&apos;t have
+              </label>
+            </div>
+          )}
+          {worldCreditsList.length === 0 && !worldCreditScanning && (
+            <p className="text-sm text-slate-500">
+              No credit memos found yet. Click <strong>Check for World Credits</strong> to search
+              Gmail.
+            </p>
+          )}
+          {worldCreditsList.length > 0 && visibleWorldCredits.length === 0 && (
+            <p className="text-sm text-slate-500">
+              Every credit memo found is already saved to an order. 🎉 Untick “only new” to see
+              them all.
+            </p>
+          )}
+          {visibleWorldCredits.map((credit, idx) => {
+            const totalNum = Number(credit.total);
+            const key = credit.creditMemoNumber || "";
+            const status = worldCreditCreateStatus[key];
+            const isError = status?.startsWith("error:");
+            const created = credit.known || credit.created || status === "created";
+            return (
+              <div
+                key={`${key || "credit"}-${idx}`}
+                className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border px-3 py-2 ${
+                  credit.known || created ? "border-slate-100" : "border-amber-300 bg-amber-50/40"
+                }`}
+              >
+                <div className="flex flex-wrap items-center gap-4">
+                  <div>
+                    <div className="text-xs uppercase tracking-wide text-slate-400 leading-none mb-0.5">
+                      Packing Slip (reference)
+                    </div>
+                    <div className="text-base font-bold text-indigo-700">
+                      {credit.reference || "—"}
+                    </div>
+                  </div>
+                  {credit.creditMemoNumber && (
+                    <div>
+                      <div className="text-xs uppercase tracking-wide text-slate-400 leading-none mb-0.5">
+                        Credit Memo #
+                      </div>
+                      <div className="text-sm font-semibold text-slate-800">
+                        {credit.creditMemoNumber}
+                      </div>
+                    </div>
+                  )}
+                  {Number.isFinite(totalNum) && (
+                    <div>
+                      <div className="text-xs uppercase tracking-wide text-slate-400 leading-none mb-0.5">
+                        Credit Total
+                      </div>
+                      <div className="text-sm font-semibold text-slate-800">
+                        ${totalNum.toFixed(2)}
+                      </div>
+                    </div>
+                  )}
+                  {credit.creditDate && (
+                    <div>
+                      <div className="text-xs uppercase tracking-wide text-slate-400 leading-none mb-0.5">
+                        Credit Date
+                      </div>
+                      <div className="text-sm font-medium text-slate-700">{credit.creditDate}</div>
+                    </div>
+                  )}
+                  {!credit.checksOk && (
+                    <span
+                      className="px-2 py-1 rounded-full border font-semibold bg-red-50 text-red-700 border-red-200 text-xs"
+                      title="This credit memo's printed totals did not reconcile against its own arithmetic — verify the amounts before creating the order."
+                    >
+                      Verify amounts
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {credit.fileName && onViewWorldCreditImage && (
+                    <button
+                      className="px-3 py-1 rounded-full text-xs font-semibold border bg-white text-indigo-700 border-indigo-200 hover:bg-indigo-50"
+                      onClick={() => onViewWorldCreditImage(credit.fileName)}
+                    >
+                      View attachment
+                    </button>
+                  )}
+                  {created ? (
+                    <>
+                      <span className="px-3 py-1 rounded-full text-xs font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200">
+                        Order created ✓
+                      </span>
+                      {onRemoveWorldCreditOrder && (
+                        <button
+                          className="px-3 py-1 rounded-full text-xs font-semibold border bg-white text-red-600 border-red-200 hover:bg-red-50 disabled:opacity-60"
+                          disabled={status === "removing"}
+                          title={isError ? status.slice(6) : "Remove this order from Order Management"}
+                          onClick={() => handleRemoveWorldCreditOrder(credit)}
+                        >
+                          {status === "removing" ? "Removing…" : isError ? "Retry remove" : "Remove"}
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    onCreateWorldCreditOrder && (
+                      <button
+                        className={`px-3 py-1 rounded-full text-xs font-semibold border disabled:opacity-60 ${
+                          isError
+                            ? "bg-red-50 text-red-600 border-red-200"
+                            : "bg-white text-emerald-700 border-emerald-200 hover:bg-emerald-50"
+                        }`}
+                        disabled={status === "adding" || !key}
+                        title={isError ? status.slice(6) : "Add this credit memo to Order Management as an order"}
+                        onClick={() => handleCreateWorldCreditOrder(credit)}
+                      >
+                        {status === "adding" ? "Creating…" : isError ? "Retry create" : "Create order"}
+                      </button>
+                    )
+                  )}
+                </div>
+                {Array.isArray(credit.lineItems) && credit.lineItems.length > 0 && (
+                  <details className="w-full mt-2 text-xs text-slate-600">
+                    <summary className="cursor-pointer select-none text-slate-500">
+                      {credit.lineItems.length} returned part(s) (verify)
+                    </summary>
+                    <div className="mt-2 space-y-1">
+                      {credit.lineItems.map((li, li2) => (
+                        <div
+                          key={`${key || "credit"}-${idx}-part-${li2}`}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-100 bg-white/70 px-2 py-1"
+                        >
+                          <span className="font-semibold text-slate-800">
+                            {`${li.partLineCode || ""} ${li.partNumber || ""}`.trim() || "—"}
+                          </span>
+                          {li.description && (
+                            <span className="text-slate-500 flex-1 min-w-0 truncate">
+                              {li.description}
+                            </span>
+                          )}
+                          {Number.isFinite(Number(li.quantity)) && (
+                            <span className="text-slate-500">Qty {li.quantity}</span>
+                          )}
+                          {Number.isFinite(Number(li.costPrice)) && (
+                            <span className="font-medium text-slate-700">
+                              ${Number(li.costPrice).toFixed(2)}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+    </div>
   );
 }

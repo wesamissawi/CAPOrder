@@ -72,6 +72,39 @@ const registerRulesIpc = (ipcMain) => {
     }
   });
 
+  // Batch resolve for the renderer. capRules only lives in the main process, so
+  // any view that needs to know the code a line is actually STOCKED under (as
+  // opposed to the raw "<line> <part>" the vendor printed) has to ask for it —
+  // the credit-to-requisition match modals compare against Returns itemcodes,
+  // which hold the resolved code. Unlike rules:test this does NOT invalidate the
+  // cache: it is a read on the hot path, not a rule-editing preview.
+  ipcMain.handle('rules:resolve-lines', (_evt, payload) => {
+    try {
+      const p = payload || {};
+      const lines = Array.isArray(p.lines) ? p.lines : [];
+      const codes = lines.map((line) => {
+        try {
+          const out = capRules.resolveCapCode(
+            p.warehouse,
+            line?.partLineCode,
+            line?.partNumber,
+            line?.partDescription ?? line?.description
+          );
+          return (out?.code || '').trim();
+        } catch (e) {
+          // One bad line must not blank the whole batch — the caller falls back
+          // to the raw pair for any empty slot.
+          console.error('[rules:resolve-lines] line resolve failed', e?.message);
+          return '';
+        }
+      });
+      return { ok: true, codes };
+    } catch (e) {
+      console.error('[rules:resolve-lines]', e);
+      return { ok: false, error: e?.message || 'Failed to resolve lines.' };
+    }
+  });
+
   ipcMain.handle('rules:interchange-get', (_evt, fileName) => {
     try {
       if (!fileName || typeof fileName !== 'string') return { ok: false, error: 'File name required.' };
