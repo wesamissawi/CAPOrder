@@ -3064,19 +3064,27 @@ export default function App() {
 
   function updateOrderAt(index, patch) {
     if (index < 0) return;
-    setOrders((prev) => {
-      if (index >= prev.length) return prev;
-      const next = [...prev];
-      const current = next[index] || {};
-      next[index] = { ...current, ...patch };
-      return next;
-    });
+    const prev = ordersRef.current || [];
+    if (index >= prev.length) return;
+    const next = [...prev];
+    next[index] = { ...(next[index] || {}), ...patch };
+    commitOrders(next);
     setOrdersDirty(true);
   }
 
+  // Builds the patched list from ordersRef.current and commits it, instead of
+  // reading state back out of a setOrders updater. React only runs that updater
+  // synchronously when the component has no other update already pending, so a
+  // caller that set any other state first — handlePrintVendorInvoice raises its
+  // spinner and clears the error banner before marking the bill printed — got
+  // null back, and updateOrderByKeyAndSave then returned WITHOUT saving. That is
+  // how "printed" lived in memory only, was wiped by the next cycle's
+  // loadOrders(), and had ghost mode reprint the same Transbec bills every half
+  // hour (CB7170 came out six times). Same reasoning as the note on ordersRef.
   function updateOrderByKey(key, patch) {
     if (!key) return null;
-    if (isOrderSageLocked(orders.find((o) => orderKeyMatches(o, key)))) {
+    const prev = ordersRef.current || [];
+    if (isOrderSageLocked(prev.find((o) => orderKeyMatches(o, key)))) {
       // The order is in the hands of the Sage pipeline. Anything typed here now
       // would be written back on the next save and could revert the result the
       // processing machine is about to report — the card is blurred for exactly
@@ -3084,36 +3092,35 @@ export default function App() {
       console.warn("[orders] edit ignored — order is locked by Sage", key);
       return null;
     }
-    let result = null;
-    setOrders((prev) => {
-      let changed = false;
-      const next = prev.map((o) => {
-        if (!o) return o;
-        const refMatch =
-          o.reference &&
-          String(o.reference).trim().toUpperCase() === String(key).trim().toUpperCase();
-        const rowMatch = o.__row && String(o.__row) === String(key);
-          if (!refMatch && !rowMatch) return o;
-          changed = true;
-          const patchVal = typeof patch === "function" ? patch(o) : patch || {};
-          return {
-            ...o,
-            ...(patchVal || {}),
-            lastUpdatedAt: new Date().toISOString(),
-            _localDirty: true,
-            // WHICH fields the user changed, not just that the order changed.
-            // Tracking this per field is what lets two machines edit different
-            // fields of the same order without either silently losing the
-            // other's work — see the external merge below and
-            // mergeOrdersForWrite. Accumulates until the order is saved.
-            _dirtyFields: mergeDirtyFields(o._dirtyFields, patchVal),
-          };
-        });
-      if (changed) setOrdersDirty(true);
-      result = next;
-      return next;
+    let changed = false;
+    const next = prev.map((o) => {
+      if (!o) return o;
+      const refMatch =
+        o.reference &&
+        String(o.reference).trim().toUpperCase() === String(key).trim().toUpperCase();
+      const rowMatch = o.__row && String(o.__row) === String(key);
+      if (!refMatch && !rowMatch) return o;
+      changed = true;
+      const patchVal = typeof patch === "function" ? patch(o) : patch || {};
+      return {
+        ...o,
+        ...(patchVal || {}),
+        lastUpdatedAt: new Date().toISOString(),
+        _localDirty: true,
+        // WHICH fields the user changed, not just that the order changed.
+        // Tracking this per field is what lets two machines edit different
+        // fields of the same order without either silently losing the
+        // other's work — see the external merge below and
+        // mergeOrdersForWrite. Accumulates until the order is saved.
+        _dirtyFields: mergeDirtyFields(o._dirtyFields, patchVal),
+      };
     });
-    return result;
+    // Nothing matched the key: hand back the list untouched rather than a new
+    // array, so no render is scheduled and the caller still saves a coherent list.
+    if (!changed) return prev;
+    commitOrders(next);
+    setOrdersDirty(true);
+    return next;
   }
   // `_dirtyFields` rides along on the wire so main can tell a real edit from a
   // stale value this window merely happened to be holding. It is stripped in
@@ -3134,13 +3141,23 @@ export default function App() {
       return rest;
     });
   }
+  // Every path that replaces the orders list goes through here. State lands a
+  // render later, so the ref is the only copy something running right now can
+  // read: a save built moments after a load, or ghostPrintTargets at the top of
+  // the print job, would otherwise still be looking at the previous list.
+  function commitOrders(list) {
+    const next = Array.isArray(list) ? list : [];
+    ordersRef.current = next;
+    setOrders(next);
+    return next;
+  }
   // Take an array that is now believed to match disk, put it in state and make
   // it the clean baseline. Always goes through clearDirtyMarks so a saved edit
   // stops being treated as pending — otherwise the next external update would
   // keep re-applying it over fresher values from another machine.
   function adoptSavedOrders(list) {
     const cleaned = clearDirtyMarks(list);
-    setOrders(cleaned);
+    commitOrders(cleaned);
     ordersLastSavedRef.current = JSON.stringify(cleaned);
     return cleaned;
   }
@@ -3481,32 +3498,33 @@ export default function App() {
       // actually a conflict, so take the incoming (disk) copy as the base and
       // re-apply only the fields this user actually touched.
       console.log("[orders] external update merged (local edits present)");
-      setOrders((prev) => {
-        const localDirty = new Map();
-        (prev || []).forEach((o) => {
-          if (!o?._localDirty) return;
-          const key = (o.reference || o.__row || "").toString().trim().toUpperCase();
-          if (key) localDirty.set(key, o);
-        });
-        if (!localDirty.size) return normalized;
-        return normalized.map((o) => {
-          const key = (o?.reference || o?.__row || "").toString().trim().toUpperCase();
-          const mine = key ? localDirty.get(key) : null;
-          // An order the Sage pipeline has claimed always comes from disk, even
-          // if this window has unsaved changes to it — main would refuse them
-          // anyway, so showing them would be a lie.
-          if (!mine || isOrderSageLocked(o)) return o;
-          const fields = Array.isArray(mine._dirtyFields) ? mine._dirtyFields : null;
-          // No field list (an edit made before this tracking existed): fall back
-          // to the old whole-order behaviour rather than dropping the edit.
-          if (!fields) return mine;
-          const merged = { ...o, _localDirty: true, _dirtyFields: fields };
-          fields.forEach((f) => {
-            merged[f] = mine[f];
-          });
-          return merged;
-        });
+      const localDirty = new Map();
+      (ordersRef.current || []).forEach((o) => {
+        if (!o?._localDirty) return;
+        const key = (o.reference || o.__row || "").toString().trim().toUpperCase();
+        if (key) localDirty.set(key, o);
       });
+      commitOrders(
+        !localDirty.size
+          ? normalized
+          : normalized.map((o) => {
+              const key = (o?.reference || o?.__row || "").toString().trim().toUpperCase();
+              const mine = key ? localDirty.get(key) : null;
+              // An order the Sage pipeline has claimed always comes from disk,
+              // even if this window has unsaved changes to it — main would
+              // refuse them anyway, so showing them would be a lie.
+              if (!mine || isOrderSageLocked(o)) return o;
+              const fields = Array.isArray(mine._dirtyFields) ? mine._dirtyFields : null;
+              // No field list (an edit made before this tracking existed): fall
+              // back to the old whole-order behaviour rather than dropping the edit.
+              if (!fields) return mine;
+              const merged = { ...o, _localDirty: true, _dirtyFields: fields };
+              fields.forEach((f) => {
+                merged[f] = mine[f];
+              });
+              return merged;
+            })
+      );
       setOrdersInitialized(true);
       return;
     }
@@ -3520,7 +3538,7 @@ export default function App() {
     try {
       setOrdersSaving(true);
       setOrdersError(null);
-      const normalized = normalizeOrdersForSave(orders);
+      const normalized = normalizeOrdersForSave(ordersRef.current || []);
       const res = await api?.writeOrders?.(normalized);
       if (!res?.ok) {
         throw new Error("Failed to save orders.");
@@ -3626,7 +3644,7 @@ export default function App() {
   async function flushPendingOrderEdits() {
     if (!ordersDirty || !api?.writeOrders) return true;
     try {
-      const normalized = normalizeOrdersForSave(orders);
+      const normalized = normalizeOrdersForSave(ordersRef.current || []);
       const res = await api.writeOrders(normalized);
       if (!res?.ok) return false;
       adoptSavedOrders(Array.isArray(res.orders) ? res.orders : normalized);
@@ -3654,7 +3672,7 @@ export default function App() {
         throw new Error(res?.error || "Failed to fetch World orders.");
       }
       const list = Array.isArray(res.orders) ? res.orders : [];
-      setOrders(list);
+      commitOrders(list);
       ordersLastSavedRef.current = JSON.stringify(list);
       setOrdersDirty(false);
       setOrdersInitialized(true);
@@ -3681,7 +3699,7 @@ export default function App() {
         throw new Error(res?.error || "Failed to fetch CBK orders.");
       }
       const list = Array.isArray(res.orders) ? res.orders : [];
-      setOrders(list);
+      commitOrders(list);
       ordersLastSavedRef.current = JSON.stringify(list);
       setOrdersDirty(false);
       setOrdersInitialized(true);
@@ -3708,7 +3726,7 @@ export default function App() {
         throw new Error(res?.error || "Failed to fetch Tiger orders.");
       }
       const list = Array.isArray(res.orders) ? res.orders : [];
-      setOrders(list);
+      commitOrders(list);
       ordersLastSavedRef.current = JSON.stringify(list);
       setOrdersDirty(false);
       setOrdersInitialized(true);
@@ -3735,7 +3753,7 @@ export default function App() {
         throw new Error(res?.error || "Failed to fetch BestBuy orders.");
       }
       const list = Array.isArray(res.orders) ? res.orders : [];
-      setOrders(list);
+      commitOrders(list);
       ordersLastSavedRef.current = JSON.stringify(list);
       setOrdersDirty(false);
       setOrdersInitialized(true);
@@ -3762,7 +3780,7 @@ export default function App() {
         throw new Error(res?.error || "Failed to fetch Transbec orders.");
       }
       const list = Array.isArray(res.orders) ? res.orders : [];
-      setOrders(list);
+      commitOrders(list);
       ordersLastSavedRef.current = JSON.stringify(list);
       setOrdersDirty(false);
       setOrdersInitialized(true);
@@ -3787,7 +3805,7 @@ export default function App() {
       const res = await api.fetchProforceOrders();
       if (!res?.ok) throw new Error(res?.error || "Failed to fetch Proforce orders.");
       const list = Array.isArray(res.orders) ? res.orders : [];
-      setOrders(list);
+      commitOrders(list);
       ordersLastSavedRef.current = JSON.stringify(list);
       setOrdersDirty(false);
       setOrdersInitialized(true);
@@ -4732,7 +4750,7 @@ export default function App() {
           _localDirty: true,
         };
       });
-      setOrders(patchedOrders);
+      commitOrders(patchedOrders);
       // Dirty BEFORE attempting the save: if the write fails and the user closes
       // this modal, the corrected values stay protected (Save button live, and
       // external refreshes won't overwrite them) instead of silently vanishing.
@@ -4827,7 +4845,7 @@ export default function App() {
       if (appliedCount > 0) {
         // Dirty BEFORE attempting the save — see handleFetchBestbuyInvoices for
         // the full rationale (protects against silent data loss on save failure).
-        setOrders(patchedOrders);
+        commitOrders(patchedOrders);
         setOrdersDirty(true);
         if (api?.writeOrders) {
           const normalized = normalizeOrdersForSave(patchedOrders);
@@ -4929,7 +4947,7 @@ export default function App() {
       if (appliedCount > 0) {
         // Dirty BEFORE attempting the save — see handleFetchBestbuyInvoices for
         // the full rationale (protects against silent data loss on save failure).
-        setOrders(patchedOrders);
+        commitOrders(patchedOrders);
         setOrdersDirty(true);
         if (api?.writeOrders) {
           const normalized = normalizeOrdersForSave(patchedOrders);
@@ -5123,7 +5141,7 @@ export default function App() {
         // the Save button for a manual retry, and it stops any later full-orders
         // refresh (the file watcher's push, or another vendor fetch) from
         // overwriting these never-persisted fields with stale disk contents.
-        setOrders(patchedOrders);
+        commitOrders(patchedOrders);
         setOrdersDirty(true);
         if (api?.writeOrders) {
           const normalized = normalizeOrdersForSave(patchedOrders);
@@ -5259,7 +5277,7 @@ export default function App() {
         // Reflect in the UI, and mark dirty BEFORE the write so a failed save
         // keeps the data recoverable (Save button stays live, and a later
         // full-orders refresh can't silently discard the never-persisted data).
-        setOrders(patchedOrders);
+        commitOrders(patchedOrders);
         setOrdersDirty(true);
         if (api?.writeOrders) {
           const normalized = normalizeOrdersForSave(patchedOrders);
@@ -5348,7 +5366,7 @@ export default function App() {
 
       let saveFailed = false;
       if (appliedCount > 0) {
-        setOrders(patchedOrders);
+        commitOrders(patchedOrders);
         setOrdersDirty(true);
         if (api?.writeOrders) {
           const normalized = normalizeOrdersForSave(patchedOrders);
@@ -5594,7 +5612,7 @@ export default function App() {
       if (ordersInitialized) {
         // refresh orders so addedToOutstanding flags are reflected
         const refreshed = await api.readOrders();
-        setOrders(Array.isArray(refreshed) ? refreshed : []);
+        commitOrders(Array.isArray(refreshed) ? refreshed : []);
       }
     } catch (e) {
       console.error("[outstanding] add error", e);
@@ -5977,6 +5995,14 @@ export default function App() {
         .join(", ")})`;
     }
     if (kind === "print-invoices") {
+      // loadOrders() adopts disk wholesale, so any unsaved edit in this window
+      // is discarded by it. Flush first: an unsaved "printed" flag thrown away
+      // here is a bill that prints again next cycle, and again after that.
+      if (!(await flushPendingOrderEdits())) {
+        throw new Error(
+          "This machine has unsaved order changes it could not save, so nothing was printed (they would have been lost and the bills reprinted next cycle)."
+        );
+      }
       await loadOrders();
       const targets = ghostPrintTargets(ordersRef.current);
       for (const { order, vendor } of targets) {
