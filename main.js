@@ -30,6 +30,7 @@ const { createCredentialSyncService } = require('./main/services/credentialSync.
 const { createAutomationService } = require('./main/services/automation.service');
 const { createUpdatesService } = require('./main/services/updates.service');
 const { writeJsonAtomic } = require('./main/utils/atomicWrite');
+const { installCrashGuard } = require('./main/utils/crashGuard');
 // Shared business data is replicated as a CRDT (see main/crdt/README.md).
 // Machines exchange append-only op logs instead of overwriting shared JSON
 // files, which is what removes lost updates between machines on the share.
@@ -55,12 +56,6 @@ const { fetchProforceCreditInvoices } = require('./src/scrapers/proforceCreditIn
 const { fetchTransbecCreditInvoices } = require('./src/scrapers/transbecCreditInvoice');
 const { fetchCbkInvoices } = require('./src/scrapers/cbkInvoice');
 const { runInteractiveAuth, verifyConnection } = require('./src/scrapers/gmail.auth');
-const {
-  openCloverSession,
-  scrapeCloverPayments,
-  closeCloverSession,
-  getCloverStatus,
-} = require('./src/scrapers/cloverScraper');
 const { resolveCapCode } = require('./src/scrapers/capRules');
 const { orderLooksLikeCredit } = require('./src/scrapers/creditShape');
 
@@ -78,6 +73,19 @@ const {
 
 // ---- path + config helpers ----
 const INSTANCE_DIR = app.getPath('userData');
+
+// Installed before anything else can throw: an unhandled error in main used to
+// take the whole app down behind Electron's raw error dialog, which on an
+// unattended ghost-mode machine means it just stops. See main/utils/crashGuard.js.
+installCrashGuard({
+  app,
+  dialog,
+  fs,
+  path,
+  instanceDir: INSTANCE_DIR,
+  getSharedDataDir: () => getSharedDataDir(),
+  getMachineId: () => getMachineId(),
+});
 const BUSINESS_FILE_BASENAMES = {
   outstanding: 'outstanding_items.json',
   sageAr: 'sage_ar_items.json',
@@ -90,9 +98,10 @@ const BUSINESS_FILE_BASENAMES = {
   orderAssignments: 'order_assignments.json',
   payments: 'payments.json',
   paymentsBackup: 'payments.json.bak',
-  // Every Clover payment id ever scraped, so a payment the user has since
-  // edited or deleted is never re-imported. Shared, like payments.json itself:
-  // a scrape on one machine must not reappear on another.
+  // Every Clover payment id ever imported from a CSV export, so a payment the
+  // user has since edited or deleted is never re-imported. Shared, like
+  // payments.json itself: an import on one machine must not reappear on
+  // another. (Named for the browser scrape this used to be.)
   cloverLedger: 'clover_scraped.json',
   archived: 'archived_bubbles.json',
   archivedBackup: 'archived_bubbles.json.bak',
@@ -148,12 +157,6 @@ const VENDOR_PATHS = {
 // value that can change without an app restart — see getSharedDataDir().
 function getGmailAssetsDir() {
   return path.join(getSharedDataDir(), 'gmail');
-}
-// Clover keeps nothing shared: no session is stored (the user logs in by hand
-// every time) and the only thing ever written is a page snapshot when a scrape
-// comes back empty, which is machine-local troubleshooting, not business data.
-function getCloverDebugDir() {
-  return path.join(INSTANCE_DIR, 'clover');
 }
 function getTransbecInvoiceCachePath() {
   return path.join(getGmailAssetsDir(), 'transbec_invoice_cache.json');
@@ -2349,13 +2352,6 @@ app.on('before-quit', () => {
   } catch (e) {
     console.error('[updates] stopping update timers failed', e);
   }
-  // Playwright's Chromium is a child process, not an Electron window, so it
-  // outlives the app unless we close it here.
-  try {
-    closeCloverSession();
-  } catch (e) {
-    console.error('[clover] closing browser on quit failed', e);
-  }
 });
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -2404,11 +2400,6 @@ function registerAllIpc() {
     readPayments,
     writePayments,
     getPaymentsFile,
-    openCloverSession,
-    scrapeCloverPayments,
-    closeCloverSession,
-    getCloverStatus,
-    getCloverDebugDir,
     readCloverLedger,
     writeCloverLedger,
     getCloverLedgerFile,

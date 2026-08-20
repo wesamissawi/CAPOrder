@@ -6,32 +6,19 @@ const money = (n) => {
   return Number.isFinite(v) ? `$${v.toFixed(2)}` : "—";
 };
 
-// Drives the credential-free Clover scrape: open a browser the user signs into
-// themselves, let them navigate to Transactions → Payments, then read the page
-// and write straight into payments.json. There is no confirm step on purpose —
-// the scrape ledger (clover_scraped.json) is what keeps a repeat scrape from
-// re-importing anything, so nothing here needs approving twice.
+// Imports Clover's Payments CSV export. The user downloads the export from
+// Clover themselves and points the app at the file — there is no browser, no
+// login and no page to read. There is no confirm step on purpose: the import
+// ledger (clover_scraped.json) is what keeps a re-import of an overlapping
+// export from adding anything twice, so nothing here needs approving.
 export default function CloverImportModal({ onClose, onImported }) {
-  const [phase, setPhase] = useState("idle"); // idle | opening | ready | scraping | done
-  const [browserOpen, setBrowserOpen] = useState(false);
-  const [pageInfo, setPageInfo] = useState({ url: "", title: "" });
+  const [phase, setPhase] = useState("idle"); // idle | importing | done
   const [error, setError] = useState("");
   const [statusLog, setStatusLog] = useState([]);
   const [result, setResult] = useState(null);
   const [ledger, setLedger] = useState(null);
   const [fixing, setFixing] = useState(false);
   const [fixed, setFixed] = useState(null);
-
-  const refreshStatus = useCallback(async () => {
-    try {
-      const res = await api.getCloverStatus?.();
-      setBrowserOpen(Boolean(res?.open));
-      if (res?.open) setPageInfo({ url: res.url || "", title: res.title || "" });
-      return Boolean(res?.open);
-    } catch {
-      return false;
-    }
-  }, []);
 
   const refreshLedger = useCallback(async () => {
     try {
@@ -44,50 +31,25 @@ export default function CloverImportModal({ onClose, onImported }) {
 
   useEffect(() => {
     refreshLedger();
-    refreshStatus().then((open) => {
-      if (open) setPhase((p) => (p === "idle" ? "ready" : p));
-    });
-  }, [refreshStatus, refreshLedger]);
+  }, [refreshLedger]);
 
-  // The browser is a separate window the user is working in, so poll for it
-  // being closed (by them or by a crash) rather than assuming it's still there.
-  useEffect(() => {
-    const id = setInterval(refreshStatus, 4000);
-    return () => clearInterval(id);
-  }, [refreshStatus]);
-
-  async function handleOpen() {
-    setError("");
-    setPhase("opening");
-    try {
-      const res = await api.openClover();
-      if (res?.ok === false) {
-        setError(res.error || "Failed to open the Clover browser.");
-        setPhase("idle");
-        return;
-      }
-      setBrowserOpen(true);
-      setPageInfo({ url: res?.url || "", title: "" });
-      setPhase("ready");
-    } catch (e) {
-      setError(e?.message || "Failed to open the Clover browser.");
-      setPhase("idle");
-    }
-  }
-
-  async function handleScrape() {
+  async function handleChooseFile() {
     setError("");
     setStatusLog([]);
     setResult(null);
-    setPhase("scraping");
+    setFixed(null);
+    setPhase("importing");
     try {
-      const res = await api.scrapeCloverPayments();
+      const res = await api.importCloverCsv();
+      // Cancelling the file picker isn't a failure — just go back to idle.
+      if (res?.canceled) {
+        setPhase("idle");
+        return;
+      }
       setStatusLog(Array.isArray(res?.statusLog) ? res.statusLog : []);
-      if (res?.url || res?.title) setPageInfo({ url: res.url || "", title: res.title || "" });
       if (!res?.ok) {
-        setError(res?.error || "Nothing could be read from that page.");
-        setPhase(res?.open === false ? "idle" : "ready");
-        setBrowserOpen(res?.open !== false);
+        setError(res?.error || "Nothing could be read from that file.");
+        setPhase("idle");
         return;
       }
       setResult(res);
@@ -95,13 +57,13 @@ export default function CloverImportModal({ onClose, onImported }) {
       await refreshLedger();
       if (res.imported > 0) await onImported?.();
     } catch (e) {
-      setError(e?.message || "Failed to scrape the Clover page.");
-      setPhase("ready");
+      setError(e?.message || "Failed to read that CSV file.");
+      setPhase("idle");
     }
   }
 
   // Undo for imports that landed with a bad card type: removes them and their
-  // ledger entries so the next scrape picks them up again, correctly typed.
+  // ledger entries so the next import picks them up again, correctly typed.
   async function handleForgetMistyped() {
     setError("");
     setFixing(true);
@@ -121,28 +83,19 @@ export default function CloverImportModal({ onClose, onImported }) {
     }
   }
 
-  async function handleCloseBrowser() {
-    try {
-      await api.closeClover();
-    } catch {
-      /* nothing useful to say — the window is going away either way */
-    }
-    setBrowserOpen(false);
-  }
-
-  const busy = phase === "opening" || phase === "scraping";
+  const busy = phase === "importing";
 
   return (
     <div className="fixed inset-0 z-[5000] bg-slate-900/60 flex items-center justify-center px-4">
       <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl p-6 flex flex-col gap-4 max-h-[92vh]">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-xl font-semibold text-slate-800">Import Payments from Clover</h2>
+            <h2 className="text-xl font-semibold text-slate-800">Import Payments from a Clover CSV</h2>
             <p className="text-sm text-slate-500 max-w-2xl">
-              Open Clover, sign in yourself, and go to <strong>Transactions → Payments</strong>. The
-              app never sees your login — it only reads the page you land on. Scroll until every row
-              you want is loaded, then scrape: payments go straight into `payments.json`, and
-              anything already scraped before is skipped.
+              In Clover, go to <strong>Reporting → Payments</strong>, pick the date range and
+              <strong> Export</strong> it. Then choose that .csv below: payments go straight into
+              `payments.json`, and anything imported before is skipped, so overlapping exports are
+              safe.
             </p>
           </div>
           <button
@@ -157,56 +110,18 @@ export default function CloverImportModal({ onClose, onImported }) {
         <div className="flex flex-wrap items-center gap-2 border-y border-slate-100 py-3">
           <button
             type="button"
-            onClick={handleOpen}
-            disabled={busy || browserOpen}
-            className="px-4 py-2 rounded-full text-sm font-semibold bg-slate-800 text-white disabled:opacity-40"
-          >
-            {phase === "opening" ? "Opening…" : browserOpen ? "Clover is open" : "1. Open Clover"}
-          </button>
-          <button
-            type="button"
-            onClick={handleScrape}
-            disabled={busy || !browserOpen}
+            onClick={handleChooseFile}
+            disabled={busy}
             className="px-4 py-2 rounded-full text-sm font-semibold bg-emerald-600 text-white disabled:opacity-40"
           >
-            {phase === "scraping" ? "Scraping…" : "2. Scrape & Import"}
+            {busy ? "Reading…" : phase === "done" ? "Choose another CSV file…" : "Choose CSV file…"}
           </button>
-          {browserOpen && (
-            <button
-              type="button"
-              onClick={handleCloseBrowser}
-              disabled={busy}
-              className="px-4 py-2 rounded-full text-sm font-semibold border border-slate-300 text-slate-600 hover:bg-slate-50"
-              title="Closes the Clover window and ends the session. Nothing is saved to disk."
-            >
-              Close Clover
-            </button>
+          {result?.file && (
+            <span className="text-xs text-slate-400 truncate max-w-[24rem]" title={result.file}>
+              {result.file}
+            </span>
           )}
-          <span
-            className={`ml-auto inline-flex items-center gap-1 text-xs font-semibold ${
-              browserOpen ? "text-emerald-600" : "text-slate-400"
-            }`}
-          >
-            <span
-              className={`h-2 w-2 rounded-full ${browserOpen ? "bg-emerald-500" : "bg-slate-300"}`}
-            />
-            {browserOpen ? "Browser open" : "Browser closed"}
-          </span>
         </div>
-
-        {phase === "scraping" && (
-          <div className="rounded-xl bg-indigo-50 border border-indigo-200 px-3 py-2 text-sm text-indigo-800">
-            Reading the payment list, then opening each card payment's details in a second tab to
-            find out whether it's Visa or Mastercard. Interac payments are read straight off the
-            list. Don't touch the Clover window while this runs.
-          </div>
-        )}
-
-        {pageInfo.url && (
-          <div className="text-xs text-slate-400 truncate">
-            Reading: <code className="text-indigo-600">{pageInfo.title || pageInfo.url}</code>
-          </div>
-        )}
 
         {error && (
           <div className="rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
@@ -231,13 +146,13 @@ export default function CloverImportModal({ onClose, onImported }) {
               </div>
               <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2">
                 <div className="text-lg font-semibold text-slate-700">{result.skippedKnown || 0}</div>
-                <div className="text-[11px] text-slate-500">already scraped</div>
+                <div className="text-[11px] text-slate-500">already imported</div>
               </div>
               <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2">
                 <div className="text-lg font-semibold text-slate-700">
-                  {(result.declined || 0) + (result.skippedUnidentified || 0)}
+                  {(result.declined || 0) + (result.nonCard || 0)}
                 </div>
-                <div className="text-[11px] text-slate-500">declined / unreadable</div>
+                <div className="text-[11px] text-slate-500">declined / not a card</div>
               </div>
             </div>
 
@@ -277,7 +192,14 @@ export default function CloverImportModal({ onClose, onImported }) {
               <div className="rounded-xl bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
                 Rows highlighted above imported without a card type or a date. They're in
                 `payments.json` already — fix them with the payment's <strong>Edit</strong> button.
-                They won't be scraped again.
+                They won't be imported again.
+              </div>
+            )}
+
+            {result.payments?.some((p) => /refunded/.test(p.note || "")) && (
+              <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2 text-xs text-slate-600">
+                Partly refunded payments import at the amount the terminal took, with the refund
+                noted. Adjust the amount by hand if the refund belongs against the same sale.
               </div>
             )}
           </>
@@ -287,7 +209,7 @@ export default function CloverImportModal({ onClose, onImported }) {
           <div className="rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-800">
             {fixed === 0
               ? "No mistyped Clover payments found — nothing to redo."
-              : `Removed ${fixed} mistyped payment${fixed === 1 ? "" : "s"} and cleared them from the ledger. Click "Scrape & Import" to pull them again with the right card type.`}
+              : `Removed ${fixed} mistyped payment${fixed === 1 ? "" : "s"} and cleared them from the ledger. Import the CSV again to pull them back with the right card type.`}
           </div>
         )}
 
@@ -295,7 +217,7 @@ export default function CloverImportModal({ onClose, onImported }) {
           <div className="flex flex-col gap-1">
             <div className="text-xs text-slate-400">
               {ledger
-                ? `Scrape ledger: ${ledger.total} Clover payment${
+                ? `Import ledger: ${ledger.total} Clover payment${
                     ledger.total === 1 ? "" : "s"
                   } seen so far — those are never re-imported.`
                 : ""}
@@ -305,7 +227,7 @@ export default function CloverImportModal({ onClose, onImported }) {
               onClick={handleForgetMistyped}
               disabled={busy || fixing}
               className="self-start text-xs font-semibold text-indigo-600 hover:underline disabled:opacity-40"
-              title="Deletes Clover payments whose type isn't Interac, VISA or MasterCard and clears them from the ledger, so the next scrape re-imports them correctly."
+              title="Deletes Clover payments whose type isn't Interac, VISA or MasterCard and clears them from the ledger, so the next import brings them back."
             >
               {fixing ? "Clearing…" : "Redo payments with a wrong card type"}
             </button>

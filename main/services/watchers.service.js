@@ -45,6 +45,12 @@ const createWatchersService = (deps) => {
       watcher.on('add', handler);
       watcher.on('change', handler);
       watcher.on('unlink', handler);
+      // An FSWatcher is an EventEmitter, so an 'error' with no listener is
+      // THROWN — and chokidar routes every fs error it can't classify (it only
+      // swallows ENOENT/ENOTDIR) through emit('error'). Over SMB that turns a
+      // momentary stat failure into a fatal main-process dialog. Log it and
+      // leave the watcher up; the next write to the file re-fires it anyway.
+      watcher.on('error', (e) => console.error(`[watch] ${label} watcher error`, e?.code || '', e?.message || e));
       return () => {
         try { watcher.close(); } catch {}
       };
@@ -125,6 +131,9 @@ const createWatchersService = (deps) => {
       watcher.on('add', handler);
       watcher.on('change', handler);
       watcher.on('unlink', handler);
+      // See createFileWatcher: an unlistened 'error' would be thrown, and this
+      // watcher sits on a network share where transient stat failures happen.
+      watcher.on('error', (e) => console.error('[watch] ops watcher error', e?.code || '', e?.message || e));
       itemsWatchers.push(() => {
         try { watcher.close(); } catch {}
       });

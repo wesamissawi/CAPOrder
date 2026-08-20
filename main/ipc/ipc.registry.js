@@ -119,11 +119,8 @@ function registerAllIpc(ipcMain, deps) {
   });
 
   registerCloverIpc(ipcMain, {
-    openCloverSession: deps.openCloverSession,
-    scrapeCloverPayments: deps.scrapeCloverPayments,
-    closeCloverSession: deps.closeCloverSession,
-    getCloverStatus: deps.getCloverStatus,
-    getCloverDebugDir: deps.getCloverDebugDir,
+    dialog: deps.dialog,
+    fs: deps.fs,
     readPayments: deps.readPayments,
     writePayments: deps.writePayments,
     readCloverLedger: deps.readCloverLedger,

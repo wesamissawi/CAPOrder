@@ -435,8 +435,8 @@ export default function PaymentManagementView({ currentViewMeta, saleNameByPayme
     }
   }
 
-  // The Clover scrape writes payments.json in the main process (it also has to
-  // update the scrape ledger in the same step), so this just re-reads the file
+  // The CSV import writes payments.json in the main process (it also has to
+  // update the import ledger in the same step), so this just re-reads the file
   // rather than merging anything itself.
   async function reloadPayments() {
     try {
@@ -464,9 +464,9 @@ export default function PaymentManagementView({ currentViewMeta, saleNameByPayme
               type="button"
               onClick={() => setShowCloverImport(true)}
               className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700"
-              title="Opens Clover in a browser you sign into yourself, then reads the transaction page you land on."
+              title="Reads a Clover payments CSV export you downloaded, and adds anything not imported before."
             >
-              Import from Clover
+              Import Clover CSV
             </button>
             {paymentsPath && (
               <div className="text-xs text-slate-400">
