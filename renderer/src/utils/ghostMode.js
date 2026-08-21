@@ -225,6 +225,50 @@ export function ghostSageQueueTargets(orders, { taxRate, threshold } = {}) {
   });
 }
 
+// The OTHER Sage queue: orders already entered whose invoice number has changed
+// since, which Sage still holds under the old one. It is its own queue because
+// ghostSageQueueTargets above refuses anything already `enteredInSage`, and
+// rightly so — this does not re-enter a purchase, it retypes one field.
+//
+// BestBuy is why this exists. Its invoices arrive a day after the order, so the
+// cycle deliberately enters BestBuy on the ORDER REFERENCE rather than stranding
+// it (see ghostSageQueueTargets), and the Sage run stamps back
+// `invoiceSageUpdate: true` + `sage_reference_synced`. When the real invoice
+// number lands in Gmail the next day the fetch sets `invoiceNeedsSync` — and
+// until now nothing unattended acted on it: the bill printed, the order sat in
+// Sage under the order reference, and archiving stayed blocked until somebody
+// pressed "Update Invoice" by hand.
+//
+// The narrowings here are all about update_invoice.ahk, which looks the invoice
+// up in Sage BY THE OLD REFERENCE and retypes it as the new one:
+//
+//  - both references are required and must differ. With either one missing the
+//    AHK pops a MsgBox and sits on it until the run times out, which on an
+//    unattended Sage machine is a wedged queue, not a failed order.
+//  - `sage_reference_synced` is required rather than falling back to
+//    `order.reference` the way the AHK does. That fallback is a guess at what
+//    Sage holds; guessing wrong means editing the wrong invoice in Sage.
+//  - anything in flight on the purchase queue is left alone: that run's result
+//    rewrites `sage_reference_synced`, the very field this reads.
+//  - credits are skipped, same as the purchase queue — they are handled by hand
+//    in the Credits view, and a credit whose number changes is rare enough to
+//    stay a person's decision.
+export function ghostSageInvoiceUpdateTargets(orders) {
+  return (orders || []).filter((order) => {
+    if (!order || !ghostOrderKey(order)) return false;
+    if (order.invoiceNeedsSync !== true) return false;
+    if (order.enteredInSage !== true) return false;
+    const oldRef = (order.sage_reference_synced || "").toString().trim();
+    const newRef = (order.sage_reference || order.source_invoice || "").toString().trim();
+    if (!oldRef || !newRef || oldRef === newRef) return false;
+    if (looksLikeCredit(order)) return false;
+    if (order.sage_invoice_queued || order.sage_invoice_trigger) return false;
+    if (order.sage_queued || order.sage_trigger) return false;
+    if (isOrderSageLocked(order)) return false;
+    return true;
+  });
+}
+
 // Transbec and BestBuy bills that exist on disk and have never been printed.
 // World invoices are never printed — they don't have to be printed before
 // archiving — and neither are the credit PDFs, which belong to the credit flow

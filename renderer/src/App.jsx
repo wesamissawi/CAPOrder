@@ -52,6 +52,7 @@ import {
   ghostPrintTargets,
   ghostQueuedKeys,
   ghostSagePendingCount,
+  ghostSageInvoiceUpdateTargets,
   ghostSageQueueTargets,
   ghostSlotKey,
   ghostTigerRunKey,
@@ -6504,14 +6505,36 @@ export default function App() {
           console.error("[ghost] queue failed for", ghostOrderKey(order), e);
         }
       }
+      // The invoice-number queue, which is a different queue: these orders are
+      // already in Sage and only their reference is being retyped (BestBuy is
+      // entered on the order reference before its invoice arrives, so this is
+      // how it ends up filed under the real invoice number). Queued here rather
+      // than by the loop above because that one refuses anything already
+      // entered — see ghostSageInvoiceUpdateTargets.
+      const invoiceTargets = ghostSageInvoiceUpdateTargets(ordersRef.current);
+      let invoiceQueued = 0;
+      for (const order of invoiceTargets) {
+        try {
+          const res = await api?.triggerOrderSage?.(ghostOrderKey(order), "invoice");
+          if (res?.ok) invoiceQueued += 1;
+          else console.warn("[ghost] could not queue invoice update", ghostOrderKey(order), res?.error);
+        } catch (e) {
+          console.error("[ghost] invoice update queue failed for", ghostOrderKey(order), e);
+        }
+      }
+
       // Snapshot the waiting room BEFORE releasing it: that is precisely the set
       // "Send to Sage" is about to hand to the Sage machine, and precisely what
-      // the printing step below has to wait for.
+      // the printing step below has to wait for. It already counts invoice
+      // updates (ghostQueuedKeys reads sage_invoice_queued), so the wait below
+      // covers the ones just queued without any change.
       const releasedKeys = ghostQueuedKeys(await readOrdersFromDisk());
       const sentRes = await api?.sendSageQueue?.();
       const sent = Number(sentRes?.sent) || 0;
       done.push(
-        `Queued ${queued} order(s); released ${sent} to ${sageMachine}.` +
+        `Queued ${queued} order(s)` +
+          (invoiceQueued ? ` + ${invoiceQueued} invoice update(s)` : "") +
+          `; released ${sent} to ${sageMachine}.` +
           (sentRes?.ok === false ? ` (${sentRes.error || "send failed"})` : "")
       );
 

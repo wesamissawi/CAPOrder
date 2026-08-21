@@ -213,39 +213,57 @@ Loop, %itemCount% {
 tabTo("Edit1", 200)
 Sleep, 300
 
-; Reverse tab once to land on the account select box
-Send, +{Tab}
-Sleep, 300
+; --- Back out to the Print & Process button ---
+; Two different forms land here. A CASH sale carries the "paid by" account
+; select box in the tab order, so it needs the arrow-key hunt below to sit on
+; "1020 Cash to be deposited" before backing out the rest of the way. Every
+; other customer pays later: that box is not in the tab order at all, so the
+; button is simply 4 shift-tabs back from Edit1, and the arrow keys would be
+; pressed against whatever field is actually focused instead.
+;
+; Cash Sales always sends CAS202 (the hardcoded sageCustomerCode default in
+; renderer/src/views/CashSalesView.jsx — App.jsx never overrides it), while
+; Sales Orders sends whatever code was typed into the card. So the code itself
+; is the test. AHK's '=' is case-insensitive, so cas202 matches too.
+isCashSale := (Trim(customerCode) = "CAS202")
 
-; Press Up up to 4 times to find "1020 Cash to be deposited"
-found := false
-ControlGetFocus, focusedCtrl, A
-ControlGetText, ctrlText, %focusedCtrl%, A
-if (InStr(ctrlText, "1020 Cash to be deposited"))
-    found := true
+if (isCashSale) {
+    ; Reverse tab once to land on the account select box
+    Send, +{Tab}
+    Sleep, 300
 
-if (!found) {
-    Loop, 4 {
-        Send, {Up}
-        Sleep, 200
-        ControlGetFocus, focusedCtrl, A
-        ControlGetText, ctrlText, %focusedCtrl%, A
-        if (InStr(ctrlText, "1020 Cash to be deposited")) {
-            found := true
-            break
+    ; Press Up up to 4 times to find "1020 Cash to be deposited"
+    found := false
+    ControlGetFocus, focusedCtrl, A
+    ControlGetText, ctrlText, %focusedCtrl%, A
+    if (InStr(ctrlText, "1020 Cash to be deposited"))
+        found := true
+
+    if (!found) {
+        Loop, 4 {
+            Send, {Up}
+            Sleep, 200
+            ControlGetFocus, focusedCtrl, A
+            ControlGetText, ctrlText, %focusedCtrl%, A
+            if (InStr(ctrlText, "1020 Cash to be deposited")) {
+                found := true
+                break
+            }
+        }
+    }
+
+    ; If still not found after 4 Up presses, press Down 4 times and continue
+    if (!found) {
+        Loop, 4 {
+            Send, {Down}
+            Sleep, 200
         }
     }
 }
 
-; If still not found after 4 Up presses, press Down 4 times and continue
-if (!found) {
-    Loop, 4 {
-        Send, {Down}
-        Sleep, 200
-    }
-}
-
-; Reverse tab 4 more times to reach Print & Process button
+; Reverse tab the remaining 4 times to reach the Print & Process button. Shared
+; by both paths: from Edit1 that is 4 for a pay-later customer, and 5 for a cash
+; sale counting the one taken above to reach the account box.
 Loop, 4 {
     Send, +{Tab}
     Sleep, 200
