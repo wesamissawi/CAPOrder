@@ -55,9 +55,11 @@ import {
   ghostSageQueueTargets,
   ghostSlotKey,
   ghostTigerRunKey,
+  ghostWorldPoRunKey,
   isWithinGhostHours,
   shouldFetchBestbuyInvoices,
   shouldFetchTigerOrders,
+  shouldFetchWorldPoInvoices,
 } from "./utils/ghostMode";
 
 const DEFAULT_BUBBLE_NAMES = new Set(DEFAULT_BUBBLES.map((b) => b.name));
@@ -521,6 +523,10 @@ export default function App() {
   const [worldFetching, setWorldFetching] = useState(false);
   const [worldStatus, setWorldStatus] = useState("");
   const [worldError, setWorldError] = useState("");
+  // World invoices that arrived with no order behind them (worldStandaloneInvoice.js).
+  const [worldPoFetching, setWorldPoFetching] = useState(false);
+  const [worldPoStatus, setWorldPoStatus] = useState("");
+  const [worldPoError, setWorldPoError] = useState("");
   // Pre-Sage quantity-vs-billed-total check (see utils/qtyDiscrepancy.js).
   // Defaults mirror main.js's normalizeAppConfig fallback so the UI matches
   // what's actually on disk before the config load below completes.
@@ -544,6 +550,7 @@ export default function App() {
   // The day the once-daily BestBuy invoice check last ran on, and the day+slot
   // of the last twice-daily Tiger order pull.
   const ghostBestbuyDayRef = useRef("");
+  const ghostWorldPoRunRef = useRef("");
   const ghostTigerRunRef = useRef("");
   // Cross-machine automation: the roster and who has which role. Kept in state
   // for the admin screen; every dispatch re-reads them fresh, because a machine
@@ -3825,6 +3832,10 @@ export default function App() {
         setWorldOrdersStatus("");
         setWorldOrdersError("");
         break;
+      case "world-po":
+        setWorldPoStatus("");
+        setWorldPoError("");
+        break;
       case "cbk":
         setCbkOrdersStatus("");
         setCbkOrdersError("");
@@ -4882,6 +4893,251 @@ export default function App() {
       setWorldError(e?.message || "Failed to fetch World invoices.");
     } finally {
       setWorldFetching(false);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // World invoices with NO ORDER BEHIND THEM
+  //
+  // World sometimes emails an invoice for parts that were never scraped as an
+  // order: no conf number on the document, the customer PO in the subject
+  // instead ("Invoice for 20605 Cust PO SHADIE"). handleFetchWorldInvoices
+  // above can do nothing with one of those — it only fills in orders that
+  // already exist — so this check BUILDS the order out of the invoice, which is
+  // the only record of the purchase there is. The invoice number becomes the
+  // order reference: it is the only identifier such an invoice carries.
+  //
+  // Runs from the "World PO Inv." button, and unattended three times a day
+  // inside ghost mode (see shouldFetchWorldPoInvoices).
+
+  // Line items for an order built from a World invoice. Same two-array split
+  // toWorldCreditOrderLines documents — `lineItems` carry the part's own
+  // figures with the environmental charge as metadata, `sage_lineItems` carry
+  // the fee-INCLUSIVE figures enterSagePurchases.ahk types into Sage — but with
+  // a purchase's signs, and with one extra job: cores.
+  //
+  // Verified against all 73 World invoice PDFs on the share:
+  //   * EXT PRICE INCLUDES that line's core charge while TOTAL MDSE excludes it
+  //     (02KS1978: a caliper at 72.74 with a 58.50 core prints 131.24). So the
+  //     core has to come out of the part's extension and become its own line —
+  //     exactly the shape world.actions.js gives a scraped World order,
+  //     "CORE <line code>" with a "World Core:" description.
+  //   * NET CORE is a UNIT price: sum(core x qty) == TOTAL CORE. The scan
+  //     proves that per invoice (auditCoreCharges) before this ever runs, and
+  //     refuses to hand over an invoice where it doesn't hold.
+  //   * an extension is NOT recomputed as cost x qty. World rounds its per-line
+  //     discount its own way (13.87 x 6 prints 83.21, not 83.22, on 02KQ1553),
+  //     and the printed figure is the one the invoice's own totals reconcile
+  //     against — so the core is SUBTRACTED from it rather than the part
+  //     extension being rebuilt from scratch.
+  function toWorldInvoiceOrderLines(rawLineItems) {
+    // Computed money is rounded back to cents: the AHK types whatever it is
+    // given, and 11.88 + 0.21 is 12.090000000000002 in binary floating point.
+    const cents = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+    const lineItems = [];
+    const sage_lineItems = [];
+
+    for (const li of Array.isArray(rawLineItems) ? rawLineItems : []) {
+      const qty = Number(li.quantity) || 0;
+      const cost = Number(li.costPrice) || 0;
+      const coreUnit = Number(li.core) || 0;
+      const printedExtended = Number(li.extended) || 0;
+      const partExtended = cents(printedExtended - coreUnit * qty);
+      const ehcUnit = Number(li.ehcUnit) || 0;
+      const ehcExtended = Number(li.ehcExtended) || 0;
+      const hasFee = ehcUnit !== 0 || ehcExtended !== 0;
+
+      const shared = {
+        partLineCode: li.partLineCode || "",
+        partNumber: li.partNumber || "",
+        partDescription: li.description || "",
+        unit: li.unit || "",
+        quantity: qty,
+        core: false,
+        ehcUnit,
+        ehcExtended,
+        hasEnvironmentalFee: hasFee,
+        // Per-unit, which is what the "+ev" editor and applyEnvironmentalFee
+        // both mean by "fee" — they only coincide with the extension at qty 1.
+        environmentalFeeAmount: hasFee ? Math.abs(ehcUnit).toFixed(2) : null,
+        addedToOutstanding: false,
+      };
+
+      lineItems.push({
+        ...shared,
+        costPrice: cost,
+        costPriceValue: cost,
+        extended: partExtended,
+        extendedValue: partExtended,
+      });
+
+      const sageCost = cents(cost + Math.abs(ehcUnit));
+      const sageExtended = cents(partExtended + Math.abs(ehcExtended));
+      sage_lineItems.push({
+        ...shared,
+        costPrice: sageCost,
+        costPriceValue: sageCost,
+        extended: sageExtended,
+        extendedValue: sageExtended,
+      });
+
+      if (coreUnit !== 0) {
+        const coreExtended = cents(coreUnit * qty);
+        const coreLine = {
+          partLineCode: `CORE ${li.partLineCode || ""}`.trim(),
+          partNumber: li.partNumber || "",
+          partDescription: `World Core: ${li.partNumber || ""}`.trim(),
+          unit: li.unit || "",
+          quantity: qty,
+          costPrice: coreUnit,
+          costPriceValue: coreUnit,
+          extended: coreExtended,
+          extendedValue: coreExtended,
+          core: true,
+          hasEnvironmentalFee: false,
+          environmentalFeeAmount: null,
+          addedToOutstanding: false,
+        };
+        lineItems.push(coreLine);
+        // A core carries no environmental charge, so both arrays are identical
+        // — copied rather than shared so a later edit to one cannot reach into
+        // the other.
+        sage_lineItems.push({ ...coreLine });
+      }
+    }
+
+    return { lineItems, sage_lineItems };
+  }
+
+  async function handleFetchWorldPoInvoices() {
+    if (!api?.fetchWorldPoInvoices) return;
+    try {
+      setWorldPoFetching(true);
+      setWorldPoError("");
+      setWorldPoStatus("");
+      const res = await api.fetchWorldPoInvoices({});
+      if (!res?.ok) throw new Error(res?.error || "Failed to check for World PO invoices.");
+      const logMsg = gmailStatusLine("world", res, "PO invoice");
+      const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
+
+      // Read orders off disk rather than out of this window: the check may have
+      // been run as a job for another machine, and a ghost cycle has usually
+      // just finished rewriting orders.json.
+      const ordersRes = await api?.readOrders?.();
+      const currentList = ordersRes?.state || ordersRes || [];
+      const base = Array.isArray(currentList) ? currentList : [];
+      const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+
+      const created = [];
+      const blocked = [];
+      const newOrders = [];
+
+      for (const inv of discoveries) {
+        const invNum = String(inv.invoiceNumber || "").trim();
+        if (!invNum) continue;
+
+        // Never build an order out of a document that failed its own
+        // arithmetic. EVERY figure on this order — including the money typed
+        // into Sage — comes from that one parse; there is no scraped order to
+        // check it against, so a misread column would go in unnoticed. The scan
+        // already says which check failed, and the invoice stays a manual job.
+        if (inv.checksOk === false) {
+          blocked.push(invNum);
+          continue;
+        }
+
+        const key = norm(invNum);
+        // `known` is computed in the main process and covers active orders, the
+        // orders archive and every month's invoice manifest — so an invoice
+        // that has already been through Sage and been archived is never rebuilt
+        // as a fresh order three times a day. The local checks catch an order
+        // this window has but disk-read missed, and one created moments ago in
+        // this same run.
+        const already =
+          inv.known === true ||
+          base.some(
+            (o) =>
+              o &&
+              (norm(o.source_invoice) === key ||
+                norm(o.invoiceNum) === key ||
+                norm(o.reference) === key)
+          ) ||
+          newOrders.some((o) => norm(o.reference) === key);
+        if (already) continue;
+
+        const totalNum = Number(inv.total ?? inv.balanceDue);
+        newOrders.push({
+          source: "world",
+          reference: invNum,
+          __row: invNum,
+          // Must be the real scraped warehouse string, or capRules never
+          // applies World's code rules (NGK->NTK, TRK dash-strip) — see
+          // [[cap-code-single-source-resolve]].
+          warehouse: WORLD_WAREHOUSE,
+          // The Sage source code scraped World orders carry (worldScraper.js).
+          // An order built by hand here would otherwise reach Sage with none.
+          sage_source: "WOR505",
+          source_invoice: invNum,
+          sage_reference: invNum,
+          hasInvoiceNum: true,
+          // There is no detail-fetch step for these: the invoice IS the detail.
+          detailStored: true,
+          // The invoice is the only figure that exists for this purchase, so it
+          // is both the order total and the billed total.
+          ...(Number.isFinite(totalNum) ? { total: totalNum, billed_total: totalNum } : {}),
+          // Marks the order as one this check built by itself, which is what
+          // puts a "Delete Order" button on the card: if the purchase turns out
+          // to have been entered into Sage by hand already, it has to be
+          // removable, and an order created unattended is the one kind nobody
+          // chose to create.
+          worldPoCreated: true,
+          ...(inv.fileName ? { worldInvoiceFile: inv.fileName } : {}),
+          ...(inv.customerPo ? { worldCustomerPo: inv.customerPo } : {}),
+          ...(inv.packingSlip ? { worldInvoicePackingSlip: inv.packingSlip } : {}),
+          // Post in Sage under the invoice's own date, not the day the scan
+          // happened to run — the same trap credits fell into. World prints it
+          // as "MM/DD/YY", which creditOrderDateFields (generic despite the
+          // name) turns into the ddmmyy the AHK types.
+          ...creditOrderDateFields(inv.invoiceDate),
+          ...toWorldInvoiceOrderLines(inv.lineItems),
+          lastUpdatedAt: new Date().toISOString(),
+        });
+        created.push(`${invNum}${inv.customerPo ? ` (PO ${inv.customerPo})` : ""}`);
+      }
+
+      if (newOrders.length) {
+        if (!api?.writeOrders) throw new Error("Saving orders is not available.");
+        const nextList = normalizeOrdersForSave(base.concat(newOrders));
+        const saveRes = await api.writeOrders(nextList);
+        if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the new order(s).");
+        if (ordersInitialized) {
+          adoptSavedOrders(nextList);
+          setOrdersDirty(false);
+        }
+      }
+
+      const lines = [logMsg];
+      lines.push(
+        created.length
+          ? `Created ${created.length} order(s): ${created.join(", ")}.`
+          : "Nothing new to turn into an order."
+      );
+      if (blocked.length) {
+        lines.push(
+          `Not created — the invoice did not reconcile with itself, enter it by hand: ${blocked.join(", ")}.`
+        );
+      }
+      // Anything the scan itself refused (a credit that reached this query, an
+      // unreadable PDF) belongs in front of the user too.
+      (Array.isArray(res.statusLog) ? res.statusLog : [])
+        .filter((l) => /Skipped|Could not|did not reconcile/i.test(l))
+        .forEach((l) => lines.push(l));
+      setWorldPoStatus(lines.filter(Boolean).join("\n"));
+    } catch (e) {
+      console.error("[vendor] world PO invoice fetch error", e);
+      setWorldPoError(e?.message || "Failed to check for World PO invoices.");
+    } finally {
+      setWorldPoFetching(false);
     }
   }
 
@@ -5988,9 +6244,17 @@ export default function App() {
     }
     if (kind === "fetch-invoices") {
       if (payload.world !== false) await handleFetchWorldInvoices();
+      // Not part of the every-cycle sweep: this one CREATES orders, so it runs
+      // on its own three-a-day schedule (payload.worldPo, set by runGhostCycle).
+      if (payload.worldPo === true) await handleFetchWorldPoInvoices();
       if (payload.transbec !== false) await handleFetchTransbecInvoices();
       if (payload.bestbuy === true) await handleFetchBestbuyInvoices();
-      return `checked Gmail (${["world", "transbec", payload.bestbuy === true ? "bestbuy" : ""]
+      return `checked Gmail (${[
+        "world",
+        payload.worldPo === true ? "world PO invoices" : "",
+        "transbec",
+        payload.bestbuy === true ? "bestbuy" : "",
+      ]
         .filter(Boolean)
         .join(", ")})`;
     }
@@ -6196,6 +6460,9 @@ export default function App() {
       if (tigerDue) ghostTigerRunRef.current = ghostTigerRunKey(startedAt);
       const bestbuyDue = shouldFetchBestbuyInvoices(startedAt, ghostBestbuyDayRef.current);
       if (bestbuyDue) ghostBestbuyDayRef.current = ghostDayKey(startedAt);
+      // World's order-less invoices: morning, noon and mid-afternoon.
+      const worldPoDue = shouldFetchWorldPoInvoices(startedAt, ghostWorldPoRunRef.current);
+      if (worldPoDue) ghostWorldPoRunRef.current = ghostWorldPoRunKey(startedAt);
 
       // Both of these belong to the `fetch` role — they drive Playwright and
       // Gmail — so they run wherever that role points, here or on another
@@ -6214,7 +6481,7 @@ export default function App() {
       const invoiced = await dispatchAutomationStep({
         role: "fetch",
         kind: "fetch-invoices",
-        payload: { world: true, transbec: true, bestbuy: bestbuyDue },
+        payload: { world: true, worldPo: worldPoDue, transbec: true, bestbuy: bestbuyDue },
         label: "the Gmail invoice check",
       });
       done.push(`${invoiced.ok ? "Gmail:" : "Gmail FAILED:"} ${invoiced.summary}.`);
@@ -6721,6 +6988,10 @@ export default function App() {
             onClearInvoiceFetchMessage={clearInvoiceFetchMessage}
             onConfirmOrderEdit={(key) => updateOrderByKeyAndSave(key, {})}
             onFetchWorldInvoices={handleFetchWorldInvoices}
+            onFetchWorldPoInvoices={handleFetchWorldPoInvoices}
+            worldPoFetching={worldPoFetching}
+            worldPoStatus={worldPoStatus}
+            worldPoError={worldPoError}
             worldFetching={worldFetching}
             worldStatus={worldStatus}
             worldError={worldError}

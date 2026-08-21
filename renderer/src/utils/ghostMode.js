@@ -20,6 +20,12 @@ export const GHOST_BESTBUY_HOUR = 12;
 // it runs twice: once in the morning and once from noon, rather than on all 18
 // cycles. Every other vendor still goes every cycle.
 export const GHOST_TIGER_NOON_HOUR = 12;
+// World sometimes emails an invoice for parts that were never scraped as an
+// order (no conf number, a customer PO in the subject instead). Those become
+// orders in their own right, so the check runs three times a day - morning,
+// noon and mid-afternoon - which is what the user asked for and is plenty for
+// mail that trickles in a few times a week.
+export const GHOST_WORLD_PO_HOURS = [GHOST_START_HOUR, 12, 15];
 // How long a cycle will wait for the Sage machine to work through the queue it
 // just released before giving up on printing (printing is what waits — see
 // runGhostCycle). Long enough for a full queue of AHK runs, short enough that a
@@ -91,6 +97,26 @@ export function ghostTigerRunKey(date = new Date()) {
 
 export function shouldFetchTigerOrders(date = new Date(), lastRunKey = "") {
   const key = ghostTigerRunKey(date);
+  return Boolean(key) && key !== lastRunKey;
+}
+
+// Which of the day's three World-PO-invoice slots a moment falls in. Same
+// first-cycle-in-the-slot rule as Tiger and BestBuy: a cycle skipped because
+// Sage was off must not cost the day's check, so the slot stays open until a
+// cycle actually runs inside it.
+export function ghostWorldPoSlot(date = new Date()) {
+  const hour = date.getHours();
+  const open = GHOST_WORLD_PO_HOURS.filter((h) => hour >= h);
+  return open.length ? String(open[open.length - 1]) : "";
+}
+
+export function ghostWorldPoRunKey(date = new Date()) {
+  const slot = ghostWorldPoSlot(date);
+  return slot ? `${ghostDayKey(date)}:${slot}` : "";
+}
+
+export function shouldFetchWorldPoInvoices(date = new Date(), lastRunKey = "") {
+  const key = ghostWorldPoRunKey(date);
   return Boolean(key) && key !== lastRunKey;
 }
 

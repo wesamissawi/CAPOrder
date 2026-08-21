@@ -133,6 +133,7 @@ contextBridge.exposeInMainWorld('api', {
   getTransbecCredits: () => ipcRenderer.invoke('vendor:get-transbec-credits'),
   resetTransbecCredits: () => ipcRenderer.invoke('vendor:reset-transbec-credits'),
   fetchWorldCreditInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-world-credit-invoices', payload),
+  fetchWorldPoInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-world-po-invoices', payload),
   getWorldCredits: () => ipcRenderer.invoke('vendor:get-world-credits'),
   fetchCbkInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-cbk-invoices', payload),
   openCbkInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:open-cbk-invoice-image', fileName),

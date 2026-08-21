@@ -26,6 +26,7 @@ const createVendorOrdersService = (deps) => {
     fetchTransbecCreditInvoicesScraper,
     fetchProforceCreditInvoicesScraper,
     fetchWorldCreditInvoicesScraper,
+    fetchWorldStandaloneInvoicesScraper,
     getWorldInvoiceCachePath,
     getGmailAssetsDir,
     getTransbecInvoiceCachePath,
@@ -35,6 +36,7 @@ const createVendorOrdersService = (deps) => {
     getTransbecCreditInvoiceCachePath,
     getProforceCreditInvoiceCachePath,
     getWorldCreditInvoiceCachePath,
+    getWorldStandaloneInvoiceCachePath,
     runInteractiveAuth,
     verifyConnection,
     saveConfig,
@@ -309,6 +311,10 @@ const createVendorOrdersService = (deps) => {
         typeof config.WORLD_CREDIT_INVOICE_SENDER === 'string' ? config.WORLD_CREDIT_INVOICE_SENDER : '',
       worldCreditSubject:
         typeof config.WORLD_CREDIT_INVOICE_SUBJECT === 'string' ? config.WORLD_CREDIT_INVOICE_SUBJECT : '',
+      worldPoSender:
+        typeof config.WORLD_PO_INVOICE_SENDER === 'string' ? config.WORLD_PO_INVOICE_SENDER : '',
+      worldPoSubject:
+        typeof config.WORLD_PO_INVOICE_SUBJECT === 'string' ? config.WORLD_PO_INVOICE_SUBJECT : '',
       proforceCreditSender:
         typeof config.PROFORCE_CREDIT_INVOICE_SENDER === 'string' ? config.PROFORCE_CREDIT_INVOICE_SENDER : '',
       proforceCreditSubject:
@@ -719,6 +725,57 @@ const createVendorOrdersService = (deps) => {
     }
   }
 
+  // World invoices with NO ORDER BEHIND THEM (worldStandaloneInvoice.js): the
+  // ones whose subject carries a customer PO instead of a conf number, so the
+  // regular World invoice check finds nothing to attach them to. Purely a
+  // discovery list; the renderer builds an order out of each one. `known` marks
+  // the invoices we already have on file anywhere (active orders, the archive,
+  // every month's manifest) so the renderer never re-creates an order for an
+  // invoice that has already been through Sage.
+  async function fetchWorldStandaloneInvoices(payload = {}) {
+    try {
+      const { clientId, clientSecret, refreshToken, worldPoSender, worldPoSubject, worldSender } =
+        getGmailCreds();
+      if (!clientId || !clientSecret) {
+        return { ok: false, error: 'Missing Gmail OAuth client id/secret. Set them in Settings.' };
+      }
+      if (!refreshToken) {
+        return { ok: false, error: 'Gmail is not connected. Click “Connect Gmail” in Settings.' };
+      }
+      const gmailDataDir = getGmailAssetsDir();
+      ensureDir(gmailDataDir);
+      const fromDate = typeof payload?.fromDate === 'string' ? payload.fromDate : '';
+      const toDate = typeof payload?.toDate === 'string' ? payload.toDate : '';
+      const res = await fetchWorldStandaloneInvoicesScraper({
+        credentials: { clientId, clientSecret, refreshToken },
+        // Same mailbox as every other World email, so it falls back to the
+        // regular World invoice sender rather than needing its own to be set.
+        sender: worldPoSender || worldSender || 'reports@groupe-monaco.ca',
+        subjectPattern: worldPoSubject || 'Invoice for 20605',
+        dataDir: gmailDataDir,
+        cachePath: getWorldStandaloneInvoiceCachePath(),
+        // World bills several times a day, so a week's window can hold well
+        // over 50 emails and the conf ones (which this pipeline throws away)
+        // are the bulk of them. Gmail returns newest first, so a low cap drops
+        // the OLDEST candidates - exactly the ones a machine that was switched
+        // off for a few days is coming back for.
+        maxResults: 150,
+        fromDate,
+        toDate,
+      });
+      if (!res?.ok) return res;
+      const known = collectKnownInvoiceNumbers ? collectKnownInvoiceNumbers() : new Set();
+      const discoveries = (res.discoveries || []).map((d) => {
+        const key = String(d.invoiceNumber || '').trim().toUpperCase();
+        return { ...d, known: Boolean(key) && known.has(key) };
+      });
+      return { ...res, discoveries };
+    } catch (e) {
+      console.error('[vendor:fetch-world-po-invoices]', e);
+      return { ok: false, error: e?.message || 'Failed to fetch World PO invoices.' };
+    }
+  }
+
   return {
     fetchWorldOrders,
     fetchTransbecOrders,
@@ -736,6 +793,7 @@ const createVendorOrdersService = (deps) => {
     fetchTransbecCreditInvoices,
     fetchProforceCreditInvoices,
     fetchWorldCreditInvoices,
+    fetchWorldStandaloneInvoices,
     getTransbecCreditInvoices,
     getWorldCreditInvoices,
     resetTransbecCreditScans,

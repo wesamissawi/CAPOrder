@@ -102,6 +102,7 @@ function registerAllIpc(ipcMain, deps) {
     fetchTransbecCreditInvoices: deps.fetchTransbecCreditInvoices,
     fetchProforceCreditInvoices: deps.fetchProforceCreditInvoices,
     fetchWorldCreditInvoices: deps.fetchWorldCreditInvoices,
+    fetchWorldStandaloneInvoices: deps.fetchWorldStandaloneInvoices,
     getTransbecCreditInvoices: deps.getTransbecCreditInvoices,
     getWorldCreditInvoices: deps.getWorldCreditInvoices,
     resetTransbecCreditScans: deps.resetTransbecCreditScans,

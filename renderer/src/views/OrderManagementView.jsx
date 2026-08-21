@@ -138,6 +138,10 @@ export default function OrderManagementView({
   onClearOrderFetchMessage,
   onClearInvoiceFetchMessage,
   onFetchWorldInvoices,
+  onFetchWorldPoInvoices,
+  worldPoFetching,
+  worldPoStatus,
+  worldPoError,
   worldFetching,
   worldStatus,
   worldError,
@@ -386,6 +390,20 @@ export default function OrderManagementView({
     { key: "cbk", label: "CBK", onClick: onGetCbkOrders, running: cbkOrdersRunning, status: cbkOrdersStatus, error: cbkOrdersError },
     { key: "proforce", label: "Proforce", onClick: onGetProforceOrders, running: proforceRunning, status: proforceStatus, error: proforceError },
     { key: "tiger", label: "Tiger", onClick: onGetTigerOrders, running: tigerOrdersRunning, status: tigerOrdersStatus, error: tigerOrdersError },
+    // Not an order fetch like the others: World invoices that arrived with no
+    // order behind them, which this turns INTO orders. It sits here because
+    // that is what it produces, and because it needs the same status/error row
+    // every fetch button already gets for free. Ghost mode runs it three times
+    // a day; this is the button for running it now.
+    {
+      key: "world-po",
+      label: "World PO Inv.",
+      title: "Check Gmail for World invoices that have no order behind them (a customer PO in the subject instead of a conf number) and create an order for each one",
+      onClick: onFetchWorldPoInvoices,
+      running: worldPoFetching,
+      status: worldPoStatus,
+      error: worldPoError,
+    },
   ];
 
   const isInvoiceNotPrinted = (order) => {
@@ -478,6 +496,7 @@ export default function OrderManagementView({
                 type="button"
                 onClick={v.onClick}
                 disabled={v.running}
+                title={v.title || undefined}
                 className="px-5 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-semibold disabled:opacity-60"
               >
                 {v.running ? "Fetching..." : v.label}
@@ -872,6 +891,11 @@ export default function OrderManagementView({
                       </div>
                       <div className="text-xs uppercase tracking-wide text-slate-400">
                         {order.orderDateRaw || "Date unknown"}
+                        {/* An order built straight from a World invoice is keyed
+                            by the invoice number, so the customer PO from the
+                            email subject is the only clue to who the parts are
+                            for. */}
+                        {order.worldCustomerPo ? ` - PO ${order.worldCustomerPo}` : ""}
                       </div>
                     </div>
                     <div className="flex flex-col items-end gap-2">
@@ -1041,8 +1065,13 @@ export default function OrderManagementView({
                       )}
                       {/* epicorOnly is a legacy flag from the retired Epicor
                           scrape — nothing sets it now, but existing orders that
-                          carry it still need a way to be removed. */}
-                      {Boolean(order.epicorOnly) && !canArchiveOrder(order) && onDeleteOrder && (
+                          carry it still need a way to be removed.
+                          worldPoCreated is the live equivalent: an order the
+                          World PO invoice check built by itself, which needs a
+                          way out if the purchase was already entered by hand. */}
+                      {(Boolean(order.epicorOnly) || Boolean(order.worldPoCreated)) &&
+                        !canArchiveOrder(order) &&
+                        onDeleteOrder && (
                         <button
                           type="button"
                           onClick={() => onDeleteOrder(order)}

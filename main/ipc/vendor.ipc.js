@@ -67,6 +67,7 @@ const registerVendorIpc = (ipcMain, deps) => {
     fetchTransbecCreditInvoices,
     fetchProforceCreditInvoices,
     fetchWorldCreditInvoices,
+    fetchWorldStandaloneInvoices,
     getTransbecCreditInvoices,
     getWorldCreditInvoices,
     resetTransbecCreditScans,
@@ -151,6 +152,12 @@ const registerVendorIpc = (ipcMain, deps) => {
   // handlers above by file name) ---
   ipcMain.handle('vendor:fetch-world-credit-invoices', async (_evt, payload) => {
     return fetchWorldCreditInvoices(payload);
+  });
+
+  // World invoices that arrived with no order behind them (a customer PO in the
+  // subject instead of a conf number) - see worldStandaloneInvoice.js.
+  ipcMain.handle('vendor:fetch-world-po-invoices', async (_evt, payload) => {
+    return fetchWorldStandaloneInvoices(payload);
   });
 
   ipcMain.handle('vendor:get-world-credits', async () => {

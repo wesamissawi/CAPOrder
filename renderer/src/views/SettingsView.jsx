@@ -106,6 +106,11 @@ export default function SettingsView() {
   const [proforcePass, setProforcePass] = useState("");
   const [worldInvoiceSender, setWorldInvoiceSender] = useState("");
   const [worldInvoiceSubject, setWorldInvoiceSubject] = useState("");
+  // World invoices with no order behind them (a customer PO in the subject
+  // instead of a conf number). Same mailbox as the World invoices above, so the
+  // sender falls back to that one when this is left blank.
+  const [worldPoInvoiceSender, setWorldPoInvoiceSender] = useState("");
+  const [worldPoInvoiceSubject, setWorldPoInvoiceSubject] = useState("Invoice for 20605");
   const [gmailClientId, setGmailClientId] = useState("");
   const [gmailClientSecret, setGmailClientSecret] = useState("");
   const [transbecInvoiceSender, setTransbecInvoiceSender] = useState("");
@@ -342,6 +347,8 @@ export default function SettingsView() {
           setProforcePass(cfg.PROFORCE_PASS || "");
           setWorldInvoiceSender(cfg.WORLD_INVOICE_SENDER || "");
           setWorldInvoiceSubject(cfg.WORLD_INVOICE_SUBJECT || "");
+          setWorldPoInvoiceSender(cfg.WORLD_PO_INVOICE_SENDER || "");
+          setWorldPoInvoiceSubject(cfg.WORLD_PO_INVOICE_SUBJECT || "Invoice for 20605");
           setGmailClientId(cfg.GMAIL_CLIENT_ID || "");
           setGmailClientSecret(cfg.GMAIL_CLIENT_SECRET || "");
           setTransbecInvoiceSender(cfg.TRANSBEC_INVOICE_SENDER || "");
@@ -467,6 +474,8 @@ export default function SettingsView() {
         PROFORCE_PASS: proforcePass || "",
         WORLD_INVOICE_SENDER: worldInvoiceSender || "",
         WORLD_INVOICE_SUBJECT: worldInvoiceSubject || "",
+        WORLD_PO_INVOICE_SENDER: worldPoInvoiceSender || "",
+        WORLD_PO_INVOICE_SUBJECT: worldPoInvoiceSubject || "",
         GMAIL_CLIENT_ID: gmailClientId || "",
         GMAIL_CLIENT_SECRET: gmailClientSecret || "",
         TRANSBEC_INVOICE_SENDER: transbecInvoiceSender || "",
@@ -1007,6 +1016,30 @@ export default function SettingsView() {
                 onChange={(e) => setWorldInvoiceSubject(e.target.value)}
                 className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
               />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">World PO Invoice Sender (from:)</label>
+              <input
+                type="text"
+                placeholder="same as World Sender above"
+                value={worldPoInvoiceSender}
+                onChange={(e) => setWorldPoInvoiceSender(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">World PO Invoice Subject Contains</label>
+              <input
+                type="text"
+                placeholder="Invoice for 20605"
+                value={worldPoInvoiceSubject}
+                onChange={(e) => setWorldPoInvoiceSubject(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+              <p className="text-xs text-slate-400">
+                World invoices with no order behind them — "Invoice for 20605 Cust PO SHADIE". Anything
+                saying "conf" belongs to the regular World check and is ignored by this one.
+              </p>
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-xs uppercase tracking-wide text-slate-500">Invoice Sender (from:)</label>

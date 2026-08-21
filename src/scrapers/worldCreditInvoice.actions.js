@@ -90,7 +90,12 @@ async function extractCreditMemoFromPdf(pdfBuffer) {
     ),
     invoiceTotal: near(totals["SUBTOTAL"] + totals["TAX AMT"], totals["INVOICE TOTAL"]),
     balanceDue: stubBalanceDue == null || near(stubBalanceDue, totals["BALANCE DUE"]),
-    lineItems: lineItems.length > 0 && near(sum((li) => li.extended), totals["TOTAL MDSE"]),
+    // TOTAL CORE is added back because EXT PRICE includes each line's core
+    // charge while TOTAL MDSE does not — see the twin check in
+    // worldInvoice.actions.js for the invoice this was verified on.
+    lineItems:
+      lineItems.length > 0 &&
+      near(sum((li) => li.extended), totals["TOTAL MDSE"] + totals["TOTAL CORE"]),
     ehc: near(sum((li) => li.ehcExtended), totals["TOTAL EHC"]),
   };
   checks.ok = Object.values(checks).every(Boolean);

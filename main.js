@@ -49,6 +49,7 @@ const { getCbkOrders } = require('./src/scrapers/cbkScraper');
 const { getTigerOrders } = require('./src/scrapers/tigerScraper');
 const { fetchWorldInvoices } = require('./src/scrapers/worldInvoice');
 const { fetchWorldCreditInvoices } = require('./src/scrapers/worldCreditInvoice');
+const { fetchWorldStandaloneInvoices } = require('./src/scrapers/worldStandaloneInvoice');
 const { fetchTransbecInvoices } = require('./src/scrapers/transbecInvoice');
 const { fetchBestbuyInvoices } = require('./src/scrapers/bestbuyInvoice');
 const { fetchBestbuyCreditInvoices } = require('./src/scrapers/bestbuyCreditInvoice');
@@ -181,6 +182,14 @@ function getTransbecCreditInvoiceCachePath() {
 }
 function getWorldCreditInvoiceCachePath() {
   return path.join(getGmailAssetsDir(), 'world_credit_invoice_cache.json');
+}
+// Kept separate from world_invoice_cache.json even though both pipelines read
+// the same sender: the entries are a different shape, and the regular invoice
+// scan already caches these same emails with an empty reference (it finds them
+// and discards them for having no order). Sharing one file would have the two
+// runs overwrite each other's verdicts.
+function getWorldStandaloneInvoiceCachePath() {
+  return path.join(getGmailAssetsDir(), 'world_po_invoice_cache.json');
 }
 
 const PRELOAD = path.resolve(__dirname, 'preload.js');
@@ -1794,6 +1803,7 @@ const vendorOrdersService = createVendorOrdersService({
   fetchTransbecCreditInvoicesScraper: fetchTransbecCreditInvoices,
   fetchProforceCreditInvoicesScraper: fetchProforceCreditInvoices,
   fetchWorldCreditInvoicesScraper: fetchWorldCreditInvoices,
+  fetchWorldStandaloneInvoicesScraper: fetchWorldStandaloneInvoices,
   getGmailAssetsDir,
   getWorldInvoiceCachePath,
   getTransbecInvoiceCachePath,
@@ -1803,6 +1813,7 @@ const vendorOrdersService = createVendorOrdersService({
   getTransbecCreditInvoiceCachePath,
   getProforceCreditInvoiceCachePath,
   getWorldCreditInvoiceCachePath,
+  getWorldStandaloneInvoiceCachePath,
   runInteractiveAuth,
   verifyConnection,
   saveConfig,
@@ -1824,6 +1835,7 @@ const {
   fetchTransbecCreditInvoices: fetchTransbecCreditInvoicesService,
   fetchProforceCreditInvoices: fetchProforceCreditInvoicesService,
   fetchWorldCreditInvoices: fetchWorldCreditInvoicesService,
+  fetchWorldStandaloneInvoices: fetchWorldStandaloneInvoicesService,
   getTransbecCreditInvoices,
   getWorldCreditInvoices,
   resetTransbecCreditScans,
@@ -2437,6 +2449,7 @@ function registerAllIpc() {
     fetchTransbecCreditInvoices: fetchTransbecCreditInvoicesService,
     fetchProforceCreditInvoices: fetchProforceCreditInvoicesService,
     fetchWorldCreditInvoices: fetchWorldCreditInvoicesService,
+    fetchWorldStandaloneInvoices: fetchWorldStandaloneInvoicesService,
     getTransbecCreditInvoices,
     getWorldCreditInvoices,
     resetTransbecCreditScans,

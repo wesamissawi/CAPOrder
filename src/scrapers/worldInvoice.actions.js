@@ -247,8 +247,16 @@ async function extractInvoiceFromPdf(pdfBuffer) {
     invoiceTotal: near(totals["SUBTOTAL"] + totals["TAX AMT"], totals["INVOICE TOTAL"]),
     // the two independent readings of the amount owing agree
     balanceDue: stubBalanceDue == null || near(stubBalanceDue, totals["BALANCE DUE"]),
-    // the line items we parsed account for the merchandise total
-    lineItems: lineItems.length > 0 && near(sum((li) => li.extended), totals["TOTAL MDSE"]),
+    // the line items we parsed account for the merchandise total. EXT PRICE
+    // INCLUDES that line's core charge (verified on 02KS1978: two calipers at
+    // 72.74 + 58.50 core print an extension of 131.24, and TOTAL MDSE excludes
+    // the core entirely), so TOTAL CORE has to be added back before comparing —
+    // without it every invoice carrying a core charge reported as unreconciled.
+    // Re-verified over all 73 World invoice PDFs on the share: 73/73 pass this
+    // form, 72/73 passed the old one.
+    lineItems:
+      lineItems.length > 0 &&
+      near(sum((li) => li.extended), totals["TOTAL MDSE"] + totals["TOTAL CORE"]),
     // and for the environmental charges
     ehc: near(sum((li) => li.ehcExtended), totals["TOTAL EHC"]),
   };
