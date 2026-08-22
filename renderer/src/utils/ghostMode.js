@@ -81,11 +81,15 @@ export function shouldFetchBestbuyInvoices(date = new Date(), lastDayKey = "") {
 // with ghost hours at 8:00 and the noon one at 12:00. Tiger runs on the first
 // cycle inside each — same reasoning as BestBuy's daily check, so an 8:00 cycle
 // skipped because nothing was ready doesn't cost the morning's pull.
-export function ghostTigerSlot(date = new Date()) {
+export function ghostTwiceDailySlot(date = new Date()) {
   const hour = date.getHours();
   if (hour >= GHOST_TIGER_NOON_HOUR) return "noon";
   if (hour >= GHOST_START_HOUR) return "morning";
   return "";
+}
+
+export function ghostTigerSlot(date = new Date()) {
+  return ghostTwiceDailySlot(date);
 }
 
 // The value to remember once a Tiger pull has run, and to compare against next
@@ -97,6 +101,28 @@ export function ghostTigerRunKey(date = new Date()) {
 
 export function shouldFetchTigerOrders(date = new Date(), lastRunKey = "") {
   const key = ghostTigerRunKey(date);
+  return Boolean(key) && key !== lastRunKey;
+}
+
+// Credit memos (World + Transbec) are pulled from Gmail twice a day, on the
+// same clock as Tiger — morning from 8:00, noon from 12:00 — but keyed
+// separately so neither can gate the other. Both vendors go together: one job,
+// one flag, because they are the same errand.
+//
+// What the cycle does with them stops at Order Management. Credits are NEVER
+// queued to Sage unattended (ghostSageQueueTargets and its invoice-update twin
+// both drop anything looksLikeCredit): a credit is matched to a return
+// requisition by hand first, and its sign conventions are not something to get
+// wrong with nobody watching. Transbec's credit memo IS printed
+// (ghostPrintTargets), World's is not — the user's call, matching how their
+// regular invoices are treated.
+export function ghostCreditsRunKey(date = new Date()) {
+  const slot = ghostTwiceDailySlot(date);
+  return slot ? `${ghostDayKey(date)}:${slot}` : "";
+}
+
+export function shouldFetchCredits(date = new Date(), lastRunKey = "") {
+  const key = ghostCreditsRunKey(date);
   return Boolean(key) && key !== lastRunKey;
 }
 
@@ -271,8 +297,16 @@ export function ghostSageInvoiceUpdateTargets(orders) {
 
 // Transbec and BestBuy bills that exist on disk and have never been printed.
 // World invoices are never printed — they don't have to be printed before
-// archiving — and neither are the credit PDFs, which belong to the credit flow
-// rather than the purchase one.
+// archiving — and neither are World credit memos, by the same request.
+//
+// TRANSBEC CREDIT MEMOS ARE PRINTED (user request, 2026-08-21), now that the
+// cycle creates those orders itself. They ride the ordinary "transbec" print
+// path rather than getting one of their own: transbecPdfName falls through to
+// transbecCreditFile, handlePrintVendorInvoice then prints ALL pages for it
+// (the return stub with the real BALANCE DUE and the signature line is on page
+// 2), and the printed flag is the same transbecInvoicePrinted. That last part
+// is why the condition below is one branch and not two — a Transbec order has
+// either a regular invoice or a credit memo, never both.
 //
 // The cycle has already waited for Sage to drain the queue by the time this
 // runs, so the exclusion below normally catches nothing. It stays as a backstop
@@ -285,7 +319,10 @@ export function ghostPrintTargets(orders) {
   (orders || []).forEach((order) => {
     if (!order || !ghostOrderKey(order)) return;
     if (order.sage_trigger || order.sage_invoice_trigger || isOrderSageLocked(order)) return;
-    if ((order.transbecInvoiceFile || order.transbecInvoiceImage) && !order.transbecInvoicePrinted) {
+    if (
+      (order.transbecInvoiceFile || order.transbecInvoiceImage || order.transbecCreditFile) &&
+      !order.transbecInvoicePrinted
+    ) {
       targets.push({ order, vendor: "transbec" });
     }
     if (order.bestbuyInvoiceFile && !order.bestbuyInvoicePrinted) {

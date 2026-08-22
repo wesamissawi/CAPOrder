@@ -55,10 +55,12 @@ import {
   ghostSageInvoiceUpdateTargets,
   ghostSageQueueTargets,
   ghostSlotKey,
+  ghostCreditsRunKey,
   ghostTigerRunKey,
   ghostWorldPoRunKey,
   isWithinGhostHours,
   shouldFetchBestbuyInvoices,
+  shouldFetchCredits,
   shouldFetchTigerOrders,
   shouldFetchWorldPoInvoices,
 } from "./utils/ghostMode";
@@ -552,6 +554,7 @@ export default function App() {
   // of the last twice-daily Tiger order pull.
   const ghostBestbuyDayRef = useRef("");
   const ghostWorldPoRunRef = useRef("");
+  const ghostCreditsRunRef = useRef("");
   const ghostTigerRunRef = useRef("");
   // Cross-machine automation: the roster and who has which role. Kept in state
   // for the admin screen; every dispatch re-reads them fresh, because a machine
@@ -4074,10 +4077,14 @@ export default function App() {
         throw new Error(res?.error || "Failed to check for Transbec credits.");
       }
       setTransbecCreditLog([line]);
-      setTransbecCredits(Array.isArray(res.discoveries) ? res.discoveries : []);
+      const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
+      setTransbecCredits(discoveries);
+      // See handleFetchWorldCredits: returned for the unattended path.
+      return discoveries;
     } catch (e) {
       console.error("[vendor] fetch transbec credits failed", e);
       setTransbecCreditError(e?.message || "Failed to check for Transbec credits.");
+      return [];
     } finally {
       setTransbecCreditScanning(false);
     }
@@ -4268,10 +4275,16 @@ export default function App() {
         throw new Error(res?.error || "Failed to check for World credits.");
       }
       setWorldCreditLog([line]);
-      setWorldCredits(Array.isArray(res.discoveries) ? res.discoveries : []);
+      const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
+      setWorldCredits(discoveries);
+      // Handed back for the unattended path, which turns each one into an order
+      // (see handleFetchAndCreateCreditOrders). setWorldCredits is async, so the
+      // caller cannot read them out of state.
+      return discoveries;
     } catch (e) {
       console.error("[vendor] fetch world credits failed", e);
       setWorldCreditError(e?.message || "Failed to check for World credits.");
+      return [];
     } finally {
       setWorldCreditScanning(false);
     }
@@ -4430,6 +4443,61 @@ export default function App() {
       console.error("[vendor] create order from world credit failed", e);
       return { ok: false, error: e?.message || "Failed to create order." };
     }
+  }
+
+  // Ghost mode's credit errand, twice a day: pull World and Transbec credit
+  // memos out of Gmail and turn each new one into an order in Order Management.
+  // It deliberately stops there — a credit is never queued to Sage unattended
+  // (see shouldFetchCredits), and only Transbec's memo is printed.
+  //
+  // Both halves are the handlers the Credits view's own buttons call, so there
+  // is still one implementation of each. The one thing added here is the
+  // `known` check. The per-row "Create order" button is pressed by a person
+  // looking at that row, whereas this runs twice a day forever — and the create
+  // handlers only compare against ACTIVE orders. `known` is computed in the
+  // main process from active orders + the orders archive + every month's
+  // invoice manifest, so without it a credit that has already been through Sage
+  // and been archived would be rebuilt as a fresh order on every single run.
+  async function handleFetchAndCreateCreditOrders() {
+    const vendors = [
+      { name: "World", fetch: handleFetchWorldCredits, create: handleCreateOrderFromWorldCredit },
+      {
+        name: "Transbec",
+        fetch: handleFetchTransbecCredits,
+        create: handleCreateOrderFromTransbecCredit,
+      },
+    ];
+    const summary = [];
+    for (const vendor of vendors) {
+      let created = 0;
+      let failed = 0;
+      try {
+        const discoveries = (await vendor.fetch()) || [];
+        for (const credit of discoveries) {
+          if (!credit || credit.known === true || credit.created === true) continue;
+          if (!String(credit.creditMemoNumber || "").trim()) continue;
+          const res = await vendor.create(credit);
+          if (res?.ok) {
+            if (!res.duplicate) created += 1;
+          } else {
+            failed += 1;
+            console.warn(
+              `[ghost] could not create ${vendor.name} credit order`,
+              credit.creditMemoNumber,
+              res?.error
+            );
+          }
+        }
+        summary.push(
+          `${vendor.name} ${discoveries.length} memo(s)/${created} new order(s)` +
+            (failed ? `/${failed} failed` : "")
+        );
+      } catch (e) {
+        console.error(`[ghost] ${vendor.name} credit check failed`, e);
+        summary.push(`${vendor.name} FAILED (${e?.message || "unknown error"})`);
+      }
+    }
+    return summary.join(", ");
   }
 
   // Remove the order created from a World credit memo, flipping the row back
@@ -6250,14 +6318,19 @@ export default function App() {
       if (payload.worldPo === true) await handleFetchWorldPoInvoices();
       if (payload.transbec !== false) await handleFetchTransbecInvoices();
       if (payload.bestbuy === true) await handleFetchBestbuyInvoices();
-      return `checked Gmail (${[
-        "world",
-        payload.worldPo === true ? "world PO invoices" : "",
-        "transbec",
-        payload.bestbuy === true ? "bestbuy" : "",
-      ]
-        .filter(Boolean)
-        .join(", ")})`;
+      // Credit memos are a different errand from invoices — they build their own
+      // orders and never reach Sage — so its own summary is reported.
+      const credits = payload.credits === true ? await handleFetchAndCreateCreditOrders() : "";
+      return (
+        `checked Gmail (${[
+          "world",
+          payload.worldPo === true ? "world PO invoices" : "",
+          "transbec",
+          payload.bestbuy === true ? "bestbuy" : "",
+        ]
+          .filter(Boolean)
+          .join(", ")})` + (credits ? `; credits: ${credits}` : "")
+      );
     }
     if (kind === "print-invoices") {
       // loadOrders() adopts disk wholesale, so any unsaved edit in this window
@@ -6464,6 +6537,9 @@ export default function App() {
       // World's order-less invoices: morning, noon and mid-afternoon.
       const worldPoDue = shouldFetchWorldPoInvoices(startedAt, ghostWorldPoRunRef.current);
       if (worldPoDue) ghostWorldPoRunRef.current = ghostWorldPoRunKey(startedAt);
+      // World + Transbec credit memos: twice a day, same clock as Tiger.
+      const creditsDue = shouldFetchCredits(startedAt, ghostCreditsRunRef.current);
+      if (creditsDue) ghostCreditsRunRef.current = ghostCreditsRunKey(startedAt);
 
       // Both of these belong to the `fetch` role — they drive Playwright and
       // Gmail — so they run wherever that role points, here or on another
@@ -6482,7 +6558,13 @@ export default function App() {
       const invoiced = await dispatchAutomationStep({
         role: "fetch",
         kind: "fetch-invoices",
-        payload: { world: true, worldPo: worldPoDue, transbec: true, bestbuy: bestbuyDue },
+        payload: {
+          world: true,
+          worldPo: worldPoDue,
+          transbec: true,
+          bestbuy: bestbuyDue,
+          credits: creditsDue,
+        },
         label: "the Gmail invoice check",
       });
       done.push(`${invoiced.ok ? "Gmail:" : "Gmail FAILED:"} ${invoiced.summary}.`);
