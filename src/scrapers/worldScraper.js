@@ -38,7 +38,10 @@ async function getWorldOrders(options = {}) {
   const stepWaitMs = options.stepWaitMs ?? 1500;
   const browser = await chromium.launch({
     headless,
-    slowMo: options.slowMo ?? (headless ? 0 : 200),
+    // Headed runs used to be the only reliable ones purely because slowMo
+    // spaced actions out enough to hide this frameset's late re-renders.
+    // Ghost mode runs headless, so give it the same pacing instead of 0.
+    slowMo: options.slowMo ?? 200,
   });
 
   let page;

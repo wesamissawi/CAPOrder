@@ -265,7 +265,15 @@ export default function ReturnsManagementView({
   onCreditReceived,
   onDeleteSlip,
   onReturnToNewStock,
+  // The archive part lookup, already bound to RETURNS by App.jsx. Passed in as
+  // an element rather than as its half-dozen props so this view doesn't have
+  // to know anything about how the lookup works.
+  partLookup = null,
 }) {
+  // Open by default — finding a part to send back is a normal part of working
+  // returns, not an occasional detour, so the search box is there to type into
+  // without a click first. Still collapsible for when the slips need the room.
+  const [lookupOpen, setLookupOpen] = useState(true);
   const [newSlipWarehouse, setNewSlipWarehouse] = useState("");
   // The slip currently "selected" for adding parts. Clicking a matching
   // Unassigned part adds it to this slip. null = normal browsing.
@@ -294,6 +302,22 @@ export default function ReturnsManagementView({
 
   return (
     <>
+      {partLookup && (
+        <section className="mb-4 space-y-4">
+          <button
+            onClick={() => setLookupOpen((v) => !v)}
+            className="flex w-full items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-left shadow-sm hover:bg-slate-50"
+          >
+            <span className="text-slate-400 text-xs">{lookupOpen ? "▾" : "▸"}</span>
+            <span className="text-sm font-semibold text-slate-700">Find a Part to Return</span>
+            <span className="text-xs text-slate-400">
+              Search archived purchases and pull a part into Returns
+            </span>
+          </button>
+          {lookupOpen && partLookup}
+        </section>
+      )}
+
       <section>
         <Card>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">

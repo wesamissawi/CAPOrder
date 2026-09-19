@@ -1,5 +1,5 @@
 ﻿// src/App.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import api from "./api";
 import InvoicePreview, {
   INVOICE_DOCUMENT_DEFAULTS,
@@ -8,6 +8,7 @@ import InvoicePreview, {
 import DraftInput from "./components/DraftInput";
 import QtyConfirmModal from "./components/QtyConfirmModal";
 import ConflictReview from "./components/ConflictReview";
+import ArchivePartLookup from "./components/ArchivePartLookup";
 import DashboardView from "./views/DashboardView";
 import OrderManagementView from "./views/OrderManagementView";
 import OrderAssignmentView from "./views/OrderAssignmentView";
@@ -338,6 +339,68 @@ function gmailStatusLine(vendor, res, noun = "invoice") {
   return `${warehouse} — ${n} ${noun}${n === 1 ? "" : "s"} found.`;
 }
 
+// "2026-09-19" -> "SEP 19", for the Auto-fill cash-sale card titles.
+//
+// The year is dropped on purpose: these cards live for days, so the month and
+// day are all it takes to tell two same-tender same-total sales apart, and the
+// title has to stay short enough to survive the card header's `truncate`.
+//
+// Parsed off the string rather than through `new Date()` — a bare YYYY-MM-DD
+// parses as UTC, which in this timezone renders the PREVIOUS day. Anything
+// that isn't the shape the Clover import writes returns "" and the caller
+// simply omits the date.
+const MONTH_ABBR = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
+function formatPaymentDayLabel(raw) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(raw || "").trim());
+  if (!match) return "";
+  const month = MONTH_ABBR[Number(match[2]) - 1];
+  if (!month) return "";
+  return `${month} ${match[3]}`;
+}
+
+// The views that host an ArchivePartLookup, and therefore need the item
+// lifecycle log loaded for its per-part trace.
+const PART_LOOKUP_VIEWS = new Set(["archive-search", "cash-sale-flow", "returns-management"]);
+
+// The search state behind one mount of ArchivePartLookup. Three views host the
+// lookup now (Archive, Cash Sales, Returns Management), and each needs its own
+// term/results/error — hence a hook rather than one set of state fields on the
+// component. The search itself is stateless (`api.searchOrdersArchive`), so
+// nothing here has to be shared or coordinated between the mounts.
+function usePurchasesSearch() {
+  const [term, setTerm] = useState("");
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [error, setError] = useState("");
+
+  // Stable across renders so the memoized lookup isn't re-rendered by its own
+  // props changing identity every time App re-renders.
+  const search = useCallback(async () => {
+    const q = term.trim();
+    if (!q) {
+      setError("Enter a part number to search.");
+      setResults([]);
+      return;
+    }
+    try {
+      setError("");
+      setSearching(true);
+      const res = await api.searchOrdersArchive(q);
+      if (!res?.ok) throw new Error(res?.error || "Search failed.");
+      setResults(res.results || []);
+    } catch (e) {
+      console.error("[purchases search]", e);
+      setError(e?.message || "Failed to search purchases archive.");
+      setResults([]);
+    } finally {
+      setSearching(false);
+    }
+  }, [term]);
+
+  return { term, setTerm, results, setResults, searching, error, search };
+}
+
 const DELETE_DESTINATIONS = ["NEW STOCK", "SHELF", "CASH SALES", "RETURNS"];
 
 const ACCOUNTING_PATHS = {
@@ -642,10 +705,14 @@ export default function App() {
   const [archiveSearching, setArchiveSearching] = useState(false);
   const [archiveError, setArchiveError] = useState("");
   const [archivePath, setArchivePath] = useState("");
-  const [purchasesSearchTerm, setPurchasesSearchTerm] = useState("");
-  const [purchasesResults, setPurchasesResults] = useState([]);
-  const [purchasesSearching, setPurchasesSearching] = useState(false);
-  const [purchasesError, setPurchasesError] = useState("");
+  // One set per mount of the part lookup — the Archive view, Cash Sales and
+  // Returns Management each get their own. They deliberately do NOT share:
+  // these are three people's in-progress searches, and a term typed in Cash
+  // Sales appearing in the Archive view (or being cleared by it) would be a
+  // bug, not a convenience.
+  const archivePartLookup = usePurchasesSearch();
+  const cashPadPartLookup = usePurchasesSearch();
+  const returnsPartLookup = usePurchasesSearch();
   const [itemHistory, setItemHistory] = useState([]);
   // Return requisition slips. The item↔slip link lives on items (synced); this
   // list carries slip metadata (warehouse + date), notably for slips that are
@@ -1927,6 +1994,22 @@ export default function App() {
       .catch((e) => console.error("[archive-move] writeItems failed", e));
   }
 
+  // Pull an archived purchase line back into active stock, at the destination
+  // the lookup was mounted with. Shared by all three ArchivePartLookup mounts
+  // (Archive, Cash Sales, Returns) — main does the actual add, so the only
+  // work here is re-reading the items it just wrote.
+  async function handleAddArchiveLine(order, line, target) {
+    const res = await api.addArchiveLineToCashSales(order, line, target);
+    if (res?.ok) {
+      try {
+        adoptPushedItems(await api.readItems());
+      } catch (e) {
+        console.error("[archive-add] item refresh failed", e);
+      }
+    }
+    return res;
+  }
+
   function handleUpdateBubblePayments(bubbleId, paymentIds) {
     if (!bubbleId) return;
     const bubble = bubbles.find((b) => b.id === bubbleId);
@@ -2331,7 +2414,15 @@ export default function App() {
 
     for (const { payment, chosen } of assignments) {
       if (chosen.length === 0) continue;
-      const label = `${(payment.type || 'PAYMENT').toUpperCase()} $${toAmt(payment.amount).toFixed(2)}`;
+      // Type + amount alone collide constantly — the same tender for the same
+      // total happens several times a week, and `uniqueName` could only tell
+      // them apart with a " (2)" suffix. The payment's own day says which
+      // day's takings a card is, and is dropped when the import flagged the
+      // row as undated rather than printing an empty tail.
+      const paymentDay = formatPaymentDayLabel(payment.date);
+      const label = `${(payment.type || 'PAYMENT').toUpperCase()} $${toAmt(payment.amount).toFixed(2)}${
+        paymentDay ? ` — ${paymentDay}` : ''
+      }`;
       const bubbleName = uniqueName(label, existingNames);
       existingNames.add(bubbleName.toUpperCase());
       const bubbleId = bubbleIdForName(bubbleName);
@@ -5947,11 +6038,14 @@ export default function App() {
     }
   }
 
-  // Load the item lifecycle log (deletions) whenever the archive search view is
-  // opened, so a looked-up part that's no longer in active stock can show what
-  // happened to it. Refreshed on each open to catch recent deletions.
+  // Load the item lifecycle log (deletions) whenever a view hosting the part
+  // lookup is opened, so a looked-up part that's no longer in active stock can
+  // show what happened to it. Refreshed on each open to catch recent
+  // deletions. All three lookup mounts need it, not just the archive view —
+  // without it the trace silently renders empty and a deleted part reads as a
+  // plain "Not in active stock".
   useEffect(() => {
-    if (currentView !== "archive-search" || !api?.readItemHistory) return;
+    if (!PART_LOOKUP_VIEWS.has(currentView) || !api?.readItemHistory) return;
     let cancelled = false;
     (async () => {
       try {
@@ -5963,28 +6057,6 @@ export default function App() {
     })();
     return () => { cancelled = true; };
   }, [currentView]);
-
-  async function handlePurchasesSearch() {
-    const q = purchasesSearchTerm.trim();
-    if (!q) {
-      setPurchasesError("Enter a part number to search.");
-      setPurchasesResults([]);
-      return;
-    }
-    try {
-      setPurchasesError("");
-      setPurchasesSearching(true);
-      const res = await api.searchOrdersArchive(q);
-      if (!res?.ok) throw new Error(res?.error || "Search failed.");
-      setPurchasesResults(res.results || []);
-    } catch (e) {
-      console.error("[purchases search]", e);
-      setPurchasesError(e?.message || "Failed to search purchases archive.");
-      setPurchasesResults([]);
-    } finally {
-      setPurchasesSearching(false);
-    }
-  }
 
   async function handleArchiveSearch() {
     const hasTerm = archiveSearchTerm.trim() || archiveBubbleSearch.trim();
@@ -6961,6 +7033,26 @@ export default function App() {
               onUpdateBubblePayments={handleUpdateBubblePayments}
               onDeletePayment={handleDeletePayment}
               cashPadItems={cashPadItems}
+              // The same archive lookup the Archive view hosts, with the
+              // destination fixed — from here a found part is always going to
+              // CashPad, so there is nothing to choose.
+              partLookup={
+                <ArchivePartLookup
+                  searchTerm={cashPadPartLookup.term}
+                  setSearchTerm={cashPadPartLookup.setTerm}
+                  onSearch={cashPadPartLookup.search}
+                  searching={cashPadPartLookup.searching}
+                  results={cashPadPartLookup.results}
+                  error={cashPadPartLookup.error}
+                  onAddLineToCashSales={handleAddArchiveLine}
+                  onMoveItemToBubble={handleMoveArchiveItemToBubble}
+                  items={items}
+                  itemHistory={itemHistory}
+                  target="cashpad"
+                  title="Find a Part to Sell"
+                  subtitle="Search archived purchases by part number and pull the part into CashPad."
+                />
+              }
             />
           </>
         ) : currentView === "returns-management" ? (
@@ -6977,6 +7069,26 @@ export default function App() {
             onCreditReceived={handleCreditReceived}
             onDeleteSlip={handleDeleteReturnSlip}
             onReturnToNewStock={handleReturnItemToNewStock}
+            // Same lookup, destination fixed to RETURNS: a part found from
+            // here is being sent back to the warehouse, so it lands in the
+            // Unassigned pool ready for a requisition slip.
+            partLookup={
+              <ArchivePartLookup
+                searchTerm={returnsPartLookup.term}
+                setSearchTerm={returnsPartLookup.setTerm}
+                onSearch={returnsPartLookup.search}
+                searching={returnsPartLookup.searching}
+                results={returnsPartLookup.results}
+                error={returnsPartLookup.error}
+                onAddLineToCashSales={handleAddArchiveLine}
+                onMoveItemToBubble={handleMoveArchiveItemToBubble}
+                items={items}
+                itemHistory={itemHistory}
+                target="returns"
+                title="Find a Part to Return"
+                subtitle="Search archived purchases by part number and pull the part into Returns."
+              />
+            }
           />
         ) : currentView === "order-assignment" ? (
           <OrderAssignmentView />
@@ -7182,27 +7294,17 @@ export default function App() {
             results={archiveResults}
             error={archiveError}
             archivePath={archivePath}
-            purchasesSearchTerm={purchasesSearchTerm}
-            setPurchasesSearchTerm={setPurchasesSearchTerm}
-            onPurchasesSearch={handlePurchasesSearch}
-            purchasesSearching={purchasesSearching}
-            purchasesResults={purchasesResults}
-            purchasesError={purchasesError}
+            purchasesSearchTerm={archivePartLookup.term}
+            setPurchasesSearchTerm={archivePartLookup.setTerm}
+            onPurchasesSearch={archivePartLookup.search}
+            purchasesSearching={archivePartLookup.searching}
+            purchasesResults={archivePartLookup.results}
+            purchasesError={archivePartLookup.error}
             items={items}
             itemHistory={itemHistory}
             onMoveItemToBubble={handleMoveArchiveItemToBubble}
             onPurgeOldOrders={() => api.purgeOldOrdersArchive()}
-            onAddLineToCashSales={async (order, line, target) => {
-              const res = await api.addArchiveLineToCashSales(order, line, target);
-              if (res?.ok) {
-                try {
-                  adoptPushedItems(await api.readItems());
-                } catch (e) {
-                  console.error("[archive-add] item refresh failed", e);
-                }
-              }
-              return res;
-            }}
+            onAddLineToCashSales={handleAddArchiveLine}
           />
         ) : currentView === "settings" ? (
           <SettingsView />

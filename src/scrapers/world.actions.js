@@ -2,6 +2,9 @@ const fs = require("fs");
 
 const WORLD_LOGIN_URL = "https://www.iautoparts.biz/pronto/entrepot/WAW";
 const FRAME_BODY_NAME = "fraBody";
+// The frameset settles well after page "load"; give it a beat before touching it.
+const FRAME_SETTLE_MS = 1200;
+const LOGIN_FIELD_TIMEOUT_MS = 15000;
 
 async function getBodyFrame(page, timeoutMs = 20000) {
   const start = Date.now();
@@ -61,9 +64,17 @@ async function ensureLoggedIn(page, storageStatePath, credentials) {
 
   await page.goto(WORLD_LOGIN_URL, { waitUntil: "load" });
 
-  const bodyFrame = await getBodyFrame(page);
+  let bodyFrame = await getBodyFrame(page);
 
-  // Try to detect an existing session by looking for the login form
+  // The frameset keeps loading after page "load" fires: fraBody often renders
+  // the login shell, then swaps to the dashboard when a stored cookie is still
+  // good. Settle first, otherwise we race that swap and act on a dead frame.
+  await bodyFrame.waitForLoadState("domcontentloaded").catch(() => {});
+  await page.waitForTimeout(FRAME_SETTLE_MS);
+  bodyFrame = await getBodyFrame(page);
+
+  // Try to detect an existing session by looking for the login form. Re-check
+  // after settling: a stored session shows no form here even if one flashed up.
   const loginForm = await bodyFrame.$("form#idLoginMain");
   if (!loginForm) {
     console.log("[world] No login form found; assuming stored session is valid.");
@@ -71,46 +82,59 @@ async function ensureLoggedIn(page, storageStatePath, credentials) {
     return { loggedIn: true, usedStoredSession: true, loginPerformed: false };
   }
 
-  const usernameInput =
-    (await bodyFrame.$("input[name='username']")) || (await bodyFrame.$("#username"));
-  const passwordInput =
-    (await bodyFrame.$("input[name='password']")) || (await bodyFrame.$("#password"));
-  if (!usernameInput || !passwordInput) {
+  // Locators (not ElementHandles) re-resolve the selector at action time, so a
+  // node detached by a late frame re-render is re-found instead of throwing
+  // "Element is not attached to the DOM". Handles here were the ghost-mode
+  // failure: headed runs only survived it via slowMo's incidental delay.
+  const usernameInput = bodyFrame
+    .locator("input[name='username'], #username")
+    .first();
+  const passwordInput = bodyFrame
+    .locator("input[name='password'], #password")
+    .first();
+
+  try {
+    await usernameInput.waitFor({ state: "visible", timeout: LOGIN_FIELD_TIMEOUT_MS });
+    await passwordInput.waitFor({ state: "visible", timeout: LOGIN_FIELD_TIMEOUT_MS });
+  } catch (e) {
+    // The form vanished while we waited — that means the session took over
+    // mid-check, so treat it as the stored-session path rather than an error.
+    const formGone = !(await bodyFrame.$("form#idLoginMain").catch(() => null));
+    if (formGone) {
+      console.log("[world] Login form disappeared while waiting; session is valid.");
+      await page.context().storageState({ path: storageStatePath });
+      return { loggedIn: true, usedStoredSession: true, loginPerformed: false };
+    }
     throw new Error("Login form located, but username/password inputs were not found.");
   }
 
-  await usernameInput.fill(user);
-  await passwordInput.fill(pass);
+  await usernameInput.fill(user, { timeout: LOGIN_FIELD_TIMEOUT_MS });
+  await passwordInput.fill(pass, { timeout: LOGIN_FIELD_TIMEOUT_MS });
 
   // Tick "Remember Me" if present so server can set a persistent cookie
   try {
-    const rememberCheckbox =
-      (await bodyFrame.$("input[name='wantsRememberMe']")) ||
-      (await bodyFrame.$("input[type='checkbox'][name*='remember' i]"));
-    if (rememberCheckbox) {
+    const rememberCheckbox = bodyFrame
+      .locator("input[name='wantsRememberMe'], input[type='checkbox'][name*='remember' i]")
+      .first();
+    if (await rememberCheckbox.count()) {
       const checked = await rememberCheckbox.isChecked();
-      if (!checked) await rememberCheckbox.check();
+      if (!checked) await rememberCheckbox.check({ timeout: 5000 });
     }
   } catch (e) {
     console.warn("[world] could not set Remember Me checkbox", e);
   }
 
-  const submitButton =
-    (await bodyFrame.$("input[type='submit']")) ||
-    (await bodyFrame.$("button[type='submit']"));
-  if (submitButton) {
-    await Promise.all([
-      submitButton.click(),
-      bodyFrame.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null),
-      page.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => null),
-    ]);
-  } else {
-    await Promise.all([
-      passwordInput.press("Enter"),
-      bodyFrame.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null),
-      page.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => null),
-    ]);
-  }
+  const submitButton = bodyFrame
+    .locator("input[type='submit'], button[type='submit']")
+    .first();
+  const hasSubmit = await submitButton.count().catch(() => 0);
+  await Promise.all([
+    hasSubmit
+      ? submitButton.click({ timeout: LOGIN_FIELD_TIMEOUT_MS })
+      : passwordInput.press("Enter", { timeout: LOGIN_FIELD_TIMEOUT_MS }),
+    bodyFrame.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => null),
+    page.waitForLoadState("domcontentloaded", { timeout: 20000 }).catch(() => null),
+  ]);
 
   await page.context().storageState({ path: storageStatePath });
   return { loggedIn: true, usedStoredSession: false, loginPerformed: true };

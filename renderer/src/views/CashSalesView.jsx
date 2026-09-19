@@ -534,9 +534,18 @@ export default function CashSalesView({
   // in from Sales Orders that are still on the OUTSTANDING path, so looking it
   // up here would come back empty.
   cashPadItems = [],
+  // The archive part lookup, already bound to CASHPAD by App.jsx. Passed in as
+  // an element rather than as its half-dozen props so this view doesn't have
+  // to know anything about how the lookup works.
+  partLookup = null,
 }) {
   const [collapsedIds, setCollapsedIds] = useState(() => new Set());
   const [cashPadCollapsed, setCashPadCollapsed] = useState(false);
+  // Open by default — looking a part up is a normal part of building a cash
+  // sale, not an occasional detour, so the search box is there to type into
+  // without a click first. Still collapsible for when the sale cards need the
+  // room.
+  const [lookupOpen, setLookupOpen] = useState(true);
   const [search, setSearch] = useState("");
   const [newName, setNewName] = useState("");
   const [error, setError] = useState("");
@@ -647,6 +656,22 @@ export default function CashSalesView({
   return (
     <div className="flex items-start gap-4 pb-24">
       <div className="flex-1 min-w-0 space-y-4">
+      {partLookup && (
+        <div className="space-y-4">
+          <button
+            onClick={() => setLookupOpen((v) => !v)}
+            className="flex w-full items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2.5 text-left shadow-sm hover:bg-slate-50"
+          >
+            <span className="text-slate-400 text-xs">{lookupOpen ? "▾" : "▸"}</span>
+            <span className="text-sm font-semibold text-slate-700">Find a Part to Sell</span>
+            <span className="text-xs text-slate-400">
+              Search archived purchases and pull a part into CashPad
+            </span>
+          </button>
+          {lookupOpen && partLookup}
+        </div>
+      )}
+
       <Card>
         <div className="flex flex-wrap items-center gap-3">
           <input
