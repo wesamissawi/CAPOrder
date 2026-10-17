@@ -51,24 +51,66 @@ const createSageActions = (deps) => {
     extractReconcileApplied,
     getVendorName,
     getSageAhkTimeoutMs,
+    isSageHalted,
   } = deps;
+
+  // How often a running script checks the shared Stop flag. A hung script is
+  // killed within this long of someone pressing "Stop Sage" on any machine.
+  const ABORT_POLL_MS = 2000;
+
+  // The ceiling from Settings (sageAhkTimeoutMs). Individual runs use less.
+  function timeoutCeilingMs() {
+    return typeof getSageAhkTimeoutMs === 'function' ? getSageAhkTimeoutMs() : 5 * 60 * 1000;
+  }
+
+  // Purchase runs scale with the number of lines. Measured 2026-10-17 from the
+  // op logs: 82 successful runs, median 33s, p90 60s, roughly 30s + ~12s/line
+  // (one 9-line order took 192s). A flat 5 minutes meant a hung run held the
+  // queue for 5 minutes and then retried — 502 timeouts from just 4 orders.
+  // 2 min for a 1-line order + 15s per extra line, never above the ceiling.
+  function purchaseTimeoutMs(order) {
+    const lines = Array.isArray(order?.sage_lineItems) && order.sage_lineItems.length
+      ? order.sage_lineItems.length
+      : Array.isArray(order?.lineItems) ? order.lineItems.length : 1;
+    const adaptive = 120 * 1000 + 15 * 1000 * Math.max(0, lines - 1);
+    return Math.min(adaptive, timeoutCeilingMs());
+  }
+
+  const haltRequested = () => {
+    try {
+      return typeof isSageHalted === 'function' && isSageHalted();
+    } catch {
+      return false;
+    }
+  };
 
   function _runAhkScriptNow({
     scriptPath,
     args = [],
     logPrefix = 'sage',
     timeoutMs = 5 * 60 * 1000,
+    shouldAbort = null,
   }) {
     return new Promise((resolve) => {
       let stdout = "";
       let stderr = "";
       let finished = false;
+      let abortTimer = null;
 
       const complete = (payload) => {
         if (finished) return;
         finished = true;
+        if (abortTimer) clearInterval(abortTimer);
         resolve(payload);
       };
+
+      // Stopped while this run was still waiting its turn in the AHK queue:
+      // never start it.
+      if (typeof shouldAbort === 'function' && shouldAbort()) {
+        console.warn(`[${logPrefix}] AHK not started — Sage is stopped`);
+        complete({ ok: false, code: 'aborted', error: 'Stopped before it started (Sage is stopped)', stdout, stderr });
+        return;
+      }
 
       const child = spawn(scriptPath, args, { windowsHide: true });
       console.log(`[${logPrefix}] AHK spawn initiated`, {
@@ -84,6 +126,21 @@ const createSageActions = (deps) => {
         } catch {}
         complete({ ok: false, code: 'timeout', error: 'AHK timed out', stdout, stderr });
       }, timeoutMs);
+
+      // "Stop Sage" from any machine: kill the script mid-run. stdout gathered
+      // so far is still returned, so a run that already posted (journal entry
+      // printed) is recorded as entered rather than treated as unsent.
+      if (typeof shouldAbort === 'function') {
+        abortTimer = setInterval(() => {
+          if (finished || !shouldAbort()) return;
+          console.warn(`[${logPrefix}] Stop requested — killing AHK`, { pid: child?.pid });
+          clearTimeout(timeoutId);
+          try {
+            child.kill();
+          } catch {}
+          complete({ ok: false, code: 'aborted', error: 'Stopped by user (Stop Sage)', stdout, stderr });
+        }, ABORT_POLL_MS);
+      }
 
       child.on('spawn', () => {
         console.log(`[${logPrefix}] AHK process launched successfully`, { pid: child.pid });
@@ -110,9 +167,9 @@ const createSageActions = (deps) => {
     });
   }
 
-  function runAhkScript({ scriptPath, args = [], logPrefix = 'sage', timeoutMs = 5 * 60 * 1000 }) {
+  function runAhkScript({ scriptPath, args = [], logPrefix = 'sage', timeoutMs = 5 * 60 * 1000, shouldAbort = null }) {
     const label = `${logPrefix} ${path.basename(scriptPath || '')}`;
-    return _enqueueAhk(label, () => _runAhkScriptNow({ scriptPath, args, logPrefix, timeoutMs }));
+    return _enqueueAhk(label, () => _runAhkScriptNow({ scriptPath, args, logPrefix, timeoutMs, shouldAbort }));
   }
 
   function safeUnlink(filePath) {
@@ -187,7 +244,8 @@ const createSageActions = (deps) => {
         scriptPath: resolvedExecutable,
         args,
         logPrefix: 'sage',
-        timeoutMs: typeof getSageAhkTimeoutMs === 'function' ? getSageAhkTimeoutMs() : 5 * 60 * 1000,
+        timeoutMs: purchaseTimeoutMs(order),
+        shouldAbort: haltRequested,
       }).then((res) => {
         const ok = res?.ok;
         const parsedJournal = extractJournalLine(res.stdout || "");
@@ -269,7 +327,11 @@ const createSageActions = (deps) => {
         scriptPath: resolvedExecutable,
         args,
         logPrefix: 'sage-reconcile',
-        timeoutMs: typeof getSageAhkTimeoutMs === 'function' ? getSageAhkTimeoutMs() : 5 * 60 * 1000,
+        // One tax-field adjustment — short regardless of the order's size.
+        timeoutMs: Math.min(120 * 1000, timeoutCeilingMs()),
+        // Release on the "Adjusting totals" card / Stop Sage kills this too,
+        // and it won't start at all while Sage is stopped.
+        shouldAbort: haltRequested,
       }).then((res) => {
         const ok = res?.ok;
         const parsedJournal = extractJournalLine(res.stdout || "");
@@ -310,7 +372,9 @@ const createSageActions = (deps) => {
         scriptPath: resolvedExecutable,
         args,
         logPrefix: 'sage-invoice',
-        timeoutMs: typeof getSageAhkTimeoutMs === 'function' ? getSageAhkTimeoutMs() : 5 * 60 * 1000,
+        // Retypes one field — a short run regardless of the order's size.
+        timeoutMs: Math.min(120 * 1000, timeoutCeilingMs()),
+        shouldAbort: haltRequested,
       }).then((res) => resolve(res)).finally(() => {
         if (shouldCleanup) safeUnlink(orderPath);
       });

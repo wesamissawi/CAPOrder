@@ -784,6 +784,25 @@
           }
         ]
       }
+    ],
+    "Altrom": [
+      {
+        "id": "altrom-all",
+        "enabled": true,
+        "label": "Any → ALT <part>",
+        "conditions": [],
+        "code": [
+          {
+            "t": "lit",
+            "v": "ALT "
+          },
+          {
+            "t": "var",
+            "field": "partnumber"
+          }
+        ],
+        "description": null
+      }
     ]
   }
 }

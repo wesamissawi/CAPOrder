@@ -10,7 +10,47 @@ const createSageService = (deps) => {
     getSagePoActive,
     setSageOrderLock,
     clearSageOrderLock,
+    isSageHalted,
+    haltSage,
   } = deps;
+
+  const halted = () => {
+    try {
+      return typeof isSageHalted === 'function' && isSageHalted();
+    } catch {
+      return false;
+    }
+  };
+
+  // A run that did NOT post. Two cases:
+  //  - code 'aborted': somebody pressed Stop Sage (or Release on this order).
+  //    The stop already made every order unsent; just make sure this one's
+  //    lock and trigger are gone too.
+  //  - anything else (script error, timeout): the order is pulled out of the
+  //    queue and flagged failed — it used to go straight back to "queued" and
+  //    retry, and a hanging order then hung again every 5 minutes (502
+  //    timeouts from 4 orders). The whole queue is halted as well: a half-typed
+  //    purchase is likely still open in Sage, and the next order must not be
+  //    typed on top of it. A person checks Sage and presses Resume.
+  function handleUnpostedRun(refKey, res, extraPatch = {}) {
+    const error = (res?.error || res?.stderr || `exit ${res?.code}`).toString().slice(0, 300);
+    if (res?.code === 'aborted') {
+      clearSageOrderLock?.(refKey, { ...extraPatch });
+      return { aborted: true };
+    }
+    clearSageOrderLock?.(refKey, {
+      ...extraPatch,
+      sage_failed: true,
+      sage_failed_error: error,
+      sage_failed_at: new Date().toISOString(),
+    });
+    haltSage?.({
+      kind: 'failure',
+      refKey,
+      reason: `${refKey} failed in Sage (${res?.code === 'timeout' ? 'timed out' : error}).`,
+    });
+    return { aborted: false };
+  }
 
   let sageProcessing = false;
   let sagePendingRun = false;
@@ -28,6 +68,7 @@ const createSageService = (deps) => {
   // no matter which machine pressed the button.
   async function processSageOrdersQueue() {
     if (!getSagePoActive()) return;
+    if (halted()) return;
     if (sageProcessing) {
       sagePendingRun = true;
       return;
@@ -43,7 +84,6 @@ const createSageService = (deps) => {
         if (!order?.sage_trigger) return;
         if (order?.enteredInSage) return;
         if (sageProcessingRefs.has(refKey)) return;
-        sageProcessingRefs.add(refKey);
         targets.push({ refKey, order });
       });
 
@@ -61,6 +101,10 @@ const createSageService = (deps) => {
       targets.sort((a, b) => orderToTimestamp(a.order) - orderToTimestamp(b.order));
 
       for (const { refKey, order } of targets) {
+        // Stop Sage pressed (or a previous run in this pass failed): leave the
+        // rest exactly as they are.
+        if (halted()) break;
+        sageProcessingRefs.add(refKey);
         console.log("[sage] starting AHK for", refKey);
         // Mark the order as actively running on this machine. Everyone else sees
         // a live lock and stops writing to it until we report back.
@@ -76,11 +120,9 @@ const createSageService = (deps) => {
             stdout: (res?.stdout || "").toString().trim(),
             stderr: (res?.stderr || "").toString().trim(),
           });
-          // Back to "queued": sage_trigger is still set, so this order is retried
-          // on the next pass, and the card stays blurred with the failure shown.
-          setSageOrderLock?.(refKey, "queued", {
-            lastError: (res?.error || res?.stderr || `exit ${res?.code}`).toString().slice(0, 300),
-          });
+          handleUnpostedRun(refKey, res, { sage_trigger: false });
+          sageProcessingRefs.delete(refKey);
+          break;
         } else {
           const dirtyExit = !res?.ok;
           if (dirtyExit) {
@@ -134,6 +176,7 @@ const createSageService = (deps) => {
   // machines with invoices on could both grab the same update.
   async function processInvoiceUpdateQueue() {
     if (!getSagePoActive()) return;
+    if (halted()) return;
     if (invoiceProcessing) {
       invoicePendingRun = true;
       return;
@@ -147,10 +190,11 @@ const createSageService = (deps) => {
         if (!refKey) return;
         if (!order?.sage_invoice_trigger) return;
         if (invoiceProcessingRefs.has(refKey)) return;
-        invoiceProcessingRefs.add(refKey);
         targets.push({ refKey, order });
       });
       for (const { refKey, order } of targets) {
+        if (halted()) break;
+        invoiceProcessingRefs.add(refKey);
         // kind: "invoice" is what tells the lock when this order is finished —
         // sageOrderWorkFinished checks sage_invoice_trigger for an invoice lock
         // and enteredInSage for a purchase one, and an invoice update always
@@ -163,9 +207,9 @@ const createSageService = (deps) => {
         const posted = extractSagePosted(res?.stdout);
         if (!res?.ok && !posted.posted) {
           console.error("[sage-invoice] AHK run failed for", refKey, res?.error || res?.stderr || res?.code);
-          setSageOrderLock?.(refKey, "queued", {
-            lastError: (res?.error || res?.stderr || `exit ${res?.code}`).toString().slice(0, 300),
-          });
+          handleUnpostedRun(refKey, res, { sage_invoice_trigger: false });
+          invoiceProcessingRefs.delete(refKey);
+          break;
         } else {
           if (!res?.ok) {
             console.warn(

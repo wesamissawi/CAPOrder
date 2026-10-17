@@ -47,6 +47,7 @@ const { getProforceOrders } = require('./src/scrapers/proforceScraper');
 const { getBestBuyOrders } = require('./src/scrapers/bestBuyScraper');
 const { getCbkOrders } = require('./src/scrapers/cbkScraper');
 const { getTigerOrders } = require('./src/scrapers/tigerScraper');
+const { getAltromOrders } = require('./src/scrapers/altromScraper');
 const { fetchWorldInvoices } = require('./src/scrapers/worldInvoice');
 const { fetchWorldCreditInvoices } = require('./src/scrapers/worldCreditInvoice');
 const { fetchWorldStandaloneInvoices } = require('./src/scrapers/worldStandaloneInvoice');
@@ -148,6 +149,10 @@ const VENDOR_PATHS = {
   tiger: {
     dataDir: path.join(INSTANCE_DIR, 'tiger'),
     storageState: path.join(INSTANCE_DIR, 'tiger', 'tiger_storage_state.json'),
+  },
+  altrom: {
+    dataDir: path.join(INSTANCE_DIR, 'altrom'),
+    storageState: path.join(INSTANCE_DIR, 'altrom', 'altrom_storage_state.json'),
   },
 };
 // Downloaded invoice assets (PDFs/images) and their caches are NOT
@@ -464,6 +469,58 @@ function clearSageLock() {
     if (fs.existsSync(f)) fs.unlinkSync(f);
   } catch (e) {
     console.error('[sage-lock] clear failed', e);
+  }
+}
+
+// ---- Sage halt (the "Stop Sage" switch) ------------------------------------
+// One shared file, separate from sage_lock.json (that one is rewritten by the
+// lock holder's heartbeat every 10s, so another machine writing a field into it
+// could be clobbered). While it says halted:
+//  - the Sage machine starts no new AHK run, and kills the one in flight within
+//    a couple of seconds (sage.actions polls isSageHalted during a run);
+//  - "Send to Sage" and ghost mode's Sage step refuse to release anything.
+// Set by "Stop Sage" from any machine, and by the Sage machine itself when a run
+// fails or times out — a half-typed purchase is probably still open in Sage, and
+// typing the next order into it would make things worse. Cleared only by a
+// person pressing Resume after checking Sage.
+function getSageHaltFile() {
+  return path.join(getSharedDataDir(), 'sage_halt.json');
+}
+
+function readSageHalt() {
+  try {
+    const f = getSageHaltFile();
+    if (!fs.existsSync(f)) return null;
+    const data = JSON.parse(fs.readFileSync(f, 'utf-8'));
+    return data && data.halted === true ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+function isSageHalted() {
+  return Boolean(readSageHalt());
+}
+
+function haltSage({ reason = '', kind = 'stop', refKey = '' } = {}) {
+  const data = { halted: true, at: Date.now(), by: getMachineId(), kind, reason, refKey };
+  try {
+    const f = getSageHaltFile();
+    ensureDir(path.dirname(f));
+    writeJsonAtomic(f, JSON.stringify(data, null, 2));
+  } catch (e) {
+    console.error('[sage-halt] write failed', e);
+  }
+  return data;
+}
+
+function resumeSage() {
+  try {
+    const f = getSageHaltFile();
+    if (fs.existsSync(f)) fs.unlinkSync(f);
+  } catch (e) {
+    console.error('[sage-halt] clear failed', e);
+    throw e;
   }
 }
 
@@ -1794,6 +1851,7 @@ const vendorOrdersService = createVendorOrdersService({
   getProforceOrders,
   getCbkOrders,
   getTigerOrders,
+  getAltromOrders,
   getBestBuyOrders,
   fetchWorldInvoicesScraper: fetchWorldInvoices,
   fetchTransbecInvoicesScraper: fetchTransbecInvoices,
@@ -1826,6 +1884,7 @@ const {
   fetchProforceOrders,
   fetchCbkOrders,
   fetchTigerOrders,
+  fetchAltromOrders,
   fetchBestBuyOrders,
   fetchWorldInvoices: fetchWorldInvoicesService,
   fetchTransbecInvoices: fetchTransbecInvoicesService,
@@ -2059,6 +2118,8 @@ const sageService = createSageService({
   getSageInvoiceActive,
   setSageOrderLock,
   clearSageOrderLock,
+  isSageHalted,
+  haltSage,
 });
 const {
   runSagePurchase,
@@ -2081,6 +2142,27 @@ const automation = createAutomationService({
   getAppVersion: () => app.getVersion(),
   randomUUID,
 });
+
+// Watch the shared Stop flag. Every window gets 'sage:halt-changed' so the
+// Stop/Resume banner appears on all machines within a few seconds, and the
+// Sage machine restarts its queues when someone (anywhere) presses Resume —
+// the halt file isn't part of the order store, so no store change would
+// otherwise wake the processor for orders still holding a trigger.
+let lastSageHaltKey = null;
+setInterval(() => {
+  let halt = null;
+  try { halt = readSageHalt(); } catch {}
+  const key = halt ? `${halt.at}|${halt.reason}` : '';
+  if (key === lastSageHaltKey) return;
+  const wasHalted = Boolean(lastSageHaltKey);
+  lastSageHaltKey = key;
+  try {
+    if (win && !win.isDestroyed()) win.webContents.send('sage:halt-changed', { halt });
+  } catch (e) { console.error('[sage-halt] push failed', e); }
+  if (wasHalted && !halt) {
+    try { scheduleSageProcessing(); } catch (e) { console.error('[sage-halt] resume kick failed', e); }
+  }
+}, 3000).unref?.();
 
 // Wire AHK queue running-state into the shared lock file
 configureSageQueue({
@@ -2440,6 +2522,7 @@ function registerAllIpc() {
     fetchProforceOrders,
     fetchCbkOrders,
     fetchTigerOrders,
+    fetchAltromOrders,
     fetchBestBuyOrders,
     fetchWorldInvoices: fetchWorldInvoicesService,
     fetchTransbecInvoices: fetchTransbecInvoicesService,
@@ -2464,6 +2547,9 @@ function registerAllIpc() {
     setSageOrderLock,
     clearSageOrderLock,
     patchOrderOnDisk,
+    readSageHalt,
+    haltSage,
+    resumeSage,
     runSageReconcile,
     runSageSalesInvoice,
     applyReconcileResult,

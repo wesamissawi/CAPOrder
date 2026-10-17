@@ -17,6 +17,7 @@ const createVendorOrdersService = (deps) => {
     getProforceOrders,
     getCbkOrders,
     getTigerOrders,
+    getAltromOrders,
     getBestBuyOrders,
     fetchWorldInvoicesScraper,
     fetchTransbecInvoicesScraper,
@@ -242,6 +243,41 @@ const createVendorOrdersService = (deps) => {
     } catch (e) {
       console.error('[orders:fetch-tiger]', e);
       return { ok: false, error: e?.message || 'Failed to fetch Tiger orders.' };
+    }
+  }
+
+  async function fetchAltromOrders() {
+    try {
+      const config = loadConfig();
+      // Settings wins; .env (loaded by the scraper modules via dotenv) is the
+      // fallback, since that's where the Altrom login was first provided.
+      const altromUser = (typeof config.ALTROM_USER === 'string' && config.ALTROM_USER) || process.env.ALTROM_USER || '';
+      const altromPass = (typeof config.ALTROM_PASS === 'string' && config.ALTROM_PASS) || process.env.ALTROM_PASS || '';
+      if (!altromUser || !altromPass) {
+        return { ok: false, error: 'Missing ALTROM credentials. Set them in Settings.' };
+      }
+      ensureDir(VENDOR_PATHS.altrom.dataDir);
+      const targetOrdersPath = getOrdersFile();
+      const existing = readOrders();
+      const archivedRefs = getArchivedOrderRefs(existing, { vendor: 'altrom' });
+      const res = await getAltromOrders({
+        storageDir: VENDOR_PATHS.altrom.dataDir,
+        storageStatePath: VENDOR_PATHS.altrom.storageState,
+        ordersPath: targetOrdersPath,
+        existingOrders: existing,
+        existingRefs: archivedRefs,
+        credentials: { user: altromUser, pass: altromPass },
+        // Altrom is always a real browser window (Cloudflare blocks headless);
+        // this only decides whether that window is parked off-screen.
+        headless: getScrapersHeadless(),
+      });
+      if (res?.ok && Array.isArray(res.orders)) {
+        writeOrdersMerged(res.orders);
+      }
+      return { ok: true, ...(res || {}), path: targetOrdersPath };
+    } catch (e) {
+      console.error('[orders:fetch-altrom]', e);
+      return { ok: false, error: e?.message || 'Failed to fetch Altrom orders.' };
     }
   }
 
@@ -782,6 +818,7 @@ const createVendorOrdersService = (deps) => {
     fetchProforceOrders,
     fetchCbkOrders,
     fetchTigerOrders,
+    fetchAltromOrders,
     fetchBestBuyOrders,
     fetchWorldInvoices,
     connectGmail,

@@ -116,6 +116,7 @@ contextBridge.exposeInMainWorld('api', {
   fetchProforceOrders: () => ipcRenderer.invoke('orders:fetch-proforce'),
   fetchCbkOrders: () => ipcRenderer.invoke('orders:fetch-cbk'),
   fetchTigerOrders: () => ipcRenderer.invoke('orders:fetch-tiger'),
+  fetchAltromOrders: () => ipcRenderer.invoke('orders:fetch-altrom'),
   fetchBestBuyOrders: () => ipcRenderer.invoke('orders:fetch-bestbuy'),
   fetchWorldInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-world-invoices', payload),
   openWorldInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:open-world-invoice-image', fileName),
@@ -185,6 +186,14 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('updates:status', listener);
   },
   getSageLock: () => ipcRenderer.invoke('sage:get-lock'),
+  getSageHalt: () => ipcRenderer.invoke('sage:get-halt'),
+  stopSage: () => ipcRenderer.invoke('sage:stop-all'),
+  resumeSage: () => ipcRenderer.invoke('sage:resume'),
+  onSageHaltChanged: (cb) => {
+    const listener = (_e, data) => cb?.(data);
+    ipcRenderer.on('sage:halt-changed', listener);
+    return () => ipcRenderer.removeListener('sage:halt-changed', listener);
+  },
   onSageLockChanged: (cb) => {
     const listener = (_e, data) => cb?.(data);
     ipcRenderer.on('sage:lock-changed', listener);

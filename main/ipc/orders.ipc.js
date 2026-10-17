@@ -18,6 +18,7 @@ const registerOrdersIpc = (ipcMain, deps) => {
     fetchProforceOrders,
     fetchCbkOrders,
     fetchTigerOrders,
+    fetchAltromOrders,
     fetchBestBuyOrders,
     orderMatchesKey,
     runSageReconcile,
@@ -44,7 +45,78 @@ const registerOrdersIpc = (ipcMain, deps) => {
     setSageOrderLock,
     clearSageOrderLock,
     patchOrderOnDisk,
+    readSageHalt,
+    haltSage,
+    resumeSage,
   } = deps;
+
+  // Every Sage flag an order can carry while it is anywhere between "marked for
+  // Sage" and "entered". Stop Sage clears all of them: the user asked that a
+  // stop leave everything fully unsent (ghost mode re-queues what still needs
+  // entering on its next cycle once Sage is resumed).
+  const UNSENT_PATCH = {
+    sage_trigger: false,
+    sage_queued: false,
+    sage_invoice_queued: false,
+    sage_invoice_trigger: false,
+  };
+
+  function orderKey(order) {
+    return String(order?.sage_reference || order?.reference || order?.__row || '')
+      .trim()
+      .toUpperCase();
+  }
+
+  // Stop Sage. Raises the shared halt flag FIRST — the Sage machine polls it
+  // every 2s during a run and kills the AHK script — then takes every order
+  // out of both waiting rooms and drops any lock. Callable from any machine.
+  function stopAllSage(reason) {
+    const halt = haltSage({ kind: 'stop', reason });
+    let cleared = 0;
+    (readOrders() || []).forEach((o) => {
+      if (!o) return;
+      const inFlight =
+        o.sage_trigger === true ||
+        o.sage_queued === true ||
+        o.sage_invoice_trigger === true ||
+        o.sage_invoice_queued === true ||
+        (o.sage_lock && typeof o.sage_lock === 'object');
+      if (!inFlight) return;
+      const key = orderKey(o);
+      if (key && clearSageOrderLock(key, UNSENT_PATCH)) cleared += 1;
+    });
+    return { halt, cleared };
+  }
+
+  ipcMain.handle('sage:get-halt', () => {
+    try {
+      return { ok: true, halt: readSageHalt?.() || null };
+    } catch (e) {
+      return { ok: false, halt: null, error: e?.message };
+    }
+  });
+
+  ipcMain.handle('sage:stop-all', () => {
+    try {
+      const by = getMachineId?.() || 'a machine';
+      const { halt, cleared } = stopAllSage(`Stopped by ${by}.`);
+      return { ok: true, halt, cleared };
+    } catch (e) {
+      console.error('[sage:stop-all]', e);
+      return { ok: false, error: e?.message || 'Failed to stop Sage.' };
+    }
+  });
+
+  ipcMain.handle('sage:resume', () => {
+    try {
+      resumeSage();
+      scheduleSageProcessing();
+      return { ok: true };
+    } catch (e) {
+      console.error('[sage:resume]', e);
+      return { ok: false, error: e?.message || 'Failed to resume Sage.' };
+    }
+  });
 
   // orders.json is watched unconditionally, on every machine. It used to be
   // watched only while a Sage flow was active locally, which meant the machine
@@ -236,8 +308,8 @@ const registerOrdersIpc = (ipcMain, deps) => {
       const updated = patchOrderOnDisk(
         key,
         kind === 'invoice'
-          ? { sage_invoice_queued: true, sage_lock: null }
-          : { sage_queued: true, sage_lock: null }
+          ? { sage_invoice_queued: true, sage_lock: null, sage_failed: false, sage_failed_error: null }
+          : { sage_queued: true, sage_lock: null, sage_failed: false, sage_failed_error: null }
       );
       if (!updated) return { ok: false, error: 'Failed to queue the order.' };
       return { ok: true, order: updated };
@@ -254,6 +326,14 @@ const registerOrdersIpc = (ipcMain, deps) => {
   // happens to be that machine; everywhere else the CRDT push does the work.
   ipcMain.handle('sage:send-queue', () => {
     try {
+      const halt = readSageHalt?.();
+      if (halt) {
+        return {
+          ok: false,
+          halted: true,
+          error: `Sage is stopped — ${halt.reason || 'stopped'} Check Sage, then press Resume before sending.`,
+        };
+      }
       const list = readOrders() || [];
       // Two waiting rooms, one release. An invoice update is judged on
       // sage_invoice_queued alone — unlike a purchase it is EXPECTED to be
@@ -293,12 +373,20 @@ const registerOrdersIpc = (ipcMain, deps) => {
     try {
       const key = (refKey || '').toString().trim().toUpperCase();
       if (!key) return { ok: false, error: 'Missing order reference.' };
-      const updated = clearSageOrderLock(key, {
-        sage_trigger: false,
-        sage_queued: false,
-        sage_invoice_queued: false,
-        sage_invoice_trigger: false,
-      });
+      // A live Sage lock only ever exists while a script is driving Sage for
+      // this order (purchase, invoice update or reconcile — scripts run one at
+      // a time, so at most one card has it). Releasing it is therefore always a
+      // full stop: the script is killed and nothing else may be typed into the
+      // half-filled screen. Without a live lock (the "In Sage Queue — remove"
+      // button, or a stale lock left by an older build) nothing is running, so
+      // only this one order is taken out.
+      const target = (readOrders() || []).find((o) => orderMatchesKey(o, key));
+      if (isOrderSageLocked?.(target)) {
+        const by = getMachineId?.() || 'a machine';
+        const { halt, cleared } = stopAllSage(`${key} released while Sage was entering it (by ${by}).`);
+        return { ok: true, stopped: true, halt, cleared };
+      }
+      const updated = clearSageOrderLock(key, UNSENT_PATCH);
       if (!updated) return { ok: false, error: 'Order not found.' };
       return { ok: true, order: updated };
     } catch (e) {
@@ -356,6 +444,10 @@ const registerOrdersIpc = (ipcMain, deps) => {
 
   ipcMain.handle('orders:fetch-tiger', async () => {
     return fetchTigerOrders();
+  });
+
+  ipcMain.handle('orders:fetch-altrom', async () => {
+    return fetchAltromOrders();
   });
 
   ipcMain.handle('orders:fetch-bestbuy', async () => {

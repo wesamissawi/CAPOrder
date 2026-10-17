@@ -592,6 +592,13 @@ const DEFAULT_RULES = {
         code: LINE_PART,
         description: [L('BRAKE ROTORS - '), { t: 'interchange', file: 'trsToASRotors.json', key: 'partnumber' }] },
     ],
+    // Every Altrom part is stocked under line code ALT, whatever brand line the
+    // PROLink invoice prints (XUS, SID, URO...): "ALT <part as on the site>".
+    Altrom: [
+      { id: rid('altrom-all'), enabled: true, label: 'Any → ALT <part>',
+        conditions: [],
+        code: [L('ALT '), V('partnumber')], description: null },
+    ],
   },
 };
 

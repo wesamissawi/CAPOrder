@@ -39,10 +39,15 @@ function PathRow({ label, value, onChange, readOnly, onBrowse, helper, status })
   );
 }
 
-// "10:30 AM", or "tomorrow at 8:00 AM" once the day's last cycle has gone.
+// "10:30 AM", "8:00 AM tomorrow", or "8:00 AM Monday" when the next working
+// day is further off (Saturday afternoon / Sunday).
 function formatGhostTime(when, now = new Date()) {
   const clock = when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  return when.getDate() === now.getDate() ? clock : `${clock} tomorrow`;
+  const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((dayStart(when) - dayStart(now)) / 86400000);
+  if (days <= 0) return clock;
+  if (days === 1) return `${clock} tomorrow`;
+  return `${clock} ${when.toLocaleDateString([], { weekday: "long" })}`;
 }
 
 export default function SettingsView() {
@@ -99,6 +104,8 @@ export default function SettingsView() {
   const [cbkPass, setCbkPass] = useState("");
   const [tigerUser, setTigerUser] = useState("");
   const [tigerPass, setTigerPass] = useState("");
+  const [altromUser, setAltromUser] = useState("");
+  const [altromPass, setAltromPass] = useState("");
   const [bestbuyUser, setBestbuyUser] = useState("");
   const [bestbuyPass, setBestbuyPass] = useState("");
   const [proforceStore, setProforceStore] = useState("");
@@ -340,6 +347,8 @@ export default function SettingsView() {
           setCbkPass(cfg.CBK_PASS || "");
           setTigerUser(cfg.TIGER_USER || "");
           setTigerPass(cfg.TIGER_PASS || "");
+          setAltromUser(cfg.ALTROM_USER || "");
+          setAltromPass(cfg.ALTROM_PASS || "");
           setBestbuyUser(cfg.BESTBUY_USER || "");
           setBestbuyPass(cfg.BESTBUY_PASS || "");
           setProforceStore(cfg.PROFORCE_STORE || "");
@@ -467,6 +476,8 @@ export default function SettingsView() {
         CBK_PASS: cbkPass || "",
         TIGER_USER: tigerUser || "",
         TIGER_PASS: tigerPass || "",
+        ALTROM_USER: altromUser || "",
+        ALTROM_PASS: altromPass || "",
         BESTBUY_USER: bestbuyUser || "",
         BESTBUY_PASS: bestbuyPass || "",
         PROFORCE_STORE: proforceStore || "",
@@ -798,7 +809,7 @@ export default function SettingsView() {
             <div>
               <h2 className="text-xl font-semibold text-slate-800">Scraper Credentials</h2>
               <p className="text-sm text-slate-500">
-                Stored per-machine in app data. Used by World, Transbec, CBK, Tiger, BestBuy, and Proforce scrapers.
+                Stored per-machine in app data. Used by World, Transbec, CBK, Tiger, Altrom, BestBuy, and Proforce scrapers.
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -908,6 +919,24 @@ export default function SettingsView() {
                 type="password"
                 value={tigerPass}
                 onChange={(e) => setTigerPass(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Altrom Username</label>
+              <input
+                type="text"
+                value={altromUser}
+                onChange={(e) => setAltromUser(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">Altrom Password</label>
+              <input
+                type="password"
+                value={altromPass}
+                onChange={(e) => setAltromPass(e.target.value)}
                 className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
               />
             </div>
@@ -1594,7 +1623,7 @@ export default function SettingsView() {
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="flex flex-col gap-1">
               <label className="text-xs uppercase tracking-wide text-slate-500">
-                Sage AHK Timeout (seconds)
+                Sage AHK Timeout — maximum (seconds)
               </label>
               <input
                 type="number"
@@ -1607,6 +1636,11 @@ export default function SettingsView() {
               {timeoutError && (
                 <div className="text-xs text-red-600">{timeoutError}</div>
               )}
+              <div className="text-xs text-slate-500">
+                Each purchase entry gets 2 minutes plus 15 seconds per extra line, never more than
+                this. A run that times out or fails is marked "Failed in Sage" and Sage stops until
+                you press Resume — it is not retried automatically.
+              </div>
               <div className="text-xs text-slate-500">
                 Minimum 10 seconds. Default is 300 seconds (5 minutes).
               </div>
@@ -1646,7 +1680,7 @@ export default function SettingsView() {
                 <span>Run scraper logins headless (no visible browser window)</span>
               </label>
               <div className="text-xs text-slate-500">
-                Applies to World, Transbec, CBK, Tiger, BestBuy, and Proforce order fetches.
+                Applies to World, Transbec, CBK, Tiger, BestBuy, and Proforce order fetches. Altrom always opens a real window (its site blocks headless browsers); with this on it is kept off-screen.
               </div>
             </div>
             <div className="flex flex-col gap-1">
@@ -1696,7 +1730,7 @@ export default function SettingsView() {
                   className="h-4 w-4 rounded border-slate-300"
                 />
                 <span>
-                  Run the Order Management routine by itself, every 30 minutes between 8am and 5pm
+                  Run the Order Management routine by itself, every 30 minutes, 8am-5pm Monday to Friday and 8am-2pm Saturday (never Sunday)
                 </span>
               </label>
               {ghostError ? (
@@ -1736,7 +1770,7 @@ export default function SettingsView() {
                 Each cycle runs strictly in order: Get All (every vendor), check Gmail for World
                 and Transbec invoices, queue every order that now has an invoice and isn't in Sage
                 yet and send the queue, wait for Sage to actually finish entering it, and only
-                then print. Tiger is pulled twice a day (8am and noon) and BestBuy's invoice email
+                then print. Tiger and Altrom are pulled twice a day (8am and noon) and BestBuy's invoice email
                 arrives the next day, so that gets one Gmail check a day from noon. Printing covers
                 Transbec and BestBuy invoices that have never been printed — never World.
               </div>

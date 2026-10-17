@@ -4,6 +4,7 @@ import { DescriptionWithTooltip } from "../components/orderCardKit";
 import { isOrderSageLocked, sageLockLabel } from "../utils/sageLock";
 import { getOrderQtyDiscrepancy } from "../utils/qtyDiscrepancy";
 import { applyEnvironmentalFee } from "../utils/environmentalFee";
+import GmailReconnectButton, { isGmailAuthError } from "../components/GmailReconnect";
 
 function DismissibleMessage({ tone, onDismiss, children }) {
   const boxStyles =
@@ -14,7 +15,10 @@ function DismissibleMessage({ tone, onDismiss, children }) {
     tone === "error" ? "text-red-400 hover:text-red-700" : "text-emerald-500 hover:text-emerald-800";
   return (
     <div className={`mt-3 flex items-start gap-2 rounded-xl border px-3 py-2 text-sm whitespace-pre-line ${boxStyles}`}>
-      <div className="flex-1">{children}</div>
+      <div className="flex-1">
+        {children}
+        {tone === "error" && isGmailAuthError(children) && <GmailReconnectButton />}
+      </div>
       <button
         type="button"
         onClick={onDismiss}
@@ -94,6 +98,10 @@ export default function OrderManagementView({
   onSendSageQueue,
   sageQueueSending = false,
   onReleaseSageLock,
+  sageHalt,
+  sageStopBusy,
+  onStopSage,
+  onResumeSage,
   onMarkComplete,
   onClearValueCheck,
   onReconcileTotals,
@@ -113,6 +121,10 @@ export default function OrderManagementView({
   tigerOrdersRunning,
   tigerOrdersStatus,
   tigerOrdersError,
+  onGetAltromOrders,
+  altromOrdersRunning,
+  altromOrdersStatus,
+  altromOrdersError,
   onGetBestBuyOrders,
   bestBuyOrdersRunning,
   bestBuyOrdersStatus,
@@ -390,6 +402,7 @@ export default function OrderManagementView({
     { key: "cbk", label: "CBK", onClick: onGetCbkOrders, running: cbkOrdersRunning, status: cbkOrdersStatus, error: cbkOrdersError },
     { key: "proforce", label: "Proforce", onClick: onGetProforceOrders, running: proforceRunning, status: proforceStatus, error: proforceError },
     { key: "tiger", label: "Tiger", onClick: onGetTigerOrders, running: tigerOrdersRunning, status: tigerOrdersStatus, error: tigerOrdersError },
+    { key: "altrom", label: "Altrom", onClick: onGetAltromOrders, running: altromOrdersRunning, status: altromOrdersStatus, error: altromOrdersError },
     // Not an order fetch like the others: World invoices that arrived with no
     // order behind them, which this turns INTO orders. It sits here because
     // that is what it produces, and because it needs the same status/error row
@@ -441,34 +454,6 @@ export default function OrderManagementView({
         !isInvoiceNotPrinted(order)
     );
 
-  // Same conditions as canArchiveOrder, in the same order, but as prose. The
-  // Archive button simply isn't rendered while any of them fails, which leaves
-  // no way to tell WHICH one — and the print gate in particular has no checkbox
-  // of its own, so an order can sit there looking complete with nothing to
-  // click. Credit orders hit that hardest: they're excluded from the
-  // "Not Printed" filter (and so from Print All) by design, so their only print
-  // affordance is the per-card Print Credit button.
-  const archiveBlockers = (order) => {
-    if (!order) return [];
-    const reasons = [];
-    if (order.detailStored !== true) reasons.push("order detail hasn't been fetched");
-    if (order.pickedUp !== true) reasons.push('"Picked Up" not checked');
-    if (order.inStore !== true) reasons.push('"Arrived" not checked');
-    if (order.hasInvoiceNum !== true) reasons.push("invoice # not confirmed");
-    if (order.totalVerified !== true) reasons.push('"Value Check" not confirmed');
-    if (order.enteredInSage !== true) reasons.push('"Entered in Sage" not checked');
-    if (order.invoiceNeedsSync === true) reasons.push("invoice # changed — Sage needs re-syncing");
-    if (order.valueCheckAlert === true) reasons.push("value check still open (see above)");
-    if (isInvoiceNotPrinted(order)) {
-      reasons.push(
-        order.bestbuyCreditFile && !order.bestbuyInvoiceFile
-          ? 'credit invoice not printed — use "Print Credit" above'
-          : 'invoice not printed — use "Print Invoice" above'
-      );
-    }
-    return reasons;
-  };
-
   return (
     <>
       <style>{valueCheckStyles}</style>
@@ -483,7 +468,7 @@ export default function OrderManagementView({
               title={
                 getAllOrdersRunning
                   ? "Fetching every vendor at once..."
-                  : getAllOrdersDisabledReason || "Fetch World, Transbec, BestBuy, CBK, Proforce and Tiger all at once"
+                  : getAllOrdersDisabledReason || "Fetch World, Transbec, BestBuy, CBK, Proforce, Tiger and Altrom all at once"
               }
               className="px-5 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold disabled:opacity-60"
             >
@@ -512,10 +497,11 @@ export default function OrderManagementView({
             <div className="mt-3 flex items-start gap-3 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-700">
               <div className="flex-1">
                 <span className="font-semibold">Ghost mode</span> - this machine runs the fetch,
-                Gmail, Sage and print steps by itself every 30 minutes between 8am and 5pm.
+                Gmail, Sage and print steps by itself every 30 minutes, 8am-5pm weekdays and 8am-2pm Saturday (not Sunday).
                 <div className="mt-0.5 text-xs text-violet-600 whitespace-pre-line">
                   {ghostBusy || ghostLog || "Waiting for the next half hour."}
                 </div>
+                {!ghostBusy && isGmailAuthError(ghostLog) && <GmailReconnectButton />}
               </div>
               {onRunGhostCycleNow && (
                 <button
@@ -532,7 +518,10 @@ export default function OrderManagementView({
           )}
           {getAllOrdersError && (
             <div className="mt-3 flex items-start gap-2 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
-              <div className="flex-1 whitespace-pre-line">{getAllOrdersError}</div>
+              <div className="flex-1 whitespace-pre-line">
+                {getAllOrdersError}
+                {isGmailAuthError(getAllOrdersError) && <GmailReconnectButton />}
+              </div>
               <button
                 type="button"
                 onClick={() => onClearOrderFetchMessage?.("get-all")}
@@ -549,7 +538,10 @@ export default function OrderManagementView({
                 key={`${v.key}-error`}
                 className="mt-3 flex items-start gap-2 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700"
               >
-                <div className="flex-1 whitespace-pre-line">{v.error}</div>
+                <div className="flex-1 whitespace-pre-line">
+                  {v.error}
+                  {isGmailAuthError(v.error) && <GmailReconnectButton />}
+                </div>
                 <button
                   type="button"
                   onClick={() => onClearOrderFetchMessage?.(v.key)}
@@ -689,10 +681,12 @@ export default function OrderManagementView({
               {onSendSageQueue && (
                 <button
                   onClick={onSendSageQueue}
-                  disabled={sageQueuedCount === 0 || sageQueueSending}
+                  disabled={sageQueuedCount === 0 || sageQueueSending || Boolean(sageHalt)}
                   className="px-4 py-2 rounded-xl bg-violet-600 text-white text-sm font-semibold disabled:opacity-50"
                   title={
-                    sageQueuedCount === 0
+                    sageHalt
+                      ? "Sage is stopped — check Sage, then press Resume Sage below"
+                      : sageQueuedCount === 0
                       ? sagePendingCount > 0
                         ? `${sagePendingCount} order${sagePendingCount === 1 ? "" : "s"} already on the way to Sage`
                         : "Nothing is queued for Sage"
@@ -704,6 +698,24 @@ export default function OrderManagementView({
                     : `Send to Sage${sagePendingCount ? ` (${sagePendingCount})` : ""}`}
                 </button>
               )}
+              {/* The escape hatch for a hung AHK run: kills the script on the
+                  Sage machine (within ~2s, from any machine), takes every order
+                  out of the Sage queue, and halts Sage until Resume. */}
+              {onStopSage && (
+                <button
+                  type="button"
+                  onClick={onStopSage}
+                  disabled={sageStopBusy || Boolean(sageHalt)}
+                  className="px-4 py-2 rounded-xl border border-red-300 bg-white text-red-700 text-sm font-semibold hover:bg-red-50 disabled:opacity-50"
+                  title={
+                    sageHalt
+                      ? "Sage is already stopped"
+                      : "Stop the Sage script if it is stuck, and take every order out of the Sage queue"
+                  }
+                >
+                  Stop Sage
+                </button>
+              )}
               <button
                 onClick={loadOrders}
                 disabled={ordersLoading}
@@ -713,6 +725,30 @@ export default function OrderManagementView({
               </button>
             </div>
           </div>
+          {sageHalt && (
+            <div className="mt-4 flex flex-wrap items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+              <div className="flex-1 min-w-[16rem]">
+                <span className="font-semibold">
+                  {sageHalt.kind === "failure" ? "Sage stopped after a failed entry" : "Sage is stopped"}
+                </span>
+                {sageHalt.reason ? ` — ${sageHalt.reason}` : ""}
+                <div className="mt-0.5 text-xs text-red-700">
+                  Nothing will be sent to Sage until you resume. First check the Sage window: if a
+                  purchase was left half-entered, close it without saving.
+                </div>
+              </div>
+              {onResumeSage && (
+                <button
+                  type="button"
+                  onClick={onResumeSage}
+                  disabled={sageStopBusy}
+                  className="shrink-0 px-3 py-1.5 rounded-full border border-red-300 bg-white text-xs font-semibold text-red-700 hover:bg-red-100 disabled:opacity-60"
+                >
+                  Resume Sage
+                </button>
+              )}
+            </div>
+          )}
           {ordersPickupFilter === "not-printed" && (
             <div className="mt-4">
               <button
@@ -877,7 +913,7 @@ export default function OrderManagementView({
                           type="button"
                           onClick={() => onReleaseSageLock(order)}
                           className="mt-1 px-3 py-1 rounded-full text-xs font-semibold border bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
-                          title="Only if Sage is not actually processing this order"
+                          title="Stop Sage: kill the script, take every order out of the Sage queue, and stop Sage until Resume"
                         >
                           Release
                         </button>
@@ -935,6 +971,14 @@ export default function OrderManagementView({
                           >
                             Confirm Quantities
                           </button>
+                        )}
+                        {order.sage_failed === true && !order.enteredInSage && (
+                          <span
+                            className="px-3 py-1 rounded-full text-xs font-semibold border bg-red-50 text-red-700 border-red-200"
+                            title={order.sage_failed_error || "The Sage script failed on this order"}
+                          >
+                            Failed in Sage — check it
+                          </span>
                         )}
                         {!order.enteredInSage && !hasQtyDiscrepancy && (
                           // Doubles as the way back out: while an order is only
@@ -1090,12 +1134,6 @@ export default function OrderManagementView({
                         {ordersSaving ? "Saving..." : ordersDirty ? "Save Changes" : "Saved"}
                       </button>
                     </div>
-                    {!canArchiveOrder(order) && archiveBlockers(order).length > 0 && (
-                      <div className="mt-2 text-xs text-amber-700">
-                        <span className="font-semibold">Can't archive yet:</span>{" "}
-                        {archiveBlockers(order).join("; ")}.
-                      </div>
-                    )}
                   </div>
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     <div className="flex flex-col gap-1">

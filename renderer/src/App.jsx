@@ -310,6 +310,7 @@ const FETCH_WAREHOUSES = {
   world: WORLD_WAREHOUSE,
   cbk: "CBK",
   tiger: "Tiger",
+  altrom: "Altrom",
   bestbuy: "BestBuy",
   transbec: "Transbec",
   proforce: "Proforce",
@@ -545,6 +546,9 @@ export default function App() {
   const [sagePoEnabled, setSagePoEnabled] = useState(false);
   const [sageInvoiceEnabled, setSageInvoiceEnabled] = useState(false);
   const [sageLockInfo, setSageLockInfo] = useState(null); // { lock, ownMachineId }
+  // Shared "Stop Sage" flag (sage_halt.json): { reason, kind: 'stop'|'failure', by, at } or null.
+  const [sageHalt, setSageHalt] = useState(null);
+  const [sageStopBusy, setSageStopBusy] = useState(false);
   const [sageReadyOrders, setSageReadyOrders] = useState([]);
   // True only while the "Send N to Sage" click is in flight. The AHK run itself
   // outlives it — progress after that shows on the cards, which blur one by one
@@ -572,6 +576,9 @@ export default function App() {
   const [tigerOrdersRunning, setTigerOrdersRunning] = useState(false);
   const [tigerOrdersStatus, setTigerOrdersStatus] = useState("");
   const [tigerOrdersError, setTigerOrdersError] = useState("");
+  const [altromOrdersRunning, setAltromOrdersRunning] = useState(false);
+  const [altromOrdersStatus, setAltromOrdersStatus] = useState("");
+  const [altromOrdersError, setAltromOrdersError] = useState("");
   const [bestBuyOrdersRunning, setBestBuyOrdersRunning] = useState(false);
   const [bestBuyOrdersStatus, setBestBuyOrdersStatus] = useState("");
   const [bestBuyOrdersError, setBestBuyOrdersError] = useState("");
@@ -3320,28 +3327,75 @@ export default function App() {
     sendOrderToSage(referenceKey, "invoice");
   }
 
-  // Escape hatch for a lock that will never resolve (the Sage machine was shut
-  // down mid-run). Clears the trigger too, so releasing cannot leave the order
-  // silently queued to be entered later.
+  // Two callers:
+  //  - Release on a locked card. A lock only exists while a script is driving
+  //    Sage for that order, and scripts run one at a time, so this is the order
+  //    Sage is working on right now — Release is a full Stop Sage.
+  //  - "In Sage Queue — remove" on a waiting order: nothing is running for it,
+  //    so it just comes out of the queue, no warning.
   async function handleReleaseSageLock(order) {
     const refKey = order?.reference || order?.__row;
     if (!refKey) return;
-    // An order that is merely queued has no lock and nothing running against
-    // it — taking it back out is free and reversible, so it does not deserve
-    // the "check Sage first" warning that a live lock does.
-    const proceed =
-      api?.confirm && isOrderSageLocked(order)
-        ? await api.confirm(
-            `Release ${order.reference || refKey} from Sage?`,
-            "Only do this if Sage is NOT currently processing this order — check Sage first. The order will go back to unsent; if it was already entered, mark it entered by hand instead of sending it again."
-          )
-        : true;
-    if (!proceed) return;
+    if (api?.confirm && isOrderSageLocked(order)) {
+      const proceed = await api.confirm(
+        `Stop Sage? Sage is working on ${order.reference || refKey} right now.`,
+        "This kills the Sage script, takes every order out of the Sage queue (they go back to unsent), and stops Sage until you press Resume.\n\nAfterwards, close any half-entered purchase in Sage WITHOUT saving."
+      );
+      if (!proceed) return;
+    }
     try {
       const res = await api?.releaseOrderSageLock?.(refKey);
       if (!res?.ok) setOrdersError(res?.error || "Failed to release the order.");
+      else if (res.stopped) setSageHalt(res.halt || null);
     } catch (e) {
       setOrdersError(e?.message || "Failed to release the order.");
+    }
+    await loadOrders();
+  }
+
+  // "Stop Sage": the escape hatch for a hung or misbehaving AHK run. Works from
+  // any machine — the Sage machine sees the shared flag within ~2s and kills
+  // the script.
+  async function handleStopSage() {
+    if (sageStopBusy) return;
+    const proceed = api?.confirm
+      ? await api.confirm(
+          "Stop Sage?",
+          "This kills the Sage script if one is running, takes EVERY order out of the Sage queue (they go back to unsent), and stops Sage until you press Resume.\n\nAn order Sage had already posted stays entered."
+        )
+      : true;
+    if (!proceed) return;
+    setSageStopBusy(true);
+    try {
+      const res = await api?.stopSage?.();
+      if (!res?.ok) setOrdersError(res?.error || "Failed to stop Sage.");
+      else setSageHalt(res.halt || null);
+    } catch (e) {
+      setOrdersError(e?.message || "Failed to stop Sage.");
+    } finally {
+      setSageStopBusy(false);
+    }
+    await loadOrders();
+  }
+
+  async function handleResumeSage() {
+    if (sageStopBusy) return;
+    const proceed = api?.confirm
+      ? await api.confirm(
+          "Resume Sage?",
+          "Check the Sage window first: if a purchase was left half-entered, close it WITHOUT saving.\n\nOnly resume once Sage is back at a clean screen."
+        )
+      : true;
+    if (!proceed) return;
+    setSageStopBusy(true);
+    try {
+      const res = await api?.resumeSage?.();
+      if (!res?.ok) setOrdersError(res?.error || "Failed to resume Sage.");
+      else setSageHalt(null);
+    } catch (e) {
+      setOrdersError(e?.message || "Failed to resume Sage.");
+    } finally {
+      setSageStopBusy(false);
     }
     await loadOrders();
   }
@@ -3842,6 +3896,33 @@ export default function App() {
     }
   }
 
+  async function handleGetAltromOrders() {
+    if (!api?.fetchAltromOrders) return;
+    try {
+      setAltromOrdersRunning(true);
+      setAltromOrdersError("");
+      setAltromOrdersStatus("");
+      setOrdersError(null);
+      if (!(await flushPendingOrderEdits())) throw new Error(FLUSH_FAILED_MSG);
+      const res = await api.fetchAltromOrders();
+      if (!res?.ok) {
+        throw new Error(res?.error || "Failed to fetch Altrom orders.");
+      }
+      const list = Array.isArray(res.orders) ? res.orders : [];
+      commitOrders(list);
+      ordersLastSavedRef.current = JSON.stringify(list);
+      setOrdersDirty(false);
+      setOrdersInitialized(true);
+      if (res.path) setOrdersSourcePath(res.path);
+      setAltromOrdersStatus(fetchStatusLine("altrom", res));
+    } catch (e) {
+      console.error("[orders] altrom fetch error", e);
+      setAltromOrdersError(e?.message || "Failed to fetch Altrom orders.");
+    } finally {
+      setAltromOrdersRunning(false);
+    }
+  }
+
   async function handleGetBestBuyOrders() {
     if (!api?.fetchBestBuyOrders) return;
     try {
@@ -3938,6 +4019,10 @@ export default function App() {
       case "tiger":
         setTigerOrdersStatus("");
         setTigerOrdersError("");
+        break;
+      case "altrom":
+        setAltromOrdersStatus("");
+        setAltromOrdersError("");
         break;
       case "bestbuy-orders":
         setBestBuyOrdersStatus("");
@@ -6178,6 +6263,23 @@ export default function App() {
     return () => off?.();
   }, [sagePoEnabled]);
 
+  // The Stop Sage flag, pushed by main every few seconds when it changes on
+  // any machine, plus one read on mount.
+  useEffect(() => {
+    api?.getSageHalt?.()
+      .then((res) => {
+        if (res?.ok) setSageHalt(res.halt || null);
+      })
+      .catch(() => {});
+    if (!api?.onSageHaltChanged) return;
+    const off = api.onSageHaltChanged((data) => {
+      setSageHalt(data?.halt || null);
+      loadOrders();
+    });
+    return () => off?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // A crashed lock-holder stops writing the lock file, so no watcher event fires
   // when its heartbeat goes stale. While a foreign live lock is shown, re-poll so
   // the "held by X" state clears on its own once the lock expires.
@@ -6282,6 +6384,7 @@ export default function App() {
     worldOrdersRunning ||
     cbkOrdersRunning ||
     tigerOrdersRunning ||
+    altromOrdersRunning ||
     bestBuyOrdersRunning ||
     transbecOrdersRunning ||
     proforceRunning;
@@ -6301,8 +6404,11 @@ export default function App() {
   // machine is itself mid-keystroke in Sage (see sagePoRunningHere above); the
   // Sage-PO machine is otherwise free to use it like any other.
   // `options.skipTiger` is for ghost mode, which pulls Tiger only twice a day
-  // (see shouldFetchTigerOrders). The button passes a click event here, which
-  // has no such field, so a click always fetches everything.
+  // (see shouldFetchTigerOrders). Altrom rides the same slot — the user wants
+  // it at Tiger's frequency — so the flag skips both; the job payload keeps the
+  // old name so machines on either version still understand each other. The
+  // button passes a click event here, which has no such field, so a click
+  // always fetches everything.
   async function handleGetAllOrders(options) {
     if (getAllOrdersRunning || anyVendorFetchRunning || sagePoRunningHere) return;
     setGetAllOrdersError("");
@@ -6315,7 +6421,7 @@ export default function App() {
         handleGetCbkOrders(),
         handleGetProforceOrders(),
       ];
-      if (options?.skipTiger !== true) fetches.push(handleGetTigerOrders());
+      if (options?.skipTiger !== true) fetches.push(handleGetTigerOrders(), handleGetAltromOrders());
       await Promise.all(fetches);
     } catch (e) {
       setGetAllOrdersError(e?.message || "Failed to fetch all vendor orders.");
@@ -6380,7 +6486,7 @@ export default function App() {
       }
       await handleGetAllOrders({ skipTiger: payload.skipTiger === true });
       return payload.skipTiger === true
-        ? "fetched vendor orders (Tiger not due)"
+        ? "fetched vendor orders (Tiger + Altrom not due)"
         : "fetched every vendor's orders";
     }
     if (kind === "fetch-invoices") {
@@ -6599,7 +6705,7 @@ export default function App() {
     setGhostRunning(true);
     const done = [];
     try {
-      // Tiger twice a day (morning + noon), everyone else every cycle. BestBuy
+      // Tiger + Altrom twice a day (morning + noon), everyone else every cycle. BestBuy
       // emails a day's invoices the following day, so its Gmail check is once a
       // day rather than once every half hour.
       const tigerDue = shouldFetchTigerOrders(startedAt, ghostTigerRunRef.current);
@@ -6641,85 +6747,103 @@ export default function App() {
       });
       done.push(`${invoiced.ok ? "Gmail:" : "Gmail FAILED:"} ${invoiced.summary}.`);
 
-      // Work from disk, not from whatever this window was holding when the
-      // cycle started — the fetches have just rewritten orders.json.
-      setGhostBusy("Queueing orders for Sage...");
-      await loadOrders();
-      const sageTargets = ghostSageQueueTargets(ordersRef.current, {
-        taxRate: qtyDiscrepancyTaxRate,
-        threshold: qtyDiscrepancyThreshold,
-      });
-      let queued = 0;
-      for (const order of sageTargets) {
-        try {
-          const res = await api?.triggerOrderSage?.(ghostOrderKey(order), "purchase");
-          if (res?.ok) queued += 1;
-          else console.warn("[ghost] could not queue", ghostOrderKey(order), res?.error);
-        } catch (e) {
-          console.error("[ghost] queue failed for", ghostOrderKey(order), e);
-        }
-      }
-      // The invoice-number queue, which is a different queue: these orders are
-      // already in Sage and only their reference is being retyped (BestBuy is
-      // entered on the order reference before its invoice arrives, so this is
-      // how it ends up filed under the real invoice number). Queued here rather
-      // than by the loop above because that one refuses anything already
-      // entered — see ghostSageInvoiceUpdateTargets.
-      const invoiceTargets = ghostSageInvoiceUpdateTargets(ordersRef.current);
-      let invoiceQueued = 0;
-      for (const order of invoiceTargets) {
-        try {
-          const res = await api?.triggerOrderSage?.(ghostOrderKey(order), "invoice");
-          if (res?.ok) invoiceQueued += 1;
-          else console.warn("[ghost] could not queue invoice update", ghostOrderKey(order), res?.error);
-        } catch (e) {
-          console.error("[ghost] invoice update queue failed for", ghostOrderKey(order), e);
-        }
-      }
-
-      // Snapshot the waiting room BEFORE releasing it: that is precisely the set
-      // "Send to Sage" is about to hand to the Sage machine, and precisely what
-      // the printing step below has to wait for. It already counts invoice
-      // updates (ghostQueuedKeys reads sage_invoice_queued), so the wait below
-      // covers the ones just queued without any change.
-      const releasedKeys = ghostQueuedKeys(await readOrdersFromDisk());
-      const sentRes = await api?.sendSageQueue?.();
-      const sent = Number(sentRes?.sent) || 0;
-      done.push(
-        `Queued ${queued} order(s)` +
-          (invoiceQueued ? ` + ${invoiceQueued} invoice update(s)` : "") +
-          `; released ${sent} to ${sageMachine}.` +
-          (sentRes?.ok === false ? ` (${sentRes.error || "send failed"})` : "")
-      );
-
-      // Nothing prints until Sage is finished. The Sage machine works through
-      // the queue one AHK run at a time and reports each order back as entered;
-      // this watches orders.json until every released order has come back (or
-      // the wait runs out, in which case the bills wait for a later cycle
-      // rather than being printed for orders that never reached Sage).
+      // Stop Sage (or a failed run) halts the Sage queue until a person checks
+      // Sage and presses Resume. Until then ghost mode sends nothing — it would
+      // only pile triggers onto a halted queue — but still prints what Sage has
+      // already entered.
+      const haltAtStart = (await api?.getSageHalt?.())?.halt || null;
       let sageDrained = true;
-      if (releasedKeys.length) {
-        const deadline = Date.now() + GHOST_SAGE_WAIT_MS;
-        for (;;) {
-          const pending = ghostSagePendingCount(await readOrdersFromDisk(), releasedKeys);
-          if (!pending) break;
-          if (Date.now() >= deadline) {
-            sageDrained = false;
-            done.push(`Gave up waiting on Sage with ${pending} order(s) still going.`);
-            break;
+      if (haltAtStart) {
+        done.push(`Sage is stopped (${haltAtStart.reason || "stopped"}) - nothing sent to Sage until someone presses Resume.`);
+      } else {
+        // Work from disk, not from whatever this window was holding when the
+        // cycle started — the fetches have just rewritten orders.json.
+        setGhostBusy("Queueing orders for Sage...");
+        await loadOrders();
+        const sageTargets = ghostSageQueueTargets(ordersRef.current, {
+          taxRate: qtyDiscrepancyTaxRate,
+          threshold: qtyDiscrepancyThreshold,
+        });
+        let queued = 0;
+        for (const order of sageTargets) {
+          try {
+            const res = await api?.triggerOrderSage?.(ghostOrderKey(order), "purchase");
+            if (res?.ok) queued += 1;
+            else console.warn("[ghost] could not queue", ghostOrderKey(order), res?.error);
+          } catch (e) {
+            console.error("[ghost] queue failed for", ghostOrderKey(order), e);
           }
-          // The Sage machine being switched off mid-queue is the one case where
-          // the remaining orders are never coming back — stop waiting on it now
-          // rather than sitting out the deadline.
-          if (!sagePoMachine(await api?.getSageLock?.())) {
-            sageDrained = false;
-            done.push(`${sageMachine} stopped running Sage with ${pending} order(s) left.`);
-            break;
-          }
-          setGhostBusy(`Waiting for Sage to finish ${pending} order(s) on ${sageMachine}...`);
-          await new Promise((resolve) => setTimeout(resolve, GHOST_SAGE_POLL_MS));
         }
-        if (sageDrained) done.push("Sage finished the queue.");
+        // The invoice-number queue, which is a different queue: these orders are
+        // already in Sage and only their reference is being retyped (BestBuy is
+        // entered on the order reference before its invoice arrives, so this is
+        // how it ends up filed under the real invoice number). Queued here rather
+        // than by the loop above because that one refuses anything already
+        // entered — see ghostSageInvoiceUpdateTargets.
+        const invoiceTargets = ghostSageInvoiceUpdateTargets(ordersRef.current);
+        let invoiceQueued = 0;
+        for (const order of invoiceTargets) {
+          try {
+            const res = await api?.triggerOrderSage?.(ghostOrderKey(order), "invoice");
+            if (res?.ok) invoiceQueued += 1;
+            else console.warn("[ghost] could not queue invoice update", ghostOrderKey(order), res?.error);
+          } catch (e) {
+            console.error("[ghost] invoice update queue failed for", ghostOrderKey(order), e);
+          }
+        }
+
+        // Snapshot the waiting room BEFORE releasing it: that is precisely the set
+        // "Send to Sage" is about to hand to the Sage machine, and precisely what
+        // the printing step below has to wait for. It already counts invoice
+        // updates (ghostQueuedKeys reads sage_invoice_queued), so the wait below
+        // covers the ones just queued without any change.
+        const releasedKeys = ghostQueuedKeys(await readOrdersFromDisk());
+        const sentRes = await api?.sendSageQueue?.();
+        const sent = Number(sentRes?.sent) || 0;
+        done.push(
+          `Queued ${queued} order(s)` +
+            (invoiceQueued ? ` + ${invoiceQueued} invoice update(s)` : "") +
+            `; released ${sent} to ${sageMachine}.` +
+            (sentRes?.ok === false ? ` (${sentRes.error || "send failed"})` : "")
+        );
+
+        // Nothing prints until Sage is finished. The Sage machine works through
+        // the queue one AHK run at a time and reports each order back as entered;
+        // this watches orders.json until every released order has come back (or
+        // the wait runs out, in which case the bills wait for a later cycle
+        // rather than being printed for orders that never reached Sage).
+        if (releasedKeys.length) {
+          const deadline = Date.now() + GHOST_SAGE_WAIT_MS;
+          for (;;) {
+            const pending = ghostSagePendingCount(await readOrdersFromDisk(), releasedKeys);
+            if (!pending) break;
+            if (Date.now() >= deadline) {
+              sageDrained = false;
+              done.push(`Gave up waiting on Sage with ${pending} order(s) still going.`);
+              break;
+            }
+            // A run failed (or someone pressed Stop Sage): the queue is halted
+            // and the rest of the released orders won't come back until a person
+            // resumes it, so stop waiting now.
+            const haltNow = (await api?.getSageHalt?.())?.halt;
+            if (haltNow) {
+              sageDrained = false;
+              done.push(`Sage stopped mid-queue: ${haltNow.reason || "stopped"}`);
+              break;
+            }
+            // The Sage machine being switched off mid-queue is the one case where
+            // the remaining orders are never coming back — stop waiting on it now
+            // rather than sitting out the deadline.
+            if (!sagePoMachine(await api?.getSageLock?.())) {
+              sageDrained = false;
+              done.push(`${sageMachine} stopped running Sage with ${pending} order(s) left.`);
+              break;
+            }
+            setGhostBusy(`Waiting for Sage to finish ${pending} order(s) on ${sageMachine}...`);
+            await new Promise((resolve) => setTimeout(resolve, GHOST_SAGE_POLL_MS));
+          }
+          if (sageDrained) done.push("Sage finished the queue.");
+        }
       }
 
       if (!sageDrained) {
@@ -7160,6 +7284,10 @@ export default function App() {
             onSendSageQueue={handleSendSageQueue}
             sageQueueSending={sageQueueSending}
             onReleaseSageLock={handleReleaseSageLock}
+            sageHalt={sageHalt}
+            sageStopBusy={sageStopBusy}
+            onStopSage={handleStopSage}
+            onResumeSage={handleResumeSage}
             onMarkComplete={handleMarkComplete}
             onClearValueCheck={handleClearValueCheck}
             onReconcileTotals={handleReconcileTotals}
@@ -7179,6 +7307,10 @@ export default function App() {
             tigerOrdersRunning={tigerOrdersRunning}
             tigerOrdersStatus={tigerOrdersStatus}
             tigerOrdersError={tigerOrdersError}
+            onGetAltromOrders={handleGetAltromOrders}
+            altromOrdersRunning={altromOrdersRunning}
+            altromOrdersStatus={altromOrdersStatus}
+            altromOrdersError={altromOrdersError}
             onGetBestBuyOrders={handleGetBestBuyOrders}
             bestBuyOrdersRunning={bestBuyOrdersRunning}
             bestBuyOrdersStatus={bestBuyOrdersStatus}

@@ -62,6 +62,7 @@ function registerAllIpc(ipcMain, deps) {
     fetchProforceOrders: deps.fetchProforceOrders,
     fetchCbkOrders: deps.fetchCbkOrders,
     fetchTigerOrders: deps.fetchTigerOrders,
+    fetchAltromOrders: deps.fetchAltromOrders,
     fetchBestBuyOrders: deps.fetchBestBuyOrders,
     orderMatchesKey: deps.orderMatchesKey,
     runSageReconcile: deps.runSageReconcile,
@@ -90,6 +91,9 @@ function registerAllIpc(ipcMain, deps) {
     setSageOrderLock: deps.setSageOrderLock,
     clearSageOrderLock: deps.clearSageOrderLock,
     patchOrderOnDisk: deps.patchOrderOnDisk,
+    readSageHalt: deps.readSageHalt,
+    haltSage: deps.haltSage,
+    resumeSage: deps.resumeSage,
   });
 
   registerVendorIpc(ipcMain, {

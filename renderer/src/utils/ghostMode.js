@@ -11,14 +11,26 @@ import { isOrderSageLocked } from "./sageLock";
 import { getOrderQtyDiscrepancy, looksLikeCredit } from "./qtyDiscrepancy";
 
 export const GHOST_START_HOUR = 8; // first cycle at 08:00
-export const GHOST_END_HOUR = 17; // last cycle at 16:30 — nothing starts at/after 17:00
+export const GHOST_END_HOUR = 17; // weekdays: last cycle at 16:30 — nothing starts at/after 17:00
+export const GHOST_SATURDAY_END_HOUR = 14; // Saturday: last cycle at 13:30
+// Sunday: no cycles at all.
+
+// The hour nothing may start at/after on this date's day of the week, or null
+// on a day ghost mode doesn't run at all.
+export function ghostEndHourFor(date = new Date()) {
+  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
+  if (day === 0) return null;
+  if (day === 6) return GHOST_SATURDAY_END_HOUR;
+  return GHOST_END_HOUR;
+}
 export const GHOST_TICK_MS = 60 * 1000;
 // BestBuy emails the day's invoices the NEXT day, so checking every half hour
 // is 17 wasted Gmail runs. Once a day, from noon, is enough.
 export const GHOST_BESTBUY_HOUR = 12;
 // Tiger's order pull is slow and its orders don't move much through the day, so
 // it runs twice: once in the morning and once from noon, rather than on all 18
-// cycles. Every other vendor still goes every cycle.
+// cycles. Altrom shares this slot (skipped together via the fetch job's
+// skipTiger flag). Every other vendor still goes every cycle.
 export const GHOST_TIGER_NOON_HOUR = 12;
 // World sometimes emails an invoice for parts that were never scraped as an
 // order (no conf number, a customer PO in the subject instead). Those become
@@ -43,8 +55,10 @@ export function ghostSlotKey(date = new Date()) {
 }
 
 export function isWithinGhostHours(date = new Date()) {
+  const end = ghostEndHourFor(date);
+  if (end === null) return false;
   const hour = date.getHours();
-  return hour >= GHOST_START_HOUR && hour < GHOST_END_HOUR;
+  return hour >= GHOST_START_HOUR && hour < end;
 }
 
 export function ghostDayKey(date = new Date()) {
@@ -52,18 +66,24 @@ export function ghostDayKey(date = new Date()) {
 }
 
 // When the next cycle is due — the next :00/:30 inside working hours, rolling
-// over to tomorrow morning after the last one of the day. Settings shows this so
-// switching the toggle on answers "and then what?" by itself.
+// over to the next working morning after the last one of the day (Saturday
+// afternoon -> Monday 8:00, Sunday skipped). Settings shows this so switching
+// the toggle on answers "and then what?" by itself.
 export function nextGhostCycleAt(date = new Date()) {
   const next = new Date(date.getTime());
   next.setSeconds(0, 0);
   // setMinutes(60) rolls the hour over for us.
   next.setMinutes(date.getMinutes() < 30 ? 30 : 60);
-  if (next.getHours() < GHOST_START_HOUR) {
-    next.setHours(GHOST_START_HOUR, 0, 0, 0);
-  } else if (next.getHours() >= GHOST_END_HOUR) {
+  for (let i = 0; i < 8; i++) {
+    const end = ghostEndHourFor(next);
+    if (end !== null && next.getHours() < GHOST_START_HOUR) {
+      next.setHours(GHOST_START_HOUR, 0, 0, 0);
+      return next;
+    }
+    if (end !== null && next.getHours() < end) return next;
     next.setDate(next.getDate() + 1);
     next.setHours(GHOST_START_HOUR, 0, 0, 0);
+    if (ghostEndHourFor(next) !== null) return next;
   }
   return next;
 }
@@ -230,6 +250,10 @@ export function ghostSageQueueTargets(orders, { taxRate, threshold } = {}) {
   return (orders || []).filter((order) => {
     if (!order || !ghostOrderKey(order)) return false;
     if (order.enteredInSage === true) return false;
+    // Failed in Sage (script error or timeout): a person has to look at it and
+    // re-add it by hand. Re-queueing it every cycle is exactly the retry loop
+    // that once produced 502 timeouts from 4 orders.
+    if (order.sage_failed === true) return false;
     const source = (order.source || "").toString().trim().toLowerCase();
     const isBestbuy = source === "bestbuy";
     if (!isBestbuy && !(order.source_invoice || "").toString().trim()) return false;
