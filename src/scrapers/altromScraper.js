@@ -38,7 +38,7 @@ function applyAltromDefaults(order = {}) {
     ...order,
     source: "altrom",
     warehouse: order.warehouse || "Altrom",
-    sage_source: order.sage_source || "NAP505",
+    sage_source: order.sage_source || "UAP505",
     seller: order.seller || "Altrom",
     detailClicked: order.detailClicked ?? false,
     detailStored: order.detailStored ?? true,

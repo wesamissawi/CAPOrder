@@ -106,6 +106,56 @@ NormalizeSageDate(orderObj) {
     return date
 }
 
+PurchasesWindowActive() {
+    return WinActive("Purchases - Creating an Invoice") || WinActive("Purchases Journal - Creating an Invoice")
+}
+
+; Keystrokes go to whatever window is active. If a popup or another app took
+; focus, log what took over so the caller can stop before typing into it.
+EnsurePurchasesActive(where) {
+    if PurchasesWindowActive()
+        return true
+    WinGetTitle, t, A
+    WinGetClass, c, A
+    WinGetText, txt, A
+    Log("Purchases window lost focus " . where . ": active='" . t . "' class=" . c
+        . " text=" . SubStr(RegExReplace(txt, "\R+", " | "), 1, 300))
+    return false
+}
+
+; Text of whichever control has focus. The ClassNNs are dynamic, so read
+; through focus rather than by name.
+FocusedText(hwnd) {
+    ControlGetFocus, ctl, ahk_id %hwnd%
+    if (ctl = "")
+        return ""
+    ControlGetText, txt, %ctl%, ahk_id %hwnd%
+    return Trim(txt)
+}
+
+; After Tab-ing off an item code: a new part opens "Select Inventory/Service",
+; an existing one moves focus off the item column. Polls for either rather
+; than reading once after a fixed Sleep. Returns "new", "existing" or "".
+WaitItemLookup(hwnd, oldX, timeoutMs := 20000) {
+    start := A_TickCount
+    Loop {
+        if WinExist("Select Inventory/Service")
+            return "new"
+        ControlGetFocus, ctl, ahk_id %hwnd%
+        if (ctl != "") {
+            ControlGetPos, x,,,, %ctl%, ahk_id %hwnd%
+            if (x != "" && x != oldX) {
+                ; The popup may have opened between the two reads.
+                Sleep, 150
+                return WinExist("Select Inventory/Service") ? "new" : "existing"
+            }
+        }
+        if (A_TickCount - start > timeoutMs)
+            return ""
+        Sleep, 100
+    }
+}
+
 
 ; --- Main ------------------------------------------------------------------
 
@@ -131,62 +181,47 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
     }
 
     Sleep, 50
+    WinGet, sageHwnd, ID, A
 
     jsonFilePath := pathToFile
     if !FileExist(jsonFilePath)
         return ReturnFalse("File not found:`n" . jsonFilePath)
 
-    ; Read file with retries (handles slow writes to disk)
-    maxAttempts := 1
-    attempts := 0
     jsonContent := ""
-    while (attempts < maxAttempts && !jsonContent) {
-        try {
-            jsonContent := ReadFileContent(jsonFilePath)
-            ; strip BOM if present
-            if (SubStr(jsonContent, 1, 1) = Chr(0xFEFF))
-                jsonContent := SubStr(jsonContent, 2)
-            jsonContent := Trim(jsonContent, "`r`n `t")
-        } catch e {
-            Log("File read exception: " . e.Message)
-            return ReturnFalse("File read failed:`n" . jsonFilePath)
-        }
-        attempts++
-        if (!jsonContent)
-            Sleep, 150
+    try {
+        jsonContent := ReadFileContent(jsonFilePath)
+        ; strip BOM if present
+        if (SubStr(jsonContent, 1, 1) = Chr(0xFEFF))
+            jsonContent := SubStr(jsonContent, 2)
+        jsonContent := Trim(jsonContent, "`r`n `t")
+    } catch e {
+        Log("File read exception: " . e.Message)
+        return ReturnFalse("File read failed:`n" . jsonFilePath)
     }
     if (!jsonContent)
-        return ReturnFalse("No JSON content after " . maxAttempts . " attempts.`nTry running the script again.")
+        return ReturnFalse("No JSON content in:`n" . jsonFilePath . "`nTry running the script again.")
 
-    ; Parse JSON with retries (handles partially written JSON)
-    attempts := 0
     parsedData := ""
-    reference := ""
-    while (attempts < maxAttempts && !IsObject(parsedData)) {
-        try {
-            json := new JSON()
-            rawData := json.Load(jsonContent)
-            parsedData := SelectOrderFromJson(rawData, orderRef)
-            if (!IsObject(rawData))
-                Log("Parse produced non-object. Type=" . (IsObject(rawData) ? "obj" : "primitive") . " value preview=" . SubStr("" . rawData, 1, 80))
-        } catch e {
-            msg := ""
-            try msg := e.Message
-            extra := ""
-            try extra := e.Extra
-            what := ""
-            try what := e.What
-            Log("Parse exception: " . msg . " what=" . what . " extra=" . extra)
-        }
-        attempts++
-        if (!IsObject(parsedData))
-            Sleep, 150
+    try {
+        json := new JSON()
+        rawData := json.Load(jsonContent)
+        parsedData := SelectOrderFromJson(rawData, orderRef)
+        if (!IsObject(rawData))
+            Log("Parse produced non-object. value preview=" . SubStr("" . rawData, 1, 80))
+    } catch e {
+        msg := ""
+        try msg := e.Message
+        extra := ""
+        try extra := e.Extra
+        what := ""
+        try what := e.What
+        Log("Parse exception: " . msg . " what=" . what . " extra=" . extra)
     }
     if (!IsObject(parsedData)) {
         Log("Parse failed. Content len=" . StrLen(jsonContent) . " path=" . jsonFilePath)
         Log("Content head: " . SubStr(jsonContent, 1, 200))
         Log("Content tail: " . SubStr(jsonContent, StrLen(jsonContent) - 200))
-        return ReturnFalse("JSON parsing failed after " . maxAttempts . " attempts.")
+        return ReturnFalse("JSON parsing failed.")
     }
 
     reference := ""
@@ -225,29 +260,48 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
     }
 
     Log("Loaded order ref=" . reference . " vendor=" . vendor . " source=" . source . " lines=" . lineItems.MaxIndex() . " path=" . jsonFilePath)
+    LogSageHealth(sageHwnd)
 
     ; --- Start interacting with Sage UI ---
+    ; Text is sent with {Text} so ! + ^ # { } in a vendor, reference or
+    ; description are typed, not pressed as Alt/Shift/Ctrl/Win.
 
-    ; Put focus in Vendor box (assumes your tabTo/SendTab functions exist)
-    ; If tabTo is in another file, ensure it is #Included.
-    ; tabTo(control, delayMs, altControl := "", mustMatch := false)
+    ; Put focus in Vendor box (Edit1 — the one stable anchor on the form)
+    ; tabTo(control, delayMs, altControl := "", shift := false)
     ; SendTab(count, delayMs)
-    tabTo("Edit1", 200)
-    Send, %vendor%
+    if !tabTo("Edit1", 200)
+        return ReturnFalse("Couldn't find the vendor box (Edit1).")
+    Send, {Text}%vendor%
+    ; 2s is what a fresh Sage needs; a long-running one needs longer.
     Sleep, 2000
+    if !WaitSageSettled(20000, sageHwnd)
+        Log("Vendor autocomplete still busy after 20s; carrying on")
 
+    ControlGetText, vendorBox, Edit1, ahk_id %sageHwnd%
+    vendorBox := Trim(vendorBox)
+    if (vendorBox = "" || !(InStr(vendorBox, vendor) || InStr(vendor, vendorBox)))
+        return ReturnFalse("Vendor box shows '" . vendorBox . "', expected '" . vendor . "'.")
 
     ; Here I will tab away from the warehouse
     ; Then go back to Edit1 and  tab thrice
-
-
+    ; Leaving the box selects the vendor; Sage loads it and redraws the form.
+    SendTab(1, 200)
+    if !WaitSageSettled(20000, sageHwnd)
+        Log("Vendor record still loading after 20s; carrying on")
+    SendTab(2, 200)
+    if !tabTo("Edit1", 200, "Edit1", true)
+        return ReturnFalse("Couldn't get back to the vendor box after selecting the vendor.")
     SendTab(3, 200)
-    tabTo("Edit1", 200, "Edit1", true)
-    SendTab(3, 200)
+    WaitSageIdle(5000, sageHwnd)
 
-    Sleep, 100
-    Send, %reference%
-    Sleep, 100
+    Send, {Text}%reference%
+    WaitSageIdle(5000, sageHwnd)
+    ; Blank can just mean the box isn't readable, so only a different value stops the run.
+    refBox := FocusedText(sageHwnd)
+    if (refBox = "")
+        Log("Reference box read back blank (expected " . reference . ")")
+    else if (InStr(reference, refBox) != 1)
+        return ReturnFalse("Reference landed in the wrong box: it shows '" . refBox . "', expected '" . reference . "'.")
 
 
     ; tabTo("WindowsForms10.BUTTON.app.0.ea7f4a_r30_ad111", 200, "WindowsForms10.BUTTON.app.0.ea7f4a_r29_ad111")
@@ -266,10 +320,13 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
     SendTab(2, 300)
 
     Send, %date%
+    WaitSageIdle(5000, sageHwnd)
+    Log("Date typed " . date . ", box shows '" . FocusedText(sageHwnd) . "'")
 
     SendTab(8, 100)
 
-    tabTo("Edit3", 200, targetFocus2, true)
+    if !tabTo("Edit3", 200, "", true)
+        return ReturnFalse("Couldn't find the line-item anchor (Edit3).")
     SendTab(2, 200)
 
     ; --- Line items ---------------------------------------------------------
@@ -279,11 +336,9 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
         extendedRaw := ""  ; reset per line
 
         try extendedRaw := lineItems[idx].extended
-        msgLineInfo := "Line #" . idx
-        msgPartInfo := "Part: " . lineItems[idx].partLineCode . " " . lineItems[idx].partNumber
-        msgCostInfo := "Cost: " . lineItems[idx].costPrice
-        msgExtInfo  := "Extended field raw: " . extendedRaw
-        ; MsgBox, 64, Ext Debug, % msgLineInfo . "`n" . msgPartInfo . "`n" . msgCostInfo . "`n" . msgExtInfo
+
+        if !EnsurePurchasesActive("before line " . idx)
+            return ReturnFalse("Sage Purchases window lost focus before line " . idx . "; stopped so keystrokes don't land elsewhere. See ahk_sage.log.")
 
         ; Prefer the CAP/Sage code the app already resolved (single source of
         ; truth — see src/scrapers/capRules.js). Orders scraped before that
@@ -306,24 +361,26 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
         ; Type out the item "type" char-by-char (keeps Sage autocomplete happy)
         Loop, Parse, type
         {
-            Send, %A_LoopField%
+            Send, {Text}%A_LoopField%
             Sleep, 100
         }
+        ; Same floor as before, plus however long a slow Sage needs on top.
         Sleep, 2000
+        if !WaitSageSettled(20000, sageHwnd)
+            Log("Item autocomplete for " . type . " still busy after 20s; carrying on")
 
-        ; Check if the same control column (new vs existing item logic)
-        ControlGetFocus, focusedControl, A
-        Sleep, 50
-        ControlGetPos, oldX, oldY,,, %focusedControl%
-        Sleep, 50
+        ; New vs existing item: note where the item column is, Tab, then see
+        ; whether the lookup popup opens (new) or focus moves on (existing).
+        ControlGetFocus, focusedControl, ahk_id %sageHwnd%
+        ControlGetPos, oldX,,,, %focusedControl%, ahk_id %sageHwnd%
+        if (focusedControl = "" || oldX = "")
+            return ReturnFalse("Couldn't read the item column on line " . idx . " (Sage busy?).")
         Send, {Tab}
-        Sleep, 100
-        ControlGetFocus, focusedControl, A
-        Sleep, 50
-        ControlGetPos, x, y,,, %focusedControl%
-        Sleep, 100
+        lookup := WaitItemLookup(sageHwnd, oldX, 20000)
+        if (lookup = "")
+            return ReturnFalse("Line " . idx . " (" . type . "): neither the item popup nor the next column came up within 20s.")
 
-        if (oldX == x) {
+        if (lookup = "new") {
             ; New part — open/create inventory record
             WinWaitActive, Select Inventory/Service, , 20
             if (ErrorLevel)
@@ -374,7 +431,7 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
             price     := Round(price, 2)
 
             Sleep, 50
-            Send, %description%
+            Send, {Text}%description%
             Sleep, 50
 
             ; Inventory flags / fields (kept as in your flow)
@@ -444,11 +501,12 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
                     return ReturnFalse("Could not return to Purchases window after creating inventory.")
             }
 
-            Sleep, 100
+            WaitSageIdle(5000, sageHwnd)
             SendTab(1, 25)
         }
 
         ; Enter quantity & purchase price (works for both new & existing items)
+        WaitSageIdle(5000, sageHwnd)
         quantity := lineItems[idx].quantity
         Send, %quantity%
         Sleep, 50
@@ -472,6 +530,9 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
     } ; end loop
 
     Sleep, 200
+    WaitSageIdle(10000, sageHwnd)
+    if !EnsurePurchasesActive("before reading the total")
+        return ReturnFalse("Sage Purchases window lost focus after the last line; stopped before posting. See ahk_sage.log.")
 
     WinGetTitle, nowTitle, A
     
@@ -496,6 +557,8 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
     ; class regex (prefix only, tail can change)
     ; text regex: 24 or 24.92 etc.
 
+    if !EnsurePurchasesActive("before posting")
+        return ReturnFalse("Sage Purchases window lost focus before posting; stopped. See ahk_sage.log.")
     Send, !p
     ;Exit, 7
     Sleep, 1000
@@ -517,19 +580,16 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
     journal_entry := GetSageTxnNumber(10)
 
     if (journal_entry = ""){
+        Log("ERROR: no journal entry number after posting " . reference)
         return false
     } else {
         journal_tax := journal_entry . "    $" . inv_total
         ; Emit result to stdout for Electron to consume; include Sage total for syncing.
+        ; The journal line must be the LAST stdout line (extractJournalLine reads it).
         FileAppend, SAGE_TOTAL:%inv_total%`n, *
         FileAppend, %journal_tax%`n, *
         Send {Enter}
         Sleep, 500
         return true
     }
-
-
-
-    Dbg("Reference: " . reference)
-    return true
 }
