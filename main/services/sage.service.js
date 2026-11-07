@@ -114,8 +114,9 @@ const createSageService = (deps) => {
         // order reached Sage. A run that posted and then exited badly (or was
         // killed by our timeout while a dialog hung around) must still be
         // recorded and released, never retried, or Sage gets it twice.
+        // A clean exit without a journal entry is NOT proof of posting.
         const posted = extractSagePosted(res?.stdout);
-        if (!res?.ok && !posted.posted) {
+        if (!posted.posted) {
           console.error("[sage] AHK run failed for", refKey, res?.error || res?.stderr || res?.code, {
             stdout: (res?.stdout || "").toString().trim(),
             stderr: (res?.stderr || "").toString().trim(),
