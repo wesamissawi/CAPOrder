@@ -247,6 +247,9 @@ function mergeOrdersForWrite(diskList, incomingList, options = {}) {
     } else {
       next = { ...inc };
     }
+    // A copy without __uid (e.g. a fetch's raw list) would otherwise be re-keyed
+    // as a brand-new record and the stored one deleted.
+    if (!next.__uid && current.__uid) next.__uid = current.__uid;
     SAGE_OWNED_FIELDS.forEach((field) => {
       if (Object.prototype.hasOwnProperty.call(current, field)) next[field] = current[field];
       else delete next[field];

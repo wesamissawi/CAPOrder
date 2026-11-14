@@ -201,8 +201,10 @@ async function downloadAttachment(gmail, messageId, attachmentId) {
 // `sender` may be a single address or a comma-delimited list (e.g. a vendor
 // that mails from several branches) — Gmail's from: operator needs those
 // joined with OR inside the parens, a bare comma is not an OR to it.
-async function searchInvoiceEmails(gmail, { sender, subjectPattern, maxResults = 25, after, before }) {
-  const parts = ["has:attachment"];
+async function searchInvoiceEmails(gmail, { sender, subjectPattern, maxResults = 25, after, before, anyAttachment = false }) {
+  // `anyAttachment: true` drops the has:attachment filter - Tiger puts its
+  // statement in the email body, with nothing attached.
+  const parts = anyAttachment ? [] : ["has:attachment"];
   if (sender) {
     const senders = String(sender).split(",").map((s) => s.trim()).filter(Boolean);
     if (senders.length) parts.push(`from:(${senders.join(" OR ")})`);

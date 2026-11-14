@@ -15,6 +15,7 @@ import OrderAssignmentView from "./views/OrderAssignmentView";
 import SalesOrderView from "./views/SalesOrderView";
 import CashSalesView from "./views/CashSalesView";
 import CreditsView from "./views/CreditsView";
+import StatementsView from "./views/StatementsView";
 import PaymentManagementView from "./views/PaymentManagementView";
 import SageRunsView from "./views/SageRunsView";
 import ReturnsManagementView from "./views/ReturnsManagementView";
@@ -430,6 +431,7 @@ const VIEW_GROUPS = [
   ],
   [
     { id: "credits", label: "Credits" },
+    { id: "statements", label: "Statements" },
     { id: "returns-management", label: "Returns Management" },
   ],
   [
@@ -7496,6 +7498,8 @@ export default function App() {
             onRemoveWorldCreditOrder={handleRemoveWorldCreditOrder}
             onViewWorldCreditImage={handleViewWorldCreditImage}
           />
+        ) : currentView === "statements" ? (
+          <StatementsView />
         ) : currentView === "archive-search" ? (
           <ArchiveSearchView
             searchTerm={archiveSearchTerm}

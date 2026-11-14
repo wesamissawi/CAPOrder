@@ -23,6 +23,7 @@ const { createItemsService } = require('./main/services/items.service');
 const { createSalesOrderPrintsService } = require('./main/services/salesOrderPrints.service');
 const { createWatchersService } = require('./main/services/watchers.service');
 const { createVendorOrdersService } = require('./main/services/vendorOrders.service');
+const { createStatementsService } = require('./main/services/statements.service');
 const { createSageService } = require('./main/services/sage.service');
 const { configureSageQueue } = require('./main/services/sage.actions');
 const { createAppConfigService } = require('./main/services/appConfig.service');
@@ -1923,6 +1924,16 @@ function ensureDir(dirPath) {
   try { fs.mkdirSync(dirPath, { recursive: true }); } catch {}
 }
 
+const statementsService = createStatementsService({
+  loadConfig,
+  saveConfig,
+  readOrders,
+  readOrdersArchive,
+  getGmailAssetsDir,
+  getSharedDataDir,
+  ensureDir,
+});
+
 const appConfigService = createAppConfigService({
   fs,
   dialog,
@@ -2556,6 +2567,7 @@ function registerAllIpc() {
     connectGmail,
     getGmailStatus,
     getGmailAssetsDir,
+    statements: statementsService,
     orderMatchesKey,
     mergeOrdersForWrite,
     getArchivedOrderKeys,

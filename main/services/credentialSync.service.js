@@ -31,6 +31,7 @@
 // That's the accepted trade for a 6-digit code people can read aloud.)
 
 const crypto = require('crypto');
+const { STATEMENT_SUPPLIERS, configKey } = require('../../src/statements/statementSuppliers');
 
 // What a grant carries. Credentials and Gmail auth: the things that are
 // identical on every workstation because they identify the BUSINESS to a
@@ -77,6 +78,8 @@ const SHARED_CONFIG_KEYS = [
   'CBK_INVOICE_SUBJECT',
   'TRANSBEC_CREDIT_INVOICE_SENDER',
   'TRANSBEC_CREDIT_INVOICE_SUBJECT',
+  // which mail counts as each supplier's account statement
+  ...STATEMENT_SUPPLIERS.flatMap((s) => [configKey(s.id, 'SENDER'), configKey(s.id, 'SUBJECT')]),
 ];
 
 // Keys whose VALUE must never be shown back to a user or logged — the UI lists

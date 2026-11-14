@@ -11,11 +11,18 @@ const { registerOrderAssignmentIpc } = require('./orderAssignment.ipc');
 const { registerSageRunsIpc } = require('./sageRuns.ipc');
 const { registerCrdtIpc } = require('./crdt.ipc');
 const { registerAutomationIpc } = require('./automation.ipc');
+const { registerStatementsIpc } = require('./statements.ipc');
 
 function registerAllIpc(ipcMain, deps) {
   registerAutomationIpc(ipcMain, {
     automation: deps.automation,
     getMachineId: deps.getMachineId,
+  });
+
+  registerStatementsIpc(ipcMain, {
+    statements: deps.statements,
+    shell: deps.shell,
+    getGmailAssetsDir: deps.getGmailAssetsDir,
   });
 
   registerCrdtIpc(ipcMain, {

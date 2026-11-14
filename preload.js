@@ -124,6 +124,13 @@ contextBridge.exposeInMainWorld('api', {
   fetchTransbecInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-transbec-invoices', payload),
   connectGmail: () => ipcRenderer.invoke('vendor:connect-gmail'),
   getGmailStatus: () => ipcRenderer.invoke('vendor:gmail-status'),
+  // Statements Management
+  listStatementSuppliers: () => ipcRenderer.invoke('statements:suppliers'),
+  setStatementSupplierConfig: (payload) => ipcRenderer.invoke('statements:set-config', payload),
+  listStatements: (payload) => ipcRenderer.invoke('statements:list', payload),
+  fetchStatements: (payload) => ipcRenderer.invoke('statements:fetch', payload),
+  reconcileStatement: (payload) => ipcRenderer.invoke('statements:reconcile', payload),
+  openStatementPdf: (fileName) => ipcRenderer.invoke('statements:open-pdf', fileName),
   openTransbecInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:open-transbec-invoice-image', fileName),
   readTransbecInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:read-transbec-invoice-image', fileName),
   fetchBestbuyInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-bestbuy-invoices', payload),
