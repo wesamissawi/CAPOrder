@@ -1975,24 +1975,105 @@ export default function App() {
   // target bubble — used by the Archive → Search Purchases view. The view picks
   // the destination (RETURNS or CASHPAD); CASHPAD also flips to the CASH_SALE
   // accounting path, mirroring addArchiveLineToCashSales.
-  function handleMoveArchiveItemToBubble(uid, bubbleName) {
-    if (!uid || !bubbleName) return;
+  //
+  // `uidOrUids` is every live row the lookup card matched (a card can match
+  // several once a part has been split across destinations). `qty` is optional:
+  // omitted = move everything that isn't already at the target; a number moves
+  // exactly that many, capped at what is actually movable. A partial move
+  // shrinks the source row and either tops up an identical row already at the
+  // target or spins off a new one — the same split Order Assignment performs.
+  function handleMoveArchiveItemToBubble(uidOrUids, bubbleName, qty) {
+    const uids = (Array.isArray(uidOrUids) ? uidOrUids : [uidOrUids]).filter(Boolean);
+    if (!uids.length || !bubbleName) return;
     const targetName = String(bubbleName).trim().toUpperCase();
     const nowIso = new Date().toISOString();
     const accountingPath =
       targetName === "CASHPAD"
         ? ACCOUNTING_PATHS.CASH_SALE
         : ACCOUNTING_PATHS.OUTSTANDING;
-    const updatedItems = items.map((it) =>
-      it.uid === uid
-        ? {
-            ...it,
-            allocated_to: targetName,
-            accountingPath,
-            last_moved_at: nowIso,
-          }
-        : it
-    );
+    const upper = (v) => String(v ?? "").trim().toUpperCase();
+    const qtyOf = (it) => {
+      const q = Number(it?.quantity);
+      return Number.isFinite(q) && q > 0 ? q : 1;
+    };
+    // A row leaving where it was can't keep a requisition-slip membership.
+    const noSlip = {
+      return_slip_id: "",
+      return_slip_date: "",
+      return_slip_po: "",
+      return_slip_status: "",
+    };
+
+    // Rows already at the target have nothing to move.
+    const sources = uids
+      .map((u) => items.find((it) => it.uid === u))
+      .filter((it) => it && upper(it.allocated_to) !== targetName);
+    const movable = sources.reduce((sum, it) => sum + qtyOf(it), 0);
+    if (!sources.length || movable <= 0) return;
+
+    const wanted = Math.floor(Number(qty));
+    let need = Number.isFinite(wanted) && wanted >= 1 ? Math.min(wanted, movable) : movable;
+
+    const replaced = new Map(); // uid -> updated row
+    const spawned = [];
+    const sourceUids = new Set(sources.map((s) => s.uid));
+    // An identical row already at the target absorbs a partial move instead of
+    // leaving two same-part rows side by side (which per-row logic such as
+    // credit reconciliation handles badly). "Identical" includes price, so a
+    // CashPad row someone re-priced isn't silently blended with a fresh one.
+    const findHost = (src) =>
+      items.find(
+        (it) =>
+          !sourceUids.has(it.uid) &&
+          !replaced.has(it.uid) &&
+          upper(it.allocated_to) === targetName &&
+          upper(it.accountingPath || ACCOUNTING_PATHS.OUTSTANDING) === accountingPath &&
+          it.itemcode === src.itemcode &&
+          (it.reference_num || "") === (src.reference_num || "") &&
+          (it.warehouse || "") === (src.warehouse || "") &&
+          String(it.cost ?? "") === String(src.cost ?? "") &&
+          String(it.allocated_for ?? "") === String(src.allocated_for ?? "") &&
+          String(it.discounted_price ?? "") === String(src.discounted_price ?? "") &&
+          !it.return_slip_id
+      );
+
+    for (const src of sources) {
+      if (need <= 0) break;
+      const have = qtyOf(src);
+      if (have <= need) {
+        replaced.set(src.uid, {
+          ...src,
+          ...noSlip,
+          allocated_to: targetName,
+          accountingPath,
+          last_moved_at: nowIso,
+        });
+        need -= have;
+        continue;
+      }
+      replaced.set(src.uid, { ...src, quantity: have - need, last_moved_at: nowIso });
+      const host = findHost(src);
+      if (host) {
+        replaced.set(host.uid, {
+          ...host,
+          quantity: qtyOf(host) + need,
+          last_moved_at: nowIso,
+        });
+      } else {
+        spawned.push({
+          ...src,
+          ...noSlip,
+          uid: makeUid(),
+          quantity: need,
+          allocated_to: targetName,
+          accountingPath,
+          last_moved_at: nowIso,
+        });
+      }
+      need = 0;
+    }
+
+    const updatedItems = items.map((it) => replaced.get(it.uid) || it).concat(spawned);
     setItems(updatedItems);
     ensureBubblesForItems(updatedItems, setBubbles);
     lastSavedRef.current = JSON.stringify(updatedItems);
@@ -2005,8 +2086,8 @@ export default function App() {
   // the lookup was mounted with. Shared by all three ArchivePartLookup mounts
   // (Archive, Cash Sales, Returns) — main does the actual add, so the only
   // work here is re-reading the items it just wrote.
-  async function handleAddArchiveLine(order, line, target) {
-    const res = await api.addArchiveLineToCashSales(order, line, target);
+  async function handleAddArchiveLine(order, line, target, qty) {
+    const res = await api.addArchiveLineToCashSales(order, line, target, qty);
     if (res?.ok) {
       try {
         adoptPushedItems(await api.readItems());

@@ -481,7 +481,7 @@ const registerOrdersIpc = (ipcMain, deps) => {
     }
   });
 
-  ipcMain.handle('orders-archive:add-to-cash-sales', (_evt, order, line, target) => {
+  ipcMain.handle('orders-archive:add-to-cash-sales', (_evt, order, line, target, qty) => {
     try {
       const items = readItems();
       const syntheticOrder = {
@@ -501,6 +501,22 @@ const registerOrdersIpc = (ipcMain, deps) => {
         allocated_to,
         accountingPath,
       };
+      // Optional partial quantity ("I bought 2, only 1 is going back"). The
+      // renderer already caps the box at the line's quantity, but this is the
+      // side that writes stock, so it re-checks: whole numbers only, never
+      // above what the line actually bought. Credits (negative lines) and
+      // anything unparseable keep the full-line behaviour.
+      const lineQty = Number(line?.quantity);
+      const wanted = Number(qty);
+      if (
+        Number.isInteger(wanted) &&
+        wanted >= 1 &&
+        Number.isFinite(lineQty) &&
+        lineQty > 0 &&
+        wanted < lineQty
+      ) {
+        newItem.quantity = wanted;
+      }
       writeItems(items.concat(newItem));
 
       // Mark the line as added in the archive so the UI reflects it on next search

@@ -100,6 +100,8 @@ export default function ArchivePartLookup({
   const [purging, setPurging] = useState(false);
   const [purgeMsg, setPurgeMsg] = useState("");
   const [lineStatus, setLineStatus] = useState({});
+  // What's typed in each card's "qty to move" box, keyed like lineStatus.
+  const [qtyInputs, setQtyInputs] = useState({});
   // Only the picker mount keeps a target in state; a fixed-target mount reads
   // straight off the prop, so it can never drift out of sync with the view
   // it's sitting in.
@@ -119,6 +121,7 @@ export default function ArchivePartLookup({
       });
     });
     setLineStatus(initial);
+    setQtyInputs({});
   }, [results]);
 
   const handleKey = (e) => { if (e.key === "Enter") onSearch(); };
@@ -141,16 +144,38 @@ export default function ArchivePartLookup({
     return code ? lineCodes(line).includes(code) : false;
   }
 
-  function findActiveItem(order, line) {
-    if (!items.length) return null;
-    if (!lineCodes(line).length) return null;
-    return (
-      items.find(
-        (it) =>
-          codeMatches(it, line) &&
-          (it.reference_num || '') === (order.reference || '')
-      ) || null
+  // EVERY live row this line became. Once a partial move has split a part there
+  // are several (1 in RETURNS, 1 still in NEW STOCK), and the card has to see
+  // all of them — matching only the first would report "Already in Returns"
+  // while the rest sat elsewhere, or move the wrong row.
+  function findActiveItems(order, line) {
+    if (!items.length) return [];
+    if (!lineCodes(line).length) return [];
+    return items.filter(
+      (it) =>
+        codeMatches(it, line) &&
+        (it.reference_num || '') === (order.reference || '')
     );
+  }
+
+  const rowQty = (it) => {
+    const q = Number(it?.quantity);
+    return Number.isFinite(q) && q > 0 ? q : 1;
+  };
+
+  // The box is digits-only and clamps to `max` as you type, so a number above
+  // what the card holds can never even sit in it.
+  function setQtyInput(key, raw, max) {
+    let v = String(raw).replace(/\D/g, '').replace(/^0+(?=\d)/, '');
+    if (v !== '' && max != null && Number(v) > max) v = String(max);
+    setQtyInputs((prev) => ({ ...prev, [key]: v }));
+  }
+
+  // Blank means "all of it" — which is what the placeholder shows.
+  function effectiveQty(key, max) {
+    const raw = qtyInputs[key];
+    if (raw === undefined || raw === '') return max;
+    return Number(raw);
   }
 
   // Full lifecycle trace for a line (created / moved / sent to Sage-CashPad /
@@ -167,12 +192,13 @@ export default function ArchivePartLookup({
       .sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
   }
 
-  async function handleAddLine(order, line, key) {
+  async function handleAddLine(order, line, key, qty) {
     setLineStatus((prev) => ({ ...prev, [key]: "adding" }));
     try {
-      const res = await onAddLineToCashSales(order, line, targetSpec);
+      const res = await onAddLineToCashSales(order, line, targetSpec, qty);
       if (!res?.ok) throw new Error(res?.error || "Failed.");
       setLineStatus((prev) => ({ ...prev, [key]: "added" }));
+      setQtyInputs((prev) => ({ ...prev, [key]: "" }));
       // Re-focus + select the search box so the next search just needs typing.
       searchInputRef.current?.focus();
       searchInputRef.current?.select();
@@ -330,123 +356,189 @@ export default function ArchivePartLookup({
               const status = lineStatus[key];
               const trail = findItemHistory(order, line);
               const lastEvt = trail.length ? trail[trail.length - 1] : null;
+              const active = status === "added" ? findActiveItems(order, line) : [];
+              const atTarget = active.filter(
+                (it) => String(it.allocated_to || "").trim().toUpperCase() === targetName
+              );
+              const movableRows = active.filter(
+                (it) => String(it.allocated_to || "").trim().toUpperCase() !== targetName
+              );
+              const movable = movableRows.reduce((s, it) => s + rowQty(it), 0);
+              const lineQty = Number(line.quantity);
+              const hasLineQty = Number.isFinite(lineQty) && lineQty > 0;
+              // Move mode: the part is live somewhere else. The ceiling is the
+              // smaller of what the card bought and what's actually movable.
+              // Add mode: nothing live, so the ceiling is what the card bought.
+              const mode = active.length ? (movable > 0 ? "move" : "already") : "add";
+              const max =
+                mode === "move"
+                  ? hasLineQty
+                    ? Math.min(lineQty, movable)
+                    : movable
+                  : mode === "add" && hasLineQty
+                  ? lineQty
+                  : null;
+              const qty = max != null ? effectiveQty(key, max) : null;
+              const qtyValid = max == null || (Number.isInteger(qty) && qty >= 1 && qty <= max);
+              const busy = status === "adding";
+              const where = active.length
+                ? Array.from(
+                    active.reduce((m, it) => {
+                      const loc = it.allocated_to || "Unknown";
+                      m.set(loc, (m.get(loc) || 0) + rowQty(it));
+                      return m;
+                    }, new Map())
+                  )
+                : [];
+              const qtyLabel = qty != null && qtyValid ? ` ${qty}` : "";
               return (
                 <div
                   key={`${order.reference}-${li}-${line.partNumber}`}
-                  className="rounded-xl border border-slate-200 bg-white/80 p-3 flex flex-wrap items-center justify-between gap-3"
+                  className="rounded-xl border border-slate-200 bg-white/80 p-3 flex flex-wrap items-start justify-between gap-3"
                 >
-                  <div className="flex flex-col gap-0.5">
-                    <div className="text-base font-bold text-slate-900 tracking-wide">
-                      {line.itemcode || line.partNumber || "Part"}
-                    </div>
-                    {line.partDescription && (
-                      <div className="text-sm text-slate-500">{line.partDescription}</div>
-                    )}
-                  </div>
-                  <div className="flex gap-5 items-center">
-                    {line.quantity != null && (
-                      <div className="text-center">
-                        <div className="text-xs uppercase tracking-wide text-slate-400 leading-none mb-0.5">Qty</div>
-                        <div className="text-sm font-semibold text-slate-700">{line.quantity}</div>
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex flex-col gap-0.5">
+                      <div className="text-base font-bold text-slate-900 tracking-wide">
+                        {line.itemcode || line.partNumber || "Part"}
                       </div>
-                    )}
+                      {line.partDescription && (
+                        <div className="text-sm text-slate-500">{line.partDescription}</div>
+                      )}
+                    </div>
+                    {/* Quantity, how many to move, and the button — all hung
+                        off the part number rather than parked on the far side. */}
+                    <div className="flex flex-wrap items-end gap-3">
+                      {line.quantity != null && (
+                        <div>
+                          <div className="text-xs uppercase tracking-wide text-slate-400 leading-none mb-0.5">Qty</div>
+                          <div className="text-sm font-semibold text-slate-700 py-1.5">{line.quantity}</div>
+                        </div>
+                      )}
+                      {mode !== "already" && max != null && (
+                        <div>
+                          <div className="text-xs uppercase tracking-wide text-slate-400 leading-none mb-0.5">
+                            Qty to {mode === "move" ? "move" : "add"}
+                          </div>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            className={`w-20 rounded-lg border px-2 py-1.5 text-sm text-center ${
+                              qtyValid ? "border-slate-200" : "border-red-400 bg-red-50"
+                            }`}
+                            placeholder={String(max)}
+                            value={qtyInputs[key] ?? ""}
+                            disabled={busy}
+                            title={`Up to ${max}. Leave blank to use ${max}.`}
+                            onChange={(e) => setQtyInput(key, e.target.value, max)}
+                          />
+                        </div>
+                      )}
+                      {mode === "move" && (
+                        <button
+                          className="rounded-xl px-3 py-1.5 text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                          disabled={busy || !qtyValid}
+                          onClick={async () => {
+                            const ok = await api.confirm(
+                              `Move${qtyLabel} to ${targetLabel}?`,
+                              `This moves ${qty} of ${movable} ${
+                                movableRows[0]?.itemcode || "this item"
+                              } to ${targetName}${
+                                where.length ? ` (currently ${where.map(([l, n]) => `${l} ×${n}`).join(", ")})` : ""
+                              }.`
+                            );
+                            if (!ok) return;
+                            onMoveItemToBubble?.(movableRows.map((it) => it.uid), targetName, qty);
+                            setQtyInputs((prev) => ({ ...prev, [key]: "" }));
+                          }}
+                        >
+                          Move{qtyLabel} to {targetLabel}
+                        </button>
+                      )}
+                      {mode === "already" && (
+                        <div className="text-xs text-slate-500 py-1.5">
+                          Already in {targetLabel}
+                          {atTarget.length ? ` (×${atTarget.reduce((s, it) => s + rowQty(it), 0)})` : ""}
+                        </div>
+                      )}
+                      {mode === "add" && status === "added" && (
+                        <button
+                          className="rounded-xl px-3 py-1.5 text-xs font-semibold bg-amber-100 text-amber-700 border border-amber-200 hover:bg-amber-200 disabled:opacity-50"
+                          disabled={busy || !qtyValid}
+                          onClick={async () => {
+                            const ok = await api.confirm(
+                              `Re-add${qtyLabel} to ${targetLabel}?`,
+                              "Check stock in Sage before re-adding. This item was previously added to active stock."
+                            );
+                            if (ok) handleAddLine(order, line, key, qty);
+                          }}
+                        >
+                          Re-add{qtyLabel} to {targetLabel}
+                        </button>
+                      )}
+                      {mode === "add" && status !== "added" && (
+                        <button
+                          className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition-colors ${
+                            busy
+                              ? "bg-slate-100 text-slate-400 cursor-wait"
+                              : status?.startsWith("error:")
+                              ? "bg-red-100 text-red-600 border border-red-200"
+                              : "bg-indigo-600 text-white hover:bg-indigo-700"
+                          } disabled:opacity-50`}
+                          disabled={busy || !qtyValid}
+                          onClick={() => handleAddLine(order, line, key, qty)}
+                        >
+                          {busy
+                            ? "Adding..."
+                            : status?.startsWith("error:")
+                            ? "Retry"
+                            : `Add${qtyLabel} to ${targetLabel}`}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Right side is information only now: price, and where the
+                      part is / what became of it. */}
+                  <div className="flex gap-5 items-start">
                     {line.costPrice && (
                       <div className="text-center">
                         <div className="text-xs uppercase tracking-wide text-slate-400 leading-none mb-0.5">Price</div>
                         <div className="text-lg font-bold text-slate-900">{line.costPrice}</div>
                       </div>
                     )}
-                    {status === "added" ? (
-                      <div className="flex flex-col items-end gap-1.5 min-w-[110px]">
+                    {status === "added" && (
+                      <div className="flex flex-col items-end gap-1 min-w-[110px] text-right">
                         <div className="text-xs font-semibold text-green-700">Added ✓</div>
-                        {(() => {
-                          const active = findActiveItem(order, line);
-                          if (active) {
-                            const loc = active.allocated_to || "Unknown";
-                            const alreadyThere = String(loc).toUpperCase() === targetName;
-                            return (
-                              <>
-                                <div className="text-xs text-indigo-600 font-medium">📍 {loc}</div>
-                                {alreadyThere ? (
-                                  <div className="text-[11px] text-slate-400">
-                                    Already in {targetLabel}
+                        {active.length > 0 ? (
+                          where.map(([loc, n]) => (
+                            <div key={loc} className="text-xs text-indigo-600 font-medium">
+                              📍 {loc}
+                              {where.length > 1 || n > 1 ? ` ×${n}` : ""}
+                            </div>
+                          ))
+                        ) : (() => {
+                            const removal = {
+                              archived: { text: "📦 Archived (sold)", cls: "text-amber-600" },
+                              credit_received: { text: "💳 Credit received", cls: "text-emerald-600" },
+                              deleted: { text: "🗑️ Deleted", cls: "text-red-600" },
+                            }[lastEvt?.event];
+                            return removal ? (
+                              <div className="leading-tight">
+                                <div className={`text-xs font-semibold ${removal.cls}`}>
+                                  {removal.text}
+                                  {lastEvt.at ? ` ${formatDate(lastEvt.at)}` : ""}
+                                </div>
+                                {lastEvt.allocated_to && (
+                                  <div className="text-[11px] text-slate-500">
+                                    from {lastEvt.allocated_to}
                                   </div>
-                                ) : (
-                                  <button
-                                    className="rounded-xl px-3 py-1.5 text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700"
-                                    onClick={async () => {
-                                      const ok = await api.confirm(
-                                        `Move to ${targetLabel}?`,
-                                        `This moves ${active.itemcode || "this item"} from ${loc} to ${targetName}.`
-                                      );
-                                      if (ok) onMoveItemToBubble?.(active.uid, targetName);
-                                    }}
-                                  >
-                                    Move to {targetLabel}
-                                  </button>
                                 )}
-                              </>
+                              </div>
+                            ) : (
+                              <div className="text-xs text-slate-400">Not in active stock</div>
                             );
-                          }
-                          return (
-                            <>
-                              {(() => {
-                                const removal = {
-                                  archived: { text: "📦 Archived (sold)", cls: "text-amber-600" },
-                                  credit_received: { text: "💳 Credit received", cls: "text-emerald-600" },
-                                  deleted: { text: "🗑️ Deleted", cls: "text-red-600" },
-                                }[lastEvt?.event];
-                                return removal ? (
-                                  <div className="text-right leading-tight">
-                                    <div className={`text-xs font-semibold ${removal.cls}`}>
-                                      {removal.text}
-                                      {lastEvt.at ? ` ${formatDate(lastEvt.at)}` : ""}
-                                    </div>
-                                    {lastEvt.allocated_to && (
-                                      <div className="text-[11px] text-slate-500">
-                                        from {lastEvt.allocated_to}
-                                      </div>
-                                    )}
-                                  </div>
-                                ) : (
-                                  <div className="text-xs text-slate-400">Not in active stock</div>
-                                );
-                              })()}
-                              <button
-                                className="rounded-xl px-3 py-1.5 text-xs font-semibold bg-amber-100 text-amber-700 border border-amber-200 hover:bg-amber-200 disabled:opacity-50"
-                                disabled={status === "adding"}
-                                onClick={async () => {
-                                  const ok = await api.confirm(
-                                    `Re-add to ${targetLabel}?`,
-                                    "Check stock in Sage before re-adding. This item was previously added to active stock."
-                                  );
-                                  if (ok) handleAddLine(order, line, key);
-                                }}
-                              >
-                                Re-add to {targetLabel}
-                              </button>
-                            </>
-                          );
-                        })()}
+                          })()}
                       </div>
-                    ) : (
-                      <button
-                        className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition-colors ${
-                          status === "adding"
-                            ? "bg-slate-100 text-slate-400 cursor-wait"
-                            : status?.startsWith("error:")
-                            ? "bg-red-100 text-red-600 border border-red-200"
-                            : "bg-indigo-600 text-white hover:bg-indigo-700"
-                        }`}
-                        disabled={status === "adding"}
-                        onClick={() => handleAddLine(order, line, key)}
-                      >
-                        {status === "adding"
-                          ? "Adding..."
-                          : status?.startsWith("error:")
-                          ? "Retry"
-                          : `Add to ${targetLabel}`}
-                      </button>
                     )}
                   </div>
 

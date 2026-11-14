@@ -150,7 +150,7 @@ contextBridge.exposeInMainWorld('api', {
   archiveOrder: (refKey, source) => ipcRenderer.invoke('orders:archive-one', refKey, source),
   deleteOrder: (refKey, source) => ipcRenderer.invoke('orders:delete-one', refKey, source),
   searchOrdersArchive: (term) => ipcRenderer.invoke('orders-archive:search', term),
-  addArchiveLineToCashSales: (order, line, target) => ipcRenderer.invoke('orders-archive:add-to-cash-sales', order, line, target),
+  addArchiveLineToCashSales: (order, line, target, qty) => ipcRenderer.invoke('orders-archive:add-to-cash-sales', order, line, target, qty),
   purgeOldOrdersArchive: () => ipcRenderer.invoke('orders-archive:purge-old'),
   getRecentArchivedOrders: (limit) => ipcRenderer.invoke('orders-archive:recent', limit),
   readOrderAssignments: (opts) => ipcRenderer.invoke('order-assignment:read', opts),

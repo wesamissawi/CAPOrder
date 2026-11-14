@@ -1500,9 +1500,15 @@ function reconcileCreditReturnAgainstStock(order) {
   const nowIso = new Date().toISOString();
   const upserts = [];
   const deletedUids = [];
-  // Guards against two credit line items for the same part both matching the
-  // same physical Returns row within one reconciliation pass.
-  const consumedUids = new Set();
+  // Quantity still unclaimed on each Returns row. Tracked per row (rather than
+  // marking a row "used" once touched) so that (1) a credit for more than one
+  // row holds can drain across several rows of the same part — a partial
+  // return leaves 1+1 rather than a single 2 — and (2) two credit lines for
+  // the same part can't both spend the same units.
+  const remaining = new Map();
+  const touched = new Map(); // uid -> row after this pass
+  const qtyOfRow = (it) => (Number(it.quantity) > 0 ? Number(it.quantity) : 1);
+  const available = (it) => (remaining.has(it.uid) ? remaining.get(it.uid) : qtyOfRow(it));
 
   const warehouseForRules = order?.warehouse || order?.seller || order?.source || '';
 
@@ -1512,15 +1518,15 @@ function reconcileCreditReturnAgainstStock(order) {
     const returnQty = Math.abs(Number(line.quantity) || 0);
     if (!codes.length || !returnQty) return { ...line, addedToOutstanding: true };
 
-    const match = currentItems.find(
+    const matches = currentItems.filter(
       (it) =>
         it &&
-        !consumedUids.has(it.uid) &&
+        available(it) > 0 &&
         codes.includes(itemCodeKey(it.itemcode)) &&
         String(it.allocated_to || '').trim().toUpperCase() === 'RETURNS'
     );
 
-    if (!match) {
+    if (!matches.length) {
       console.log(
         `[orders] credit ${order.reference || ''}: no matching Returns item for ${codes
           .map((c) => `"${c}"`)
@@ -1529,14 +1535,25 @@ function reconcileCreditReturnAgainstStock(order) {
       return { ...line, addedToOutstanding: true };
     }
 
-    consumedUids.add(match.uid);
-    const nextQty = (Number(match.quantity) || 0) - returnQty;
-    if (nextQty > 0) {
-      upserts.push({ ...match, quantity: nextQty, last_moved_at: nowIso });
-    } else {
-      deletedUids.push(match.uid);
+    // Drain row by row until the credit is covered. Any shortfall beyond what
+    // Returns actually holds is dropped, as before: a credit with no physical
+    // return on hand must not invent a stock movement.
+    let need = returnQty;
+    for (const row of matches) {
+      if (need <= 0) break;
+      const have = available(row);
+      const take = Math.min(have, need);
+      remaining.set(row.uid, have - take);
+      touched.set(row.uid, row);
+      need -= take;
     }
     return { ...line, addedToOutstanding: true };
+  });
+
+  touched.forEach((row, uid) => {
+    const left = remaining.get(uid);
+    if (left > 0) upserts.push({ ...row, quantity: left, last_moved_at: nowIso });
+    else deletedUids.push(uid);
   });
 
   if (upserts.length || deletedUids.length) {
