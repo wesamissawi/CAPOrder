@@ -44,6 +44,7 @@ const SHARED_CONFIG_KEYS = [
   // vendor logins
   'WORLD_USER',
   'WORLD_PASS',
+  'WORLD_MAX_PAGES',
   'TRANSBEC_USER',
   'TRANSBEC_PASS',
   'TRANSBEC_MAX_PAGES',

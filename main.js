@@ -42,7 +42,9 @@ if (app.isPackaged) {
   process.env.PLAYWRIGHT_BROWSERS_PATH = path.join(process.resourcesPath, 'playwright-browsers');
 }
 
-const { getWorldOrders } = require('./src/scrapers/worldScraper');
+// World moved to b2b.groupe-monaco.ca (Transbec's platform). The old iautoparts
+// scraper (./src/scrapers/worldScraper) is kept on disk but no longer wired in.
+const { getWorldB2bOrders: getWorldOrders } = require('./src/scrapers/worldB2bScraper');
 const { getTransbecOrders } = require('./src/scrapers/transbecScraper');
 const { getProforceOrders } = require('./src/scrapers/proforceScraper');
 const { getBestBuyOrders } = require('./src/scrapers/bestBuyScraper');
@@ -52,6 +54,8 @@ const { getAltromOrders } = require('./src/scrapers/altromScraper');
 const { fetchWorldInvoices } = require('./src/scrapers/worldInvoice');
 const { fetchWorldCreditInvoices } = require('./src/scrapers/worldCreditInvoice');
 const { fetchWorldStandaloneInvoices } = require('./src/scrapers/worldStandaloneInvoice');
+// TEMP-WORLD-SITE-GAP: delete with worldConfGapInvoice.js (see WORLD_SITE_GAP_TEMP_FIX.md)
+const { fetchWorldConfGapInvoices } = require('./src/scrapers/worldConfGapInvoice');
 const { fetchTransbecInvoices } = require('./src/scrapers/transbecInvoice');
 const { fetchBestbuyInvoices } = require('./src/scrapers/bestbuyInvoice');
 const { fetchBestbuyCreditInvoices } = require('./src/scrapers/bestbuyCreditInvoice');
@@ -196,6 +200,11 @@ function getWorldCreditInvoiceCachePath() {
 // runs overwrite each other's verdicts.
 function getWorldStandaloneInvoiceCachePath() {
   return path.join(getGmailAssetsDir(), 'world_po_invoice_cache.json');
+}
+// TEMP-WORLD-SITE-GAP: own cache file for the conf-invoice gap scan. Safe to delete the file
+// itself from the shared gmail folder once the temp fix is removed.
+function getWorldConfGapInvoiceCachePath() {
+  return path.join(getGmailAssetsDir(), 'world_conf_gap_invoice_cache.json');
 }
 
 const PRELOAD = path.resolve(__dirname, 'preload.js');
@@ -1880,6 +1889,7 @@ const vendorOrdersService = createVendorOrdersService({
   fetchProforceCreditInvoicesScraper: fetchProforceCreditInvoices,
   fetchWorldCreditInvoicesScraper: fetchWorldCreditInvoices,
   fetchWorldStandaloneInvoicesScraper: fetchWorldStandaloneInvoices,
+  fetchWorldConfGapInvoicesScraper: fetchWorldConfGapInvoices, // TEMP-WORLD-SITE-GAP
   getGmailAssetsDir,
   getWorldInvoiceCachePath,
   getTransbecInvoiceCachePath,
@@ -1890,6 +1900,7 @@ const vendorOrdersService = createVendorOrdersService({
   getProforceCreditInvoiceCachePath,
   getWorldCreditInvoiceCachePath,
   getWorldStandaloneInvoiceCachePath,
+  getWorldConfGapInvoiceCachePath, // TEMP-WORLD-SITE-GAP
   runInteractiveAuth,
   verifyConnection,
   saveConfig,
@@ -1913,6 +1924,7 @@ const {
   fetchProforceCreditInvoices: fetchProforceCreditInvoicesService,
   fetchWorldCreditInvoices: fetchWorldCreditInvoicesService,
   fetchWorldStandaloneInvoices: fetchWorldStandaloneInvoicesService,
+  fetchWorldConfGapInvoices: fetchWorldConfGapInvoicesService, // TEMP-WORLD-SITE-GAP
   getTransbecCreditInvoices,
   getWorldCreditInvoices,
   resetTransbecCreditScans,
@@ -2561,6 +2573,7 @@ function registerAllIpc() {
     fetchProforceCreditInvoices: fetchProforceCreditInvoicesService,
     fetchWorldCreditInvoices: fetchWorldCreditInvoicesService,
     fetchWorldStandaloneInvoices: fetchWorldStandaloneInvoicesService,
+    fetchWorldConfGapInvoices: fetchWorldConfGapInvoicesService, // TEMP-WORLD-SITE-GAP
     getTransbecCreditInvoices,
     getWorldCreditInvoices,
     resetTransbecCreditScans,

@@ -154,6 +154,10 @@ export default function OrderManagementView({
   worldPoFetching,
   worldPoStatus,
   worldPoError,
+  onFetchWorldGapInvoices, // TEMP-WORLD-SITE-GAP
+  worldGapFetching,
+  worldGapStatus,
+  worldGapError,
   worldFetching,
   worldStatus,
   worldError,
@@ -416,6 +420,18 @@ export default function OrderManagementView({
       running: worldPoFetching,
       status: worldPoStatus,
       error: worldPoError,
+    },
+    // TEMP-WORLD-SITE-GAP (delete with the rest of the temp fix): World's site omits some
+    // orders from its history, so this builds an order from any invoice email
+    // whose order was never scraped. Ghost mode runs it every cycle.
+    {
+      key: "world-gap",
+      label: "World Gap Inv.",
+      title: "TEMPORARY: create an order from any World invoice email whose order the World site never listed (matched by conf number)",
+      onClick: onFetchWorldGapInvoices,
+      running: worldGapFetching,
+      status: worldGapStatus,
+      error: worldGapError,
     },
   ];
 

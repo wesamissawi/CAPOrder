@@ -68,6 +68,7 @@ const registerVendorIpc = (ipcMain, deps) => {
     fetchProforceCreditInvoices,
     fetchWorldCreditInvoices,
     fetchWorldStandaloneInvoices,
+    fetchWorldConfGapInvoices, // TEMP-WORLD-SITE-GAP
     getTransbecCreditInvoices,
     getWorldCreditInvoices,
     resetTransbecCreditScans,
@@ -158,6 +159,12 @@ const registerVendorIpc = (ipcMain, deps) => {
   // subject instead of a conf number) - see worldStandaloneInvoice.js.
   ipcMain.handle('vendor:fetch-world-po-invoices', async (_evt, payload) => {
     return fetchWorldStandaloneInvoices(payload);
+  });
+
+  // TEMP-WORLD-SITE-GAP: invoices World emailed for orders its site never listed - see
+  // worldConfGapInvoice.js. Remove with the rest of the temp fix.
+  ipcMain.handle('vendor:fetch-world-conf-gap-invoices', async (_evt, payload) => {
+    return fetchWorldConfGapInvoices(payload);
   });
 
   ipcMain.handle('vendor:get-world-credits', async () => {

@@ -602,6 +602,10 @@ export default function App() {
   const [worldPoFetching, setWorldPoFetching] = useState(false);
   const [worldPoStatus, setWorldPoStatus] = useState("");
   const [worldPoError, setWorldPoError] = useState("");
+  // TEMP-WORLD-SITE-GAP: invoices for orders World's site never listed (worldConfGapInvoice.js).
+  const [worldGapFetching, setWorldGapFetching] = useState(false);
+  const [worldGapStatus, setWorldGapStatus] = useState("");
+  const [worldGapError, setWorldGapError] = useState("");
   // Pre-Sage quantity-vs-billed-total check (see utils/qtyDiscrepancy.js).
   // Defaults mirror main.js's normalizeAppConfig fallback so the UI matches
   // what's actually on disk before the config load below completes.
@@ -4095,6 +4099,10 @@ export default function App() {
         setWorldPoStatus("");
         setWorldPoError("");
         break;
+      case "world-gap": // TEMP-WORLD-SITE-GAP
+        setWorldGapStatus("");
+        setWorldGapError("");
+        break;
       case "cbk":
         setCbkOrdersStatus("");
         setCbkOrdersError("");
@@ -5469,6 +5477,133 @@ export default function App() {
     }
   }
 
+  // ==========================================================================
+  // TEMP-WORLD-SITE-GAP — BEGIN (delete this whole handler with the rest of the temp fix;
+  // see WORLD_SITE_GAP_TEMP_FIX.md)
+  //
+  // World's new B2B site leaves some orders out of its order history, so an
+  // invoice email can arrive for an order the scrape never created. This is the
+  // twin of handleFetchWorldPoInvoices above, for invoices that DO print a conf
+  // number: it builds an order from the invoice, but ONLY when no order with
+  // that reference exists. The reference is the conf number (what the scraper
+  // would have used), so if the site lists the order later the scraper sees the
+  // reference taken and skips it — no duplicate. Runs every ghost cycle.
+  // ==========================================================================
+  async function handleFetchWorldConfGapInvoices() {
+    if (!api?.fetchWorldConfGapInvoices) return "";
+    try {
+      setWorldGapFetching(true);
+      setWorldGapError("");
+      setWorldGapStatus("");
+      const res = await api.fetchWorldConfGapInvoices({});
+      if (!res?.ok) throw new Error(res?.error || "Failed to check for World conf invoices.");
+      const discoveries = Array.isArray(res.discoveries) ? res.discoveries : [];
+
+      // Fresh off disk (the order fetch may have just rewritten it, possibly on
+      // another machine) — this decision is "does an order already exist?".
+      const ordersRes = await api?.readOrders?.();
+      const currentList = ordersRes?.state || ordersRes || [];
+      const base = Array.isArray(currentList) ? currentList : [];
+      const norm = (v) => (v ? String(v).trim().toUpperCase() : "");
+
+      const created = [];
+      const blocked = [];
+      const newOrders = [];
+
+      for (const inv of discoveries) {
+        const invNum = String(inv.invoiceNumber || "").trim();
+        const ref = String(inv.reference || "").trim();
+        if (!invNum || !ref) continue;
+
+        // Same rule as the PO check: never build from a document that failed
+        // its own arithmetic — nothing else cross-checks these figures.
+        if (inv.checksOk === false) {
+          blocked.push(`${ref} / ${invNum}`);
+          continue;
+        }
+
+        const refKey = norm(ref);
+        const invKey = norm(invNum);
+        // `known` (main process) = this invoice number is already on file in
+        // active orders, the archive or a month manifest. The reference check
+        // is the one that matters for the gap itself: an order exists for it,
+        // so the regular invoice check attaches the invoice and we stay out.
+        const already =
+          inv.known === true ||
+          base.some(
+            (o) =>
+              o &&
+              (norm(o.reference) === refKey ||
+                norm(o.source_invoice) === invKey ||
+                norm(o.invoiceNum) === invKey ||
+                norm(o.sage_reference) === invKey)
+          ) ||
+          newOrders.some((o) => norm(o.reference) === refKey);
+        if (already) continue;
+
+        const totalNum = Number(inv.total ?? inv.balanceDue);
+        newOrders.push({
+          source: "world",
+          reference: ref, // the conf number, e.g. PO2057 — NOT the invoice number
+          __row: ref,
+          warehouse: WORLD_WAREHOUSE,
+          sage_source: "WOR505",
+          source_invoice: invNum,
+          sage_reference: invNum,
+          hasInvoiceNum: true,
+          detailStored: true, // no receipt page to fetch: the invoice is the detail
+          ...(Number.isFinite(totalNum) ? { total: totalNum, billed_total: totalNum } : {}),
+          // worldPoCreated is what gives the card its "Delete Order" button (an
+          // order nobody chose to create must be removable if the purchase was
+          // already entered into Sage by hand). worldGapCreated says WHY it was
+          // created, so these can be found and counted while the site is broken.
+          worldPoCreated: true,
+          worldGapCreated: true,
+          worldGapCreatedAt: new Date().toISOString(),
+          ...(inv.fileName ? { worldInvoiceFile: inv.fileName } : {}),
+          ...(inv.customerPo ? { worldCustomerPo: inv.customerPo } : {}),
+          ...(inv.packingSlip ? { worldInvoicePackingSlip: inv.packingSlip } : {}),
+          ...creditOrderDateFields(inv.invoiceDate),
+          ...toWorldInvoiceOrderLines(inv.lineItems),
+          lastUpdatedAt: new Date().toISOString(),
+        });
+        created.push(`${ref} (inv ${invNum})`);
+      }
+
+      if (newOrders.length) {
+        if (!api?.writeOrders) throw new Error("Saving orders is not available.");
+        const nextList = normalizeOrdersForSave(base.concat(newOrders));
+        const saveRes = await api.writeOrders(nextList);
+        if (!saveRes?.ok) throw new Error(saveRes?.error || "Failed to save the new order(s).");
+        if (ordersInitialized) {
+          adoptSavedOrders(nextList);
+          setOrdersDirty(false);
+        }
+      }
+
+      const lines = [
+        created.length
+          ? `Created ${created.length} order(s) the World site did not list: ${created.join(", ")}.`
+          : `Checked ${discoveries.length} conf invoice(s); every one already has an order.`,
+      ];
+      if (blocked.length) {
+        lines.push(`Not created — invoice did not reconcile with itself, enter by hand: ${blocked.join(", ")}.`);
+      }
+      (Array.isArray(res.statusLog) ? res.statusLog : [])
+        .filter((l) => /Skipped|Could not|did not reconcile/i.test(l))
+        .forEach((l) => lines.push(l));
+      setWorldGapStatus(lines.filter(Boolean).join("\n"));
+      return created.length ? `created ${created.length} (${created.join(", ")})` : "none missing";
+    } catch (e) {
+      console.error("[vendor] world conf-gap invoice fetch error", e);
+      setWorldGapError(e?.message || "Failed to check for World conf invoices.");
+      return "failed";
+    } finally {
+      setWorldGapFetching(false);
+    }
+  }
+  // TEMP-WORLD-SITE-GAP — END
+
   async function handleViewWorldInvoiceImage(order) {
     const fileName = typeof order === "string" ? order : order?.worldInvoiceFile;
     if (!api?.openWorldInvoiceImage || !fileName) return;
@@ -6577,6 +6712,9 @@ export default function App() {
       // Not part of the every-cycle sweep: this one CREATES orders, so it runs
       // on its own three-a-day schedule (payload.worldPo, set by runGhostCycle).
       if (payload.worldPo === true) await handleFetchWorldPoInvoices();
+      // TEMP-WORLD-SITE-GAP: every cycle, not three a day — see handleFetchWorldConfGapInvoices.
+      const worldGapSummary =
+        payload.worldGap === true ? await handleFetchWorldConfGapInvoices() : "";
       if (payload.transbec !== false) await handleFetchTransbecInvoices();
       if (payload.bestbuy === true) await handleFetchBestbuyInvoices();
       // Credit memos are a different errand from invoices — they build their own
@@ -6586,6 +6724,7 @@ export default function App() {
         `checked Gmail (${[
           "world",
           payload.worldPo === true ? "world PO invoices" : "",
+          worldGapSummary && worldGapSummary !== "none missing" ? `world gap: ${worldGapSummary}` : "",
           "transbec",
           payload.bestbuy === true ? "bestbuy" : "",
         ]
@@ -6822,6 +6961,7 @@ export default function App() {
         payload: {
           world: true,
           worldPo: worldPoDue,
+          worldGap: true, // TEMP-WORLD-SITE-GAP: every ghost cycle (~30 min)
           transbec: true,
           bestbuy: bestbuyDue,
           credits: creditsDue,
@@ -7424,6 +7564,10 @@ export default function App() {
             worldPoFetching={worldPoFetching}
             worldPoStatus={worldPoStatus}
             worldPoError={worldPoError}
+            onFetchWorldGapInvoices={handleFetchWorldConfGapInvoices} // TEMP-WORLD-SITE-GAP
+            worldGapFetching={worldGapFetching}
+            worldGapStatus={worldGapStatus}
+            worldGapError={worldGapError}
             worldFetching={worldFetching}
             worldStatus={worldStatus}
             worldError={worldError}

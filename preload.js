@@ -142,6 +142,7 @@ contextBridge.exposeInMainWorld('api', {
   resetTransbecCredits: () => ipcRenderer.invoke('vendor:reset-transbec-credits'),
   fetchWorldCreditInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-world-credit-invoices', payload),
   fetchWorldPoInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-world-po-invoices', payload),
+  fetchWorldConfGapInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-world-conf-gap-invoices', payload), // TEMP-WORLD-SITE-GAP
   getWorldCredits: () => ipcRenderer.invoke('vendor:get-world-credits'),
   fetchCbkInvoices: (payload) => ipcRenderer.invoke('vendor:fetch-cbk-invoices', payload),
   openCbkInvoiceImage: (fileName) => ipcRenderer.invoke('vendor:open-cbk-invoice-image', fileName),

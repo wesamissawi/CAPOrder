@@ -100,6 +100,7 @@ export default function SettingsView() {
   const [transbecUser, setTransbecUser] = useState("");
   const [transbecPass, setTransbecPass] = useState("");
   const [transbecMaxPages, setTransbecMaxPages] = useState(1);
+  const [worldMaxPages, setWorldMaxPages] = useState(1);
   const [cbkUser, setCbkUser] = useState("");
   const [cbkPass, setCbkPass] = useState("");
   const [tigerUser, setTigerUser] = useState("");
@@ -337,6 +338,10 @@ export default function SettingsView() {
           const cfg = credRes.config || {};
           setWorldUser(cfg.WORLD_USER || "");
           setWorldPass(cfg.WORLD_PASS || "");
+          const worldPagesRaw = Number(cfg.WORLD_MAX_PAGES);
+          setWorldMaxPages(
+            Number.isFinite(worldPagesRaw) && worldPagesRaw >= 1 ? Math.floor(worldPagesRaw) : 1
+          );
           setTransbecUser(cfg.TRANSBEC_USER || "");
           setTransbecPass(cfg.TRANSBEC_PASS || "");
           const pagesRaw = Number(cfg.TRANSBEC_MAX_PAGES);
@@ -466,6 +471,10 @@ export default function SettingsView() {
       const res = await api.setConfig?.({
         WORLD_USER: worldUser || "",
         WORLD_PASS: worldPass || "",
+        WORLD_MAX_PAGES:
+          Number.isFinite(Number(worldMaxPages)) && Number(worldMaxPages) >= 1
+            ? Math.floor(Number(worldMaxPages))
+            : 1,
         TRANSBEC_USER: transbecUser || "",
         TRANSBEC_PASS: transbecPass || "",
         TRANSBEC_MAX_PAGES:
@@ -851,6 +860,22 @@ export default function SettingsView() {
                 onChange={(e) => setWorldPass(e.target.value)}
                 className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
               />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wide text-slate-500">
+                World Max Pages
+              </label>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={worldMaxPages}
+                onChange={(e) => setWorldMaxPages(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800"
+              />
+              <div className="text-xs text-slate-500">
+                How many order list pages to fetch each run.
+              </div>
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-xs uppercase tracking-wide text-slate-500">Transbec Username</label>

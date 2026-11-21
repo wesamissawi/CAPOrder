@@ -28,6 +28,7 @@ const createVendorOrdersService = (deps) => {
     fetchProforceCreditInvoicesScraper,
     fetchWorldCreditInvoicesScraper,
     fetchWorldStandaloneInvoicesScraper,
+    fetchWorldConfGapInvoicesScraper, // TEMP-WORLD-SITE-GAP
     getWorldInvoiceCachePath,
     getGmailAssetsDir,
     getTransbecInvoiceCachePath,
@@ -38,6 +39,7 @@ const createVendorOrdersService = (deps) => {
     getProforceCreditInvoiceCachePath,
     getWorldCreditInvoiceCachePath,
     getWorldStandaloneInvoiceCachePath,
+    getWorldConfGapInvoiceCachePath, // TEMP-WORLD-SITE-GAP
     runInteractiveAuth,
     verifyConnection,
     saveConfig,
@@ -77,9 +79,14 @@ const createVendorOrdersService = (deps) => {
       if (!worldUser || !worldPass) {
         return { ok: false, error: 'Missing WORLD credentials. Set them in Settings.' };
       }
+      const maxPagesRaw = Number(config.WORLD_MAX_PAGES);
+      const maxPages = Number.isFinite(maxPagesRaw) && maxPagesRaw >= 1 ? Math.floor(maxPagesRaw) : 1;
       const res = await getWorldOrders({
         storageDir: VENDOR_PATHS.world.dataDir,
-        storageStatePath: VENDOR_PATHS.world.storageState,
+        // Own session file for the b2b site; the old iautoparts one stays untouched.
+        storageStatePath: path.join(VENDOR_PATHS.world.dataDir, 'world_b2b_storage_state.json'),
+        productsPath: path.join(VENDOR_PATHS.world.dataDir, 'world_b2b_products.json'),
+        maxPages,
         ordersPath: targetOrdersPath,
         existingOrders: existing,
         existingRefs: archivedRefs,
@@ -812,6 +819,52 @@ const createVendorOrdersService = (deps) => {
     }
   }
 
+  // ==========================================================================
+  // TEMP-WORLD-SITE-GAP — BEGIN (delete this whole function with the rest of the temp fix)
+  // World's new B2B site omits some orders from its order history, so an invoice
+  // can arrive for an order that was never scraped. This returns the World
+  // invoices that carry a conf number (see worldConfGapInvoice.js); the renderer
+  // builds an order from one only when no order with that reference exists.
+  // Sender/subject reuse the World PO invoice settings, so there is nothing new
+  // to configure. `known` = invoice numbers already on file anywhere (active
+  // orders, the archive, every month's manifest).
+  // ==========================================================================
+  async function fetchWorldConfGapInvoices(payload = {}) {
+    try {
+      const { clientId, clientSecret, refreshToken, worldPoSender, worldPoSubject, worldSender } =
+        getGmailCreds();
+      if (!clientId || !clientSecret) {
+        return { ok: false, error: 'Missing Gmail OAuth client id/secret. Set them in Settings.' };
+      }
+      if (!refreshToken) {
+        return { ok: false, error: 'Gmail is not connected. Click “Connect Gmail” in Settings.' };
+      }
+      const gmailDataDir = getGmailAssetsDir();
+      ensureDir(gmailDataDir);
+      const res = await fetchWorldConfGapInvoicesScraper({
+        credentials: { clientId, clientSecret, refreshToken },
+        sender: worldPoSender || worldSender || 'reports@groupe-monaco.ca',
+        subjectPattern: worldPoSubject || 'Invoice for 20605',
+        dataDir: gmailDataDir,
+        cachePath: getWorldConfGapInvoiceCachePath(),
+        maxResults: 100,
+        fromDate: typeof payload?.fromDate === 'string' ? payload.fromDate : '',
+        toDate: typeof payload?.toDate === 'string' ? payload.toDate : '',
+      });
+      if (!res?.ok) return res;
+      const known = collectKnownInvoiceNumbers ? collectKnownInvoiceNumbers() : new Set();
+      const discoveries = (res.discoveries || []).map((d) => {
+        const key = String(d.invoiceNumber || '').trim().toUpperCase();
+        return { ...d, known: Boolean(key) && known.has(key) };
+      });
+      return { ...res, discoveries };
+    } catch (e) {
+      console.error('[vendor:fetch-world-conf-gap-invoices]', e);
+      return { ok: false, error: e?.message || 'Failed to fetch World conf invoices.' };
+    }
+  }
+  // TEMP-WORLD-SITE-GAP — END
+
   return {
     fetchWorldOrders,
     fetchTransbecOrders,
@@ -831,6 +884,7 @@ const createVendorOrdersService = (deps) => {
     fetchProforceCreditInvoices,
     fetchWorldCreditInvoices,
     fetchWorldStandaloneInvoices,
+    fetchWorldConfGapInvoices, // TEMP-WORLD-SITE-GAP
     getTransbecCreditInvoices,
     getWorldCreditInvoices,
     resetTransbecCreditScans,
