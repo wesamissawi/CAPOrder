@@ -60,6 +60,18 @@ if (oldRef = "" || newRef = "") {
     ExitApp, 6
 }
 
+; The order file must be the order this run was started for (the app passes
+; that order's sage_reference/reference as the second argument). See the same
+; guard in enterSagePurchases.ahk for the 2026-11-20 J6644 incident.
+fileRef := ""
+if (order.HasKey("reference"))
+    fileRef := order.reference
+if (orderRef != "" && newRef != orderRef && fileRef != orderRef) {
+    Log("ERROR: update_invoice order file holds ref=" . fileRef . "/" . newRef . " but this run was started for " . orderRef)
+    MsgBox, 16, Error, Order file holds a different order than the one sent (%orderRef%). Nothing was changed., 20
+    ExitApp, 8
+}
+
 ; Focus Sage window
 if WinExist("Purchases - Creating an Invoice") {
     WinActivate

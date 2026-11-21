@@ -237,6 +237,15 @@ makePurchaseFromJSON(pathToFile, warehouse := "", orderRef := "", updateJsonPath
         return ReturnFalse("No reference found on selected order (check sage_reference/reference fields).")
     }
 
+    ; The order file must hold the order this run was started for. On 2026-11-20
+    ; the temp file had been overwritten by a queued invoice update, so PO0280's
+    ; run read BestBuy's order and posted it under World (J6644). The app now
+    ; writes the file right before each run, but never post on a mismatch anyway.
+    if (orderRef != "" && ToUpper(Trim("" . reference)) != ToUpper(Trim("" . orderRef))) {
+        Log("ERROR: order file holds ref=" . reference . " but this run was started for ref=" . orderRef . " path=" . jsonFilePath)
+        return ReturnFalse("Order file holds a different order (" . reference . ") than the one sent (" . orderRef . "). Nothing was posted.")
+    }
+
     ; Pull fields (validate basics)
     source := ""
     if (parsedData.HasKey("sage_source"))

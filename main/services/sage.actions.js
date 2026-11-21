@@ -167,9 +167,37 @@ const createSageActions = (deps) => {
     });
   }
 
+  // `args` may be a function. It is then called INSIDE the queue, immediately
+  // before this run's script starts — which is where anything shared between
+  // runs (the temp order file) must be written. Writing it at call time, while
+  // the run still waits behind another in the queue, let a later call overwrite
+  // it first: on 2026-11-20 PO0280's purchase script started, read BestBuy's
+  // order out of the file the invoice update had just rewritten, and posted it
+  // as J6644 under World. A function returning null/false aborts the run.
   function runAhkScript({ scriptPath, args = [], logPrefix = 'sage', timeoutMs = 5 * 60 * 1000, shouldAbort = null }) {
     const label = `${logPrefix} ${path.basename(scriptPath || '')}`;
-    return _enqueueAhk(label, () => _runAhkScriptNow({ scriptPath, args, logPrefix, timeoutMs, shouldAbort }));
+    return _enqueueAhk(label, async () => {
+      const resolvedArgs = typeof args === 'function' ? args() : args;
+      if (!resolvedArgs) {
+        return {
+          ok: false,
+          code: 'temp-write-failed',
+          error: 'Failed to write temp order file',
+          stdout: '',
+          stderr: '',
+        };
+      }
+      return _runAhkScriptNow({ scriptPath, args: resolvedArgs, logPrefix, timeoutMs, shouldAbort });
+    });
+  }
+
+  // Writes the temp order file and returns the script's argument list, or null
+  // if the write failed. Only ever called from inside the AHK queue (see above).
+  function argsWithTempOrder(order, buildArgs) {
+    return () => {
+      const orderPath = writeTempOrder(order);
+      return orderPath ? buildArgs(orderPath) : null;
+    };
   }
 
   function safeUnlink(filePath) {
@@ -198,11 +226,6 @@ const createSageActions = (deps) => {
       const ordersFilePath = getOrdersFile();
       backupFile(ordersFilePath, '.pre-sage.bak');
 
-      const orderPath = writeTempOrder(order);
-      if (!orderPath) {
-        return resolve({ ok: false, error: 'Failed to write temp order file', code: 'temp-write-failed' });
-      }
-
       const ahkExecutable = getAhkExePath();
       const resolvedExecutable = ahkExecutable ? path.resolve(ahkExecutable) : '';
       const ahkExists = Boolean(ahkExecutable) && fs.existsSync(ahkExecutable);
@@ -220,24 +243,28 @@ const createSageActions = (deps) => {
         });
       }
 
-      const args = [
-        SAGE_AHK_SCRIPT,
-        orderPath,
-        order?.sage_reference || order?.reference || "",
-        getVendorName(order) || "",
-        ordersFilePath,
-      ];
-
-      console.log('[sage] preparing to spawn AHK', {
-        timestamp: new Date().toISOString(),
-        appIsPackaged: app.isPackaged,
-        ordersFilePath,
-        tempOrderPath: orderPath,
-        ahkScriptPath: path.resolve(SAGE_AHK_SCRIPT),
-        ahkExecutable,
-        resolvedAhkExecutable: resolvedExecutable,
-        spawnArgs: args,
-        spawnCommand: [resolvedExecutable, ...args].join(' '),
+      let orderPath = "";
+      const args = argsWithTempOrder(order, (tempPath) => {
+        orderPath = tempPath;
+        const built = [
+          SAGE_AHK_SCRIPT,
+          tempPath,
+          order?.sage_reference || order?.reference || "",
+          getVendorName(order) || "",
+          ordersFilePath,
+        ];
+        console.log('[sage] spawning AHK', {
+          timestamp: new Date().toISOString(),
+          appIsPackaged: app.isPackaged,
+          ordersFilePath,
+          tempOrderPath: tempPath,
+          ahkScriptPath: path.resolve(SAGE_AHK_SCRIPT),
+          ahkExecutable,
+          resolvedAhkExecutable: resolvedExecutable,
+          spawnArgs: built,
+          spawnCommand: [resolvedExecutable, ...built].join(' '),
+        });
+        return built;
       });
 
       runAhkScript({
@@ -283,11 +310,6 @@ const createSageActions = (deps) => {
         });
       }
 
-      const orderPath = writeTempOrder(order);
-      if (!orderPath) {
-        return resolve({ ok: false, error: 'Failed to write temp order file', code: 'temp-write-failed' });
-      }
-
       const ahkExecutable = getAhkExePath();
       const resolvedExecutable = ahkExecutable ? path.resolve(ahkExecutable) : '';
       const ahkExists = Boolean(ahkExecutable) && fs.existsSync(ahkExecutable);
@@ -306,21 +328,25 @@ const createSageActions = (deps) => {
       }
 
       const ref = order?.sage_reference_synced || order?.sage_reference || order?.reference || "";
-      const args = [
-        SAGE_RECONCILE_SCRIPT,
-        orderPath,
-        ref,
-        typeof delta === 'number' && Number.isFinite(delta) ? delta.toFixed(2) : "",
-      ];
-
-      console.log('[sage-reconcile] preparing to spawn AHK', {
-        timestamp: new Date().toISOString(),
-        tempOrderPath: orderPath,
-        ahkScriptPath: path.resolve(SAGE_RECONCILE_SCRIPT),
-        ahkExecutable,
-        resolvedAhkExecutable: resolvedExecutable,
-        spawnArgs: args,
-        spawnCommand: [resolvedExecutable, ...args].join(' '),
+      let orderPath = "";
+      const args = argsWithTempOrder(order, (tempPath) => {
+        orderPath = tempPath;
+        const built = [
+          SAGE_RECONCILE_SCRIPT,
+          tempPath,
+          ref,
+          typeof delta === 'number' && Number.isFinite(delta) ? delta.toFixed(2) : "",
+        ];
+        console.log('[sage-reconcile] spawning AHK', {
+          timestamp: new Date().toISOString(),
+          tempOrderPath: tempPath,
+          ahkScriptPath: path.resolve(SAGE_RECONCILE_SCRIPT),
+          ahkExecutable,
+          resolvedAhkExecutable: resolvedExecutable,
+          spawnArgs: built,
+          spawnCommand: [resolvedExecutable, ...built].join(' '),
+        });
+        return built;
       });
 
       runAhkScript({
@@ -359,15 +385,17 @@ const createSageActions = (deps) => {
         console.error('[sage-invoice] AHK script not found', { path: SAGE_INVOICE_SCRIPT });
         return resolve({ ok: false, error: 'ahk-script-missing' });
       }
-      const orderPath = writeTempOrder(order);
-      if (!orderPath) return resolve({ ok: false, error: 'temp-write-failed' });
       const ahkExecutable = getAhkExePath();
       const resolvedExecutable = ahkExecutable ? path.resolve(ahkExecutable) : '';
       const ahkExists = Boolean(ahkExecutable) && fs.existsSync(ahkExecutable);
       if (!ahkExecutable || !ahkExists) {
         return resolve({ ok: false, error: 'ahk-exe-missing' });
       }
-      const args = [SAGE_INVOICE_SCRIPT, orderPath, order?.sage_reference || order?.reference || ""];
+      let orderPath = "";
+      const args = argsWithTempOrder(order, (tempPath) => {
+        orderPath = tempPath;
+        return [SAGE_INVOICE_SCRIPT, tempPath, order?.sage_reference || order?.reference || ""];
+      });
       runAhkScript({
         scriptPath: resolvedExecutable,
         args,
@@ -450,26 +478,32 @@ const createSageActions = (deps) => {
         return `${r()}${r()}${r()}-${intPart}x${decPart}${r()}${r()}${r()}`;
       })();
 
-      let tempPath;
-      try {
-        tempPath = path.join(app.getPath('temp'), 'cap_order_sales_items.json');
-        const payload = { notes: notes || '', grandTotal, paymentType: paymentType || '', items: itemsForAhk };
-        fs.writeFileSync(tempPath, JSON.stringify(payload, null, 2), 'utf-8');
-      } catch (e) {
-        console.error('[sage-sales] failed to write temp items file', e);
-        return resolve({ ok: false, code: 'temp-write-failed', error: e.message });
-      }
-
-      const args = [SAGE_SALES_SCRIPT, tempPath, customerCode || ''];
-
-      console.log('[sage-sales] preparing to spawn AHK', {
-        timestamp: new Date().toISOString(),
-        itemCount: itemsForAhk.length,
-        customerCode,
-        tempPath,
-        scriptPath: SAGE_SALES_SCRIPT,
-        ahkExecutable,
-      });
+      // Unique per run, and written inside the AHK queue (see runAhkScript): a
+      // shared name let a sale queued behind another overwrite its items before
+      // that script read them, and the earlier run's cleanup could delete the
+      // later run's file.
+      const tempPath = path.join(
+        app.getPath('temp'),
+        `cap_order_sales_items_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.json`
+      );
+      const args = () => {
+        try {
+          const payload = { notes: notes || '', grandTotal, paymentType: paymentType || '', items: itemsForAhk };
+          fs.writeFileSync(tempPath, JSON.stringify(payload, null, 2), 'utf-8');
+        } catch (e) {
+          console.error('[sage-sales] failed to write temp items file', e);
+          return null;
+        }
+        console.log('[sage-sales] spawning AHK', {
+          timestamp: new Date().toISOString(),
+          itemCount: itemsForAhk.length,
+          customerCode,
+          tempPath,
+          scriptPath: SAGE_SALES_SCRIPT,
+          ahkExecutable,
+        });
+        return [SAGE_SALES_SCRIPT, tempPath, customerCode || ''];
+      };
 
       runAhkScript({
         scriptPath: resolvedExecutable,
