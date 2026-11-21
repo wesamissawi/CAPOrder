@@ -432,11 +432,17 @@ const createVendorOrdersService = (deps) => {
       const gmailDataDir = getGmailAssetsDir();
       ensureDir(gmailDataDir);
       const reference = typeof payload?.reference === 'string' ? payload.reference : '';
+      // Orders still waiting on an invoice, looked up by conf number so an email
+      // older than the newest-25 sweep is still found (see worldInvoice.js).
+      const references = Array.isArray(payload?.references)
+        ? payload.references.filter((r) => typeof r === 'string').slice(0, 60)
+        : [];
       return await fetchWorldInvoicesScraper({
         credentials: { clientId, clientSecret, refreshToken },
         sender: worldSender,
         subjectPattern: worldSubject,
         reference,
+        references,
         dataDir: gmailDataDir,
         cachePath: getWorldInvoiceCachePath(),
       });

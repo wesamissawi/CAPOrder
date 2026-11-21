@@ -5130,7 +5130,21 @@ export default function App() {
       setWorldFetching(true);
       setWorldError("");
       setWorldStatus("");
-      const res = await api.fetchWorldInvoices({ reference });
+      // Every World order still without an invoice is looked up by its conf
+      // number, not just whatever the newest-emails sweep happens to reach.
+      const references = (ordersRef.current || [])
+        .filter(
+          (o) =>
+            o?.source === "world" &&
+            o.reference &&
+            !(o.source_invoice || "").toString().trim() &&
+            !o.isCredit
+        )
+        .map((o) => String(o.reference).trim());
+      const res = await api.fetchWorldInvoices({
+        reference: typeof reference === "string" ? reference : "",
+        references,
+      });
       if (!res?.ok) throw new Error(res?.error || "Failed to fetch World invoices.");
       const logMsg = gmailStatusLine("world", res);
 

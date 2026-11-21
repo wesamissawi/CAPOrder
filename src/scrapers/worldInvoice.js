@@ -50,6 +50,7 @@ async function fetchWorldInvoices(options = {}) {
     sender,
     subjectPattern,
     reference, // the order that triggered this run (for matchedRow); optional
+    references, // conf numbers of orders still waiting on an invoice; searched by name
     dataDir,
     cachePath,
     maxResults = 25,
@@ -66,6 +67,36 @@ async function fetchWorldInvoices(options = {}) {
 
     statusLog.push("Searching Gmail for World invoice emails…");
     const messages = await searchInvoiceEmails(gmail, { sender, subjectPattern, maxResults });
+
+    // The sweep above only sees the newest `maxResults` emails — World bills
+    // several times a day, so that is two or three days. An order still waiting
+    // on an older invoice (PL2755's came 11 days before its order was scraped)
+    // would never be reached, and the per-order button used to run the very
+    // same sweep. So also ask Gmail for the waiting orders' conf numbers by
+    // name: the subject carries it ("... EPN conf PL2755"). Only conf-shaped
+    // refs (two letters + digits) go into the query.
+    const wanted = [...new Set([reference, ...(Array.isArray(references) ? references : [])]
+      .map((r) => normalizeKey(r))
+      .filter((r) => /^[A-Z]{2}\d{3,6}$/.test(r)))];
+    if (wanted.length) {
+      const seen = new Set(messages.map((m) => m.id));
+      let added = 0;
+      for (let i = 0; i < wanted.length; i += 15) {
+        const chunk = wanted.slice(i, i + 15);
+        const hits = await searchInvoiceEmails(gmail, {
+          sender,
+          subjectPattern: chunk.join(" OR "),
+          maxResults: chunk.length * 3,
+        });
+        for (const m of hits) {
+          if (seen.has(m.id)) continue;
+          seen.add(m.id);
+          messages.push(m);
+          added += 1;
+        }
+      }
+      statusLog.push(`Looked up ${wanted.length} waiting order(s) by conf number; ${added} older email(s) found.`);
+    }
     statusLog.push(`Found ${messages.length} candidate email(s).`);
 
     const cache = loadInvoiceCache(cachePath);
