@@ -41,7 +41,11 @@ const RULES_FILENAME = 'capRules.json';
 const LOCAL_RULES_PATH = path.join(__dirname, RULES_FILENAME);
 
 // --- interchange JSON loading -------------------------------------------------
+// fileName -> { data, at }. Entries expire so a mapping added from the Rules
+// view on ANOTHER machine (which only clears its own cache) reaches this one
+// within a minute instead of waiting for an app restart.
 const _interchangeCache = new Map();
+const INTERCHANGE_CACHE_MS = 60 * 1000;
 
 function interchangeCandidatePaths(fileName) {
   return [
@@ -51,7 +55,8 @@ function interchangeCandidatePaths(fileName) {
 }
 
 function loadInterchange(fileName) {
-  if (_interchangeCache.has(fileName)) return _interchangeCache.get(fileName);
+  const hit = _interchangeCache.get(fileName);
+  if (hit && Date.now() - hit.at < INTERCHANGE_CACHE_MS) return hit.data;
   let data = {};
   for (const p of interchangeCandidatePaths(fileName)) {
     try {
@@ -66,7 +71,7 @@ function loadInterchange(fileName) {
       // Mirror AHK: a failed/missing file just yields no interchange match.
     }
   }
-  _interchangeCache.set(fileName, data);
+  _interchangeCache.set(fileName, { data, at: Date.now() });
   return data;
 }
 

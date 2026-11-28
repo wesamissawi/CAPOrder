@@ -81,7 +81,292 @@ function tokenFromKind(kind) {
 }
 
 // =============================================================================
+// The Rotor Interchange (trsToASRotors.json) is what actually gets used day to
+// day, so it is the first thing the Rules view shows. The rule editor, tester
+// and other interchange tables still exist, just behind "Everything else" —
+// they may be removed altogether later.
+const ROTOR_FILE = "trsToASRotors.json";
+
 export default function RulesView({ currentViewMeta }) {
+  const [section, setSection] = useState("rotors");
+  return (
+    <section className="space-y-4">
+      <div className="flex gap-2">
+        {[["rotors", "Rotor Interchange"], ["advanced", "Everything else"]].map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setSection(id)}
+            className={`px-4 py-2 rounded-xl text-sm font-semibold ${
+              section === id ? "bg-indigo-600 text-white" : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {section === "rotors" ? <RotorInterchange /> : <AdvancedRules currentViewMeta={currentViewMeta} />}
+    </section>
+  );
+}
+
+// ---- Rotor Interchange: look up + add TRS → ASR rotor numbers ----------------
+// Every change re-reads the file from the share first and only then writes, so
+// adding one rotor can never wipe out one another machine added a moment ago.
+// Keys are stored upper-case: the resolver's lookup is an exact match, and every
+// existing key is upper-case. Every existing value is "ASR <number>", so the
+// prefix is added when it's typed without one.
+const normRotorKey = (v) => String(v || "").trim().toUpperCase();
+function normRotorValue(v) {
+  const s = String(v || "").trim().toUpperCase().replace(/\s+/g, " ");
+  if (!s) return "";
+  return s.startsWith("ASR ") ? s : `ASR ${s.replace(/^ASR/, "").trim()}`;
+}
+
+function RotorInterchange() {
+  const [table, setTable] = useState(null); // { [trs]: "ASR xxx" }
+  const [path, setPath] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState("");
+  const [newKey, setNewKey] = useState("");
+  const [newValue, setNewValue] = useState("");
+  const [editing, setEditing] = useState(null); // { key, value } being edited
+  const [flashKey, setFlashKey] = useState("");
+
+  const readFresh = useCallback(async () => {
+    const res = await api.getInterchange(ROTOR_FILE);
+    if (!res?.ok) throw new Error(res?.error || "Couldn't read the rotor list.");
+    setPath(res.path || "");
+    return { ...(res.table || {}) };
+  }, []);
+
+  const load = useCallback(async () => {
+    setError("");
+    try {
+      setTable(await readFresh());
+    } catch (e) {
+      setError(e?.message || "Couldn't read the rotor list.");
+    }
+  }, [readFresh]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // Read the latest copy, apply one change, write it back.
+  async function applyChange(change, successMsg) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const fresh = await readFresh();
+      change(fresh);
+      const res = await api.saveInterchange(ROTOR_FILE, fresh);
+      if (!res?.ok) throw new Error(res?.error || "Save failed.");
+      setTable(fresh);
+      setNotice(successMsg);
+      return true;
+    } catch (e) {
+      setError(e?.message || "Save failed.");
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleAdd(e) {
+    e?.preventDefault?.();
+    const key = normRotorKey(newKey);
+    const value = normRotorValue(newValue);
+    if (!key || !value) {
+      setError("Fill in both the TRS part # and the ASR #.");
+      return;
+    }
+    const existing = (table || {})[key];
+    if (existing === value) {
+      setNotice(`${key} is already in the list as ${value}.`);
+      setQuery(key);
+      return;
+    }
+    if (existing && !(await api.confirm(`${key} is already in the list as ${existing}.\n\nReplace it with ${value}?`))) return;
+    const ok = await applyChange((t) => {
+      t[key] = value;
+    }, existing ? `Updated ${key} → ${value}.` : `Added ${key} → ${value}.`);
+    if (ok) {
+      setNewKey("");
+      setNewValue("");
+      setQuery(key);
+      setFlashKey(key);
+    }
+  }
+
+  async function handleSaveEdit() {
+    if (!editing) return;
+    const value = normRotorValue(editing.value);
+    if (!value) {
+      setError("The ASR # can't be blank. Use Delete to remove a row.");
+      return;
+    }
+    const ok = await applyChange((t) => {
+      t[editing.key] = value;
+    }, `Updated ${editing.key} → ${value}.`);
+    if (ok) {
+      setFlashKey(editing.key);
+      setEditing(null);
+    }
+  }
+
+  async function handleDelete(key) {
+    const value = (table || {})[key];
+    if (!(await api.confirm(`Delete ${key} → ${value} from the rotor list?`))) return;
+    await applyChange((t) => {
+      delete t[key];
+    }, `Deleted ${key}.`);
+  }
+
+  const rows = useMemo(() => {
+    const all = Object.entries(table || {}).map(([key, value]) => ({ key, value: String(value ?? "") }));
+    const q = query.trim().toUpperCase();
+    const list = q
+      ? all.filter((r) => r.key.toUpperCase().includes(q) || r.value.toUpperCase().includes(q))
+      : all;
+    // Exact matches first, then alphabetical.
+    return list.sort((a, b) => {
+      const ea = q && (a.key.toUpperCase() === q || a.value.toUpperCase() === q || a.value.toUpperCase() === `ASR ${q}`);
+      const eb = q && (b.key.toUpperCase() === q || b.value.toUpperCase() === q || b.value.toUpperCase() === `ASR ${q}`);
+      if (ea !== eb) return ea ? -1 : 1;
+      return a.key.localeCompare(b.key, undefined, { numeric: true });
+    });
+  }, [table, query]);
+
+  const total = Object.keys(table || {}).length;
+
+  return (
+    <>
+      <Card>
+        <p className="text-xl font-semibold text-slate-700">Rotor Interchange</p>
+        <p className="text-sm text-slate-500">
+          TRS part # → ASR rotor #. Used for PROFUSION brake discs and Proforce rotors.
+        </p>
+
+        <input
+          autoFocus
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Look up a TRS # or ASR #…"
+          className="mt-4 w-full border-2 border-indigo-200 focus:border-indigo-500 outline-none rounded-2xl px-4 py-3 text-lg bg-white"
+        />
+
+        <form onSubmit={handleAdd} className="mt-4 flex flex-wrap items-end gap-2">
+          <label className="flex flex-col gap-1 text-xs text-slate-600">
+            TRS part #
+            <input
+              value={newKey}
+              onChange={(e) => setNewKey(e.target.value)}
+              placeholder="e.g. 3258"
+              className="border rounded-xl px-3 py-2 text-sm bg-white w-44 font-mono"
+            />
+          </label>
+          <span className="pb-2 text-slate-400">→</span>
+          <label className="flex flex-col gap-1 text-xs text-slate-600">
+            ASR #
+            <input
+              value={newValue}
+              onChange={(e) => setNewValue(e.target.value)}
+              placeholder="e.g. HO524"
+              className="border rounded-xl px-3 py-2 text-sm bg-white w-44 font-mono"
+            />
+          </label>
+          <button
+            type="submit"
+            disabled={busy || !newKey.trim() || !newValue.trim()}
+            className="px-4 py-2 rounded-xl text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40"
+          >
+            {busy ? "Saving…" : "+ Add"}
+          </button>
+          <span className="pb-2 text-xs text-slate-400">"ASR " is added for you. Saves right away.</span>
+        </form>
+
+        {error && <div className="mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">{error}</div>}
+        {notice && <div className="mt-3 rounded-xl bg-emerald-50 border border-emerald-200 px-3 py-2 text-sm text-emerald-700">{notice}</div>}
+      </Card>
+
+      <Card>
+        <div className="flex items-center justify-between mb-2 text-xs text-slate-400">
+          <span>
+            {query.trim() ? `${rows.length} of ${total} match` : `${total} rotors`}
+          </span>
+          {path && <code className="break-all">{path}</code>}
+        </div>
+        {table === null ? (
+          <div className="text-sm text-slate-500">{error ? "" : "Loading…"}</div>
+        ) : (
+          <div className="max-h-[36rem] overflow-y-auto rounded-xl border border-slate-100">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-slate-50 text-xs text-slate-500">
+                <tr>
+                  <th className="text-left font-medium px-3 py-2 w-2/5">TRS part #</th>
+                  <th className="text-left font-medium px-3 py-2 w-2/5">ASR #</th>
+                  <th className="px-3 py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => {
+                  const isEditing = editing?.key === r.key;
+                  return (
+                    <tr key={r.key} className={`border-t border-slate-100 ${flashKey === r.key ? "bg-emerald-50" : ""}`}>
+                      <td className="px-3 py-1.5 font-mono font-semibold text-slate-700">{r.key}</td>
+                      <td className="px-3 py-1.5 font-mono text-indigo-700">
+                        {isEditing ? (
+                          <input
+                            autoFocus
+                            value={editing.value}
+                            onChange={(e) => setEditing({ ...editing, value: e.target.value })}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") handleSaveEdit();
+                              if (e.key === "Escape") setEditing(null);
+                            }}
+                            className="w-full border rounded-lg px-2 py-1 text-sm bg-white font-mono"
+                          />
+                        ) : (
+                          r.value
+                        )}
+                      </td>
+                      <td className="px-3 py-1.5 text-right whitespace-nowrap text-xs">
+                        {isEditing ? (
+                          <>
+                            <button onClick={handleSaveEdit} disabled={busy} className="text-emerald-700 font-semibold hover:underline mr-3">Save</button>
+                            <button onClick={() => setEditing(null)} className="text-slate-500 hover:underline">Cancel</button>
+                          </>
+                        ) : (
+                          <>
+                            <button onClick={() => setEditing({ key: r.key, value: r.value })} disabled={busy} className="text-indigo-600 hover:underline mr-3">Edit</button>
+                            <button onClick={() => handleDelete(r.key)} disabled={busy} className="text-slate-400 hover:text-red-600">Delete</button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {rows.length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="px-3 py-6 text-center text-sm text-slate-400">
+                      {query.trim() ? `Nothing matches “${query.trim()}”. Add it above.` : "The list is empty."}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </>
+  );
+}
+
+// ---- Everything else: the original rule editor ------------------------------
+function AdvancedRules({ currentViewMeta }) {
   const [rules, setRules] = useState(null);
   const [meta, setMeta] = useState({ isDefault: true, source: "builtin", path: "", interchangeFiles: [] });
   const [dirty, setDirty] = useState(false);
@@ -263,7 +548,9 @@ export default function RulesView({ currentViewMeta }) {
           </Card>
         </>
       ) : (
-        <InterchangeEditor files={meta.interchangeFiles} />
+        // The rotor table has its own tab; leaving it here too would give it a
+        // second editor that saves a whole stale copy over new additions.
+        <InterchangeEditor files={meta.interchangeFiles.filter((f) => f !== ROTOR_FILE)} />
       )}
     </section>
   );
