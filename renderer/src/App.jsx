@@ -7198,30 +7198,20 @@ export default function App() {
         return db - da;
       });
 
-    // On the unfiltered "all" view, bucket into sections by arrival progress
-    // (see orderPickupSection in OrderManagementView.jsx) so the most urgent
-    // orders — nothing done yet — surface at the top, each bucket still
-    // newest-first internally. BestBuy orders still waiting on their emailed
-    // invoice are pulled out of the pickup-status buckets entirely and shown
-    // in their own bucket at the very bottom. Any other pickup filter keeps a
-    // single flat sort, since the buckets would collapse to one group anyway.
-    // Bucketing reads the pinned view too, so a card clicked to "Arrived" holds
-    // its place (and its section header) until the next Refresh.
+    // On the unfiltered "all" view: one newest-first list, with only BestBuy
+    // orders still waiting on their emailed invoice pulled into their own
+    // bucket at the very bottom. Picked Up / Arrived deliberately play NO part
+    // in ordering here — the user found cards jumping between "Not Picked Up /
+    // Not Arrived / Arrived" sections on save more trouble than it was worth,
+    // so ticking those boxes must never move a card. Any other pickup filter
+    // keeps a single flat sort.
     let sorted;
     let sections;
     if (ordersPickupFilter === "all") {
-      const bucketOf = (order) => {
-        if (isWaitingOnInvoice(order)) return "waiting-invoice";
-        const view = pinnedOrderView(order, pinnedPickup);
-        if (!view.pickedUp) return "not-picked";
-        if (!view.inStore) return "not-arrived";
-        return "rest";
-      };
+      const bucketOf = (order) => (isWaitingOnInvoice(order) ? "waiting-invoice" : "main");
       const inBucket = (name) => (todayFiltered || []).filter((o) => bucketOf(o) === name);
       sorted = [
-        ...byDateDesc(inBucket("not-picked")),
-        ...byDateDesc(inBucket("not-arrived")),
-        ...byDateDesc(inBucket("rest")),
+        ...byDateDesc(inBucket("main")),
         ...byDateDesc(inBucket("waiting-invoice")),
       ];
       sections = sorted.map(bucketOf);
@@ -7257,8 +7247,11 @@ export default function App() {
   // pickup state no longer matches the position they're sitting in. Drives the
   // "Re-sort list" pill; 0 means the pin is held but nothing has actually moved
   // yet, so there is nothing to tidy and the pill stays hidden.
+  // Only filters that look at Picked Up / Arrived can have a card held out of
+  // place; on "all" (and every other filter) ticking those boxes moves nothing.
   const pinnedOutOfPlaceCount = useMemo(() => {
     if (!pinnedPickup) return 0;
+    if (!["not-picked", "not-arrived", "needs-archive"].includes(ordersPickupFilter)) return 0;
     return (orders || []).reduce((n, o) => {
       const pin = pinnedPickup.get(orderPinKey(o));
       if (!pin) return n;
@@ -7266,7 +7259,7 @@ export default function App() {
         Boolean(o?.pickedUp) !== pin.pickedUp || Boolean(o?.inStore) !== pin.inStore;
       return moved ? n + 1 : n;
     }, 0);
-  }, [orders, pinnedPickup]);
+  }, [orders, pinnedPickup, ordersPickupFilter]);
 
   const hasSearch = ordersSearch.trim().length > 0;
 

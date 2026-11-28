@@ -43,23 +43,17 @@ function isWaitingOnInvoice(order) {
   );
 }
 
-// Only meaningful in the unfiltered "all" view — buckets orders by how far
-// along the arrival workflow they are so the most urgent ones (nothing done
-// yet) surface at the top, with BestBuy orders waiting on their emailed
-// invoice pulled out into their own bucket at the bottom. Checking "Arrived"
-// always force-sets "Picked Up" too (see handleOrderCheckboxChange in
-// App.jsx), so these four buckets are mutually exclusive and exhaustive.
+// Only meaningful in the unfiltered "all" view: one main newest-first list,
+// with BestBuy orders waiting on their emailed invoice in their own bucket at
+// the bottom. Picked Up / Arrived intentionally do NOT split the list (they
+// used to, and cards jumping sections on save caused more trouble than help).
 function orderPickupSection(order) {
-  if (isWaitingOnInvoice(order)) return "waiting-invoice";
-  if (!order?.pickedUp) return "not-picked";
-  if (!order?.inStore) return "not-arrived";
-  return "rest";
+  return isWaitingOnInvoice(order) ? "waiting-invoice" : "main";
 }
 
+// "main" has no header: it's just the list. Only the bottom bucket is labelled.
 const PICKUP_SECTION_LABELS = {
-  "not-picked": "Not Picked Up",
-  "not-arrived": "Picked Up, Not Arrived",
-  rest: "Arrived",
+  main: null,
   "waiting-invoice": "Waiting on Invoice",
 };
 
@@ -676,7 +670,7 @@ export default function OrderManagementView({
                   className="text-xs px-3 py-1 rounded-full bg-sky-50 text-sky-700 border border-sky-200 hover:bg-sky-100 font-semibold"
                   title={`${pinnedOutOfPlaceCount} card${
                     pinnedOutOfPlaceCount === 1 ? " is" : "s are"
-                  } being held in place so they don't move while you work. Click to re-sort them into their sections.`}
+                  } being held in this filter so they don't vanish while you work. Click to refresh the filter.`}
                 >
                   Re-sort list ({pinnedOutOfPlaceCount})
                 </button>
@@ -897,7 +891,9 @@ export default function OrderManagementView({
                 filteredOrderSections?.[i] ?? orderPickupSection(filteredOrders[i]);
               const section = sectionOf(idx);
               const showSectionHeader =
-                ordersPickupFilter === "all" && (idx === 0 || sectionOf(idx - 1) !== section);
+                ordersPickupFilter === "all" &&
+                Boolean(PICKUP_SECTION_LABELS[section]) &&
+                (idx === 0 || sectionOf(idx - 1) !== section);
               return (
                 <React.Fragment key={key}>
                   {showSectionHeader && (
